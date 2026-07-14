@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+sqlalchemy>=2.0
+psycopg2-binary
+lxml
+pytest
+python-multipart
