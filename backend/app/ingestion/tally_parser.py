@@ -22,8 +22,8 @@ def parse_tally_amount(amount_str: str) -> Decimal:
     Parses Tally amount string into Decimal.
     Handles Dr/Cr suffixes and sign conventions.
     In Tally ledger balances:
-    - Negative values or 'Dr' suffix usually indicate Debit.
-    - Positive values or 'Cr' suffix usually indicate Credit.
+    - Positive values or 'Dr' suffix indicate Debit (positive).
+    - Negative values or 'Cr' suffix indicate Credit (negative).
     We normalize this to: Positive for Debit, Negative for Credit.
     """
     if not amount_str:
@@ -31,26 +31,26 @@ def parse_tally_amount(amount_str: str) -> Decimal:
     
     clean_str = amount_str.strip()
     is_debit = False
+    has_suffix = False
     
     if clean_str.upper().endswith("DR"):
         is_debit = True
+        has_suffix = True
         clean_str = clean_str[:-2].strip()
     elif clean_str.upper().endswith("CR"):
         is_debit = False
+        has_suffix = True
         clean_str = clean_str[:-2].strip()
     
     try:
         val = Decimal(clean_str)
-        # If no suffix was present, check sign: Tally uses negative for Debit, positive for Credit
-        if not is_debit and not amount_str.upper().endswith("CR"):
-            if val < 0:
-                is_debit = True
-                val = abs(val)
-            else:
-                is_debit = False
-        
-        # Convert to our convention: Positive for Debit, Negative for Credit
-        return val if is_debit else -val
+        if not has_suffix:
+            # No suffix: positive is Debit, negative is Credit
+            return val
+        else:
+            # Suffix present: force sign based on suffix
+            abs_val = abs(val)
+            return abs_val if is_debit else -abs_val
     except Exception as e:
         raise ValueError(f"Invalid Tally amount format '{amount_str}': {e}")
 

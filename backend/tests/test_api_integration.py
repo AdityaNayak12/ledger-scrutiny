@@ -119,7 +119,7 @@ def test_api_scrutiny_with_violations():
             <TALLYMESSAGE>
               <LEDGER NAME="Cash-in-hand">
                 <PARENT>Cash-in-hand</PARENT>
-                <OPENINGBALANCE>-10000.00</OPENINGBALANCE>
+                <OPENINGBALANCE>10000.00</OPENINGBALANCE>
               </LEDGER>
             </TALLYMESSAGE>
             <TALLYMESSAGE>

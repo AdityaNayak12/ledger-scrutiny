@@ -1,0 +1,180 @@
+<ENVELOPE>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>All Ledger Entries</REPORTNAME>
+      </REQUESTDESC>
+      <REQUESTDATA>
+        <COMPANY>
+          <RENAME>Test Fixture Corp</RENAME>
+          <BOOKSFROM>20250401</BOOKSFROM>
+          <BOOKSTO>20260331</BOOKSTO>
+        </COMPANY>
+        <!-- Ledger Accounts -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Share Capital">
+            <PARENT>Capital Account</PARENT>
+            <OPENINGBALANCE>-100000.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="Furniture and Fixtures">
+            <PARENT>Fixed Assets</PARENT>
+            <OPENINGBALANCE>50000.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="HDFC Bank Current Account">
+            <PARENT>Bank Accounts</PARENT>
+            <OPENINGBALANCE>85000.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="Sales Account">
+            <PARENT>Sales Accounts</PARENT>
+            <OPENINGBALANCE>0.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="Purchase Account">
+            <PARENT>Purchase Accounts</PARENT>
+            <OPENINGBALANCE>0.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="Office Rent">
+            <PARENT>Indirect Expenses</PARENT>
+            <OPENINGBALANCE>0.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="Rahul Enterprises">
+            <PARENT>Sundry Creditors</PARENT>
+            <OPENINGBALANCE>-20000.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="Verma Traders">
+            <PARENT>Sundry Debtors</PARENT>
+            <OPENINGBALANCE>10000.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="Petty Cash Variance">
+            <PARENT>Cash-in-hand</PARENT>
+            <OPENINGBALANCE>100.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- Voucher Transactions -->
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="Sales">
+            <DATE>20250410</DATE>
+            <VOUCHERNUMBER>VCH-0001</VOUCHERNUMBER>
+            <NARRATION>Service Sales</NARRATION>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Verma Traders</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-30000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Sales Account</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>30000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="Purchase">
+            <DATE>20250512</DATE>
+            <VOUCHERNUMBER>VCH-0002</VOUCHERNUMBER>
+            <NARRATION>Material purchase</NARRATION>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Purchase Account</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-25000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>25000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="Payment">
+            <DATE>20250615</DATE>
+            <VOUCHERNUMBER>VCH-0003</VOUCHERNUMBER>
+            <NARRATION>Office Rent paid</NARRATION>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Office Rent</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-12000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>12000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="Payment">
+            <DATE>20250720</DATE>
+            <VOUCHERNUMBER>VCH-0004</VOUCHERNUMBER>
+            <NARRATION>Payment to supplier with excess payout</NARRATION>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Rahul Enterprises</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-32000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>32000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="Receipt">
+            <DATE>20250825</DATE>
+            <VOUCHERNUMBER>VCH-0005</VOUCHERNUMBER>
+            <NARRATION>Excess deposit from customer</NARRATION>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-48000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Verma Traders</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>48000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="Payment">
+            <DATE>20250930</DATE>
+            <VOUCHERNUMBER>VCH-0006</VOUCHERNUMBER>
+            <NARRATION>Petty cash spent</NARRATION>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-220.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Petty Cash Variance</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>220.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>

@@ -21,4 +21,6 @@ htmlcov/
 *.njsproj
 *.sln
 *.swp
+*.db
+
 
