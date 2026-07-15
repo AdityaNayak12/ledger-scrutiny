@@ -1,7 +1,7 @@
 from decimal import Decimal
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, delete
 
 from app.db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot
 from app.rules.account_groups import get_normal_balance
@@ -48,7 +48,8 @@ def decompose_entries(debits: List[Dict[str, Any]], credits: List[Dict[str, Any]
 def normalize_tally_data(
     parsed_data: Dict[str, Any], 
     session: Session, 
-    materiality_threshold: Decimal = Decimal("0.00")
+    materiality_threshold: Decimal = Decimal("0.00"),
+    entity_id: Optional[int] = None
 ) -> Entity:
     """
     Normalizes parsed Tally XML data and writes it to the database.
@@ -57,6 +58,7 @@ def normalize_tally_data(
         parsed_data: Output dictionary from tally_parser.parse_tally_xml.
         session: SQLAlchemy DB session.
         materiality_threshold: Materiality threshold for the entity.
+        entity_id: Target entity ID to upload data for.
         
     Returns:
         The created/retrieved Entity model object.
@@ -67,28 +69,39 @@ def normalize_tally_data(
     fy_start = ent_data["financial_year_start"]
     fy_end = ent_data["financial_year_end"]
     
-    # Check if entity already exists in DB
-    entity = session.execute(
-        select(Entity).where(
-            Entity.name == entity_name,
-            Entity.financial_year_start == fy_start,
-            Entity.financial_year_end == fy_end
-        )
-    ).scalar_one_or_none()
-    
-    if not entity:
-        entity = Entity(
-            name=entity_name,
-            financial_year_start=fy_start,
-            financial_year_end=fy_end,
-            materiality_threshold=materiality_threshold
-        )
-        session.add(entity)
-        session.flush() # Populate entity.id
-    else:
-        # Update materiality threshold if provided
-        entity.materiality_threshold = materiality_threshold
+    if entity_id:
+        entity = session.execute(select(Entity).where(Entity.id == entity_id)).scalar_one_or_none()
+        if not entity:
+            raise ValueError(f"Entity with ID {entity_id} not found.")
+        
+        # Clear existing data for this entity to allow fresh upload overwrite
+        session.execute(delete(TrialBalanceSnapshot).where(TrialBalanceSnapshot.entity_id == entity.id))
+        session.execute(delete(Transaction).where(Transaction.entity_id == entity.id))
+        session.execute(delete(LedgerAccount).where(LedgerAccount.entity_id == entity.id))
         session.flush()
+    else:
+        # Check if entity already exists in DB by name and year
+        entity = session.execute(
+            select(Entity).where(
+                Entity.name == entity_name,
+                Entity.financial_year_start == fy_start,
+                Entity.financial_year_end == fy_end
+            )
+        ).scalar_one_or_none()
+        
+        if not entity:
+            entity = Entity(
+                name=entity_name,
+                financial_year_start=fy_start,
+                financial_year_end=fy_end,
+                materiality_threshold=materiality_threshold
+            )
+            session.add(entity)
+            session.flush() # Populate entity.id
+        else:
+            # Update materiality threshold if provided
+            entity.materiality_threshold = materiality_threshold
+            session.flush()
         
     # 2. Handle Ledger Accounts
     # Keep a cache of {ledger_name: ledger_id} for mapping transactions
