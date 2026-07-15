@@ -1,0 +1,196 @@
+import os
+from datetime import date, datetime
+from decimal import Decimal
+from typing import Dict, Any, List
+from lxml import etree
+
+
+def parse_tally_date(date_str: str) -> date:
+    """Parses Tally date string format (YYYYMMDD or YYYY-MM-DD) into date object."""
+    if not date_str:
+        raise ValueError("Empty date string")
+    date_str = date_str.strip()
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+    raise ValueError(f"Unable to parse Tally date: '{date_str}'")
+
+
+def parse_tally_amount(amount_str: str) -> Decimal:
+    """
+    Parses Tally amount string into Decimal.
+    Handles Dr/Cr suffixes and sign conventions.
+    In Tally ledger balances:
+    - Negative values or 'Dr' suffix usually indicate Debit.
+    - Positive values or 'Cr' suffix usually indicate Credit.
+    We normalize this to: Positive for Debit, Negative for Credit.
+    """
+    if not amount_str:
+        return Decimal("0.00")
+    
+    clean_str = amount_str.strip()
+    is_debit = False
+    
+    if clean_str.upper().endswith("DR"):
+        is_debit = True
+        clean_str = clean_str[:-2].strip()
+    elif clean_str.upper().endswith("CR"):
+        is_debit = False
+        clean_str = clean_str[:-2].strip()
+    
+    try:
+        val = Decimal(clean_str)
+        # If no suffix was present, check sign: Tally uses negative for Debit, positive for Credit
+        if not is_debit and not amount_str.upper().endswith("CR"):
+            if val < 0:
+                is_debit = True
+                val = abs(val)
+            else:
+                is_debit = False
+        
+        # Convert to our convention: Positive for Debit, Negative for Credit
+        return val if is_debit else -val
+    except Exception as e:
+        raise ValueError(f"Invalid Tally amount format '{amount_str}': {e}")
+
+
+def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
+    """
+    Parses Tally XML export and extracts structured entity, ledger, and transaction data.
+    
+    Returns a dictionary of the shape:
+    {
+        "entity": {
+            "name": str,
+            "financial_year_start": date,
+            "financial_year_end": date
+        },
+        "ledgers": [
+            {"name": str, "group_name": str, "opening_balance": Decimal},
+            ...
+        ],
+        "vouchers": [
+            {
+                "date": date,
+                "voucher_type": str,
+                "source_voucher_id": str,
+                "narration": str,
+                "entries": [
+                    {"ledger_name": str, "type": str, "amount": Decimal}, # type is 'debit' or 'credit'
+                    ...
+                ]
+            },
+            ...
+        ]
+    }
+    """
+    parser = etree.XMLParser(recover=True, remove_blank_text=True)
+    root = etree.fromstring(xml_content, parser=parser)
+    
+    # 1. Parse Company Details
+    company_node = root.find(".//COMPANY")
+    entity_name = "Unknown Entity"
+    fy_start = date(2025, 4, 1)
+    fy_end = date(2026, 3, 31)
+    
+    if company_node is not None:
+        rename_node = company_node.find("RENAME")
+        if rename_node is not None and rename_node.text:
+            entity_name = rename_node.text.strip()
+            
+        books_from_node = company_node.find("BOOKSFROM")
+        if books_from_node is not None and books_from_node.text:
+            fy_start = parse_tally_date(books_from_node.text)
+            
+        books_to_node = company_node.find("BOOKSTO")
+        if books_to_node is not None and books_to_node.text:
+            fy_end = parse_tally_date(books_to_node.text)
+            
+    # 2. Parse Ledgers
+    ledgers = []
+    # Tally ledgers are usually defined inside <LEDGER> tags under <TALLYMESSAGE>
+    ledger_nodes = root.findall(".//LEDGER")
+    for ledger in ledger_nodes:
+        name = ledger.get("NAME")
+        if not name:
+            continue
+            
+        parent_node = ledger.find("PARENT")
+        group_name = parent_node.text.strip() if parent_node is not None and parent_node.text else "Suspense Account"
+        
+        op_bal_node = ledger.find("OPENINGBALANCE")
+        op_bal_str = op_bal_node.text if op_bal_node is not None else "0.00"
+        opening_balance = parse_tally_amount(op_bal_str)
+        
+        ledgers.append({
+            "name": name.strip(),
+            "group_name": group_name,
+            "opening_balance": opening_balance
+        })
+        
+    # 3. Parse Vouchers
+    vouchers = []
+    voucher_nodes = root.findall(".//VOUCHER")
+    for vch in voucher_nodes:
+        vch_type = vch.get("VCHTYPE") or "Journal"
+        
+        date_node = vch.find("DATE")
+        if date_node is not None and date_node.text:
+            vch_date = parse_tally_date(date_node.text)
+        else:
+            vch_date = fy_start
+            
+        vch_num_node = vch.find("VOUCHERNUMBER")
+        vch_num = vch_num_node.text.strip() if vch_num_node is not None and vch_num_node.text else None
+        
+        narration_node = vch.find("NARRATION")
+        narration = narration_node.text.strip() if narration_node is not None and narration_node.text else None
+        
+        entries = []
+        # Ledger entries inside voucher
+        entry_nodes = vch.findall("ALLLEDGERENTRIES.LIST")
+        for entry in entry_nodes:
+            ledger_name_node = entry.find("LEDGERNAME")
+            if ledger_name_node is not None and ledger_name_node.text:
+                ledger_name = ledger_name_node.text.strip()
+            else:
+                continue
+                
+            deemed_positive = entry.find("ISDEEMEDPOSITIVE")
+            is_debit = deemed_positive is not None and deemed_positive.text.strip().lower() == "yes"
+            
+            amount_node = entry.find("AMOUNT")
+            amount_str = amount_node.text if amount_node is not None else "0.00"
+            # Voucher entry amounts are absolute values in our schema, but Tally stores them as signed decimals
+            try:
+                raw_amt = Decimal(amount_str.strip())
+                entry_amount = abs(raw_amt)
+            except Exception:
+                entry_amount = Decimal("0.00")
+                
+            entries.append({
+                "ledger_name": ledger_name,
+                "type": "debit" if is_debit else "credit",
+                "amount": entry_amount
+            })
+            
+        if entries:
+            vouchers.append({
+                "date": vch_date,
+                "voucher_type": vch_type,
+                "source_voucher_id": vch_num,
+                "narration": narration,
+                "entries": entries
+            })
+            
+    return {
+        "entity": {
+            "name": entity_name,
+            "financial_year_start": fy_start,
+            "financial_year_end": fy_end
+        },
+        "ledgers": ledgers,
+        "vouchers": vouchers
+    }
