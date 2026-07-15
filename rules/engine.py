@@ -18,10 +18,6 @@ def register_rule(rule_fn: RuleFunc) -> RuleFunc:
     return rule_fn
 
 
-def get_registered_rules() -> List[RuleFunc]:
-    """Returns a list of all registered rule functions."""
-    return list(_RULE_REGISTRY)
-
 
 def clear_registered_rules() -> None:
     """Clears the rule registry (mainly for testing)."""

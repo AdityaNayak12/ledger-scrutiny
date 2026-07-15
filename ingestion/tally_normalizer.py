@@ -122,14 +122,6 @@ def normalize_tally_data(
     # Helper to retrieve ledger ID, raising error if not found in cache (should not happen if all are listed)
     def get_ledger_id(name: str) -> int:
         if name not in ledger_cache:
-            # Create a default account if a voucher references an unlisted ledger
-            # This is common in some exports where master data is incomplete
-            default_acc = LedgerAccount(
-                entity_id=entity.id,
-                name=name,
-                group_name="Suspense Account",
-                normal_balance="debit" # Default or raise error. Let's raise error since rules are deterministic.
-            )
             raise ValueError(f"Voucher references untracked ledger account: '{name}'")
         return ledger_cache[name]
 

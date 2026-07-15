@@ -9,8 +9,7 @@ from rules.engine import (
     check_opening_balance_continuity,
     filter_by_materiality,
     register_rule,
-    clear_registered_rules,
-    get_registered_rules
+    clear_registered_rules
 )
 
 
