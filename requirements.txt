@@ -6,4 +6,6 @@ lxml
 pytest
 python-multipart
 alembic
+httpx
+
 
