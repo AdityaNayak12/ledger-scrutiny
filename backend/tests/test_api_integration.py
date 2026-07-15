@@ -5,9 +5,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-from db.base import Base
-from db.session import get_db
-from main import app
+from app.db.base import Base
+from app.db.session import get_db
+from app.main import app
 
 # Create persistent connection for in-memory SQLite database
 engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})

@@ -1,5 +1,5 @@
 import pytest
-from rules.account_groups import get_normal_balance, UnrecognizedAccountGroupError
+from app.rules.account_groups import get_normal_balance, UnrecognizedAccountGroupError
 
 
 def test_get_normal_balance_valid():

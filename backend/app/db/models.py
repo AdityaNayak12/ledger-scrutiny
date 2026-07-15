@@ -4,7 +4,7 @@ from typing import Optional
 from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from db.base import Base
+from app.db.base import Base
 
 
 class Entity(Base):

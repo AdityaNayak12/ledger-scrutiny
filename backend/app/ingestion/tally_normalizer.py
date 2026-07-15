@@ -3,8 +3,8 @@ from typing import Dict, Any, List
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 
-from db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot
-from rules.account_groups import get_normal_balance
+from app.db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot
+from app.rules.account_groups import get_normal_balance
 
 
 def decompose_entries(debits: List[Dict[str, Any]], credits: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

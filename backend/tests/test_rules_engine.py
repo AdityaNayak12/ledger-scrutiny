@@ -2,8 +2,8 @@ import pytest
 from decimal import Decimal
 from datetime import date
 
-from db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException
-from rules.engine import (
+from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException
+from app.rules.engine import (
     run_scrutiny,
     check_normal_balance,
     check_opening_balance_continuity,

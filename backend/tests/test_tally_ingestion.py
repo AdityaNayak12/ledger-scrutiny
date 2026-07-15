@@ -4,10 +4,10 @@ from datetime import date
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from db.base import Base
-from db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot
-from ingestion.tally_parser import parse_tally_xml
-from ingestion.tally_normalizer import normalize_tally_data
+from app.db.base import Base
+from app.db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot
+from app.ingestion.tally_parser import parse_tally_xml
+from app.ingestion.tally_normalizer import normalize_tally_data
 
 
 def test_tally_ingestion_end_to_end():

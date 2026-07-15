@@ -1,8 +1,8 @@
 from decimal import Decimal
 from typing import List, Callable, Optional
 from datetime import date
-from db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException
-from rules.account_groups import get_normal_balance
+from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException
+from app.rules.account_groups import get_normal_balance
 
 # Rule function signature type
 RuleFunc = Callable[[Entity, List[LedgerAccount], List[TrialBalanceSnapshot]], List[AuditException]]

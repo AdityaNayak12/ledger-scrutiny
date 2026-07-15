@@ -3,8 +3,8 @@ from decimal import Decimal
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from db.base import Base
-from db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot, AuditException
+from app.db.base import Base
+from app.db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot, AuditException
 
 
 def test_database_models_lifecycle():

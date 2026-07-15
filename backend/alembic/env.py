@@ -10,8 +10,8 @@ from alembic import context
 # Add project root to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from db.base import Base
-from db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot, AuditException
+from app.db.base import Base
+from app.db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot, AuditException
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

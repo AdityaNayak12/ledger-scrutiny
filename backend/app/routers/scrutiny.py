@@ -1,21 +1,20 @@
 from typing import Optional, List
 from decimal import Decimal
-from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Query, status
+from datetime import datetime
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select, delete
 from pydantic import BaseModel, ConfigDict
-from datetime import datetime
 
-from db.session import get_db
-from db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException
-from ingestion.tally_parser import parse_tally_xml
-from ingestion.tally_normalizer import normalize_tally_data
-from rules.engine import run_scrutiny
+from app.db.session import get_db
+from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException
+from app.ingestion.tally_parser import parse_tally_xml
+from app.ingestion.tally_normalizer import normalize_tally_data
+from app.rules.engine import run_scrutiny
 
-app = FastAPI(
-    title="Audit Scrutiny Engine API",
-    description="API for Tally XML ingestion and trial balance scrutiny engine.",
-    version="1.0.0"
+router = APIRouter(
+    prefix="/api/v1",
+    tags=["scrutiny"]
 )
 
 
@@ -31,14 +30,13 @@ class ExceptionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-
 class IngestionResponse(BaseModel):
     message: str
     entity_id: int
     entity_name: str
 
 
-@app.post("/api/v1/ingest", response_model=IngestionResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/ingest", response_model=IngestionResponse, status_code=status.HTTP_201_CREATED)
 async def ingest_tally_export(
     file: UploadFile = File(...),
     materiality_threshold: Decimal = Query(Decimal("0.00"), description="Materiality threshold for the entity"),
@@ -78,7 +76,7 @@ async def ingest_tally_export(
         )
 
 
-@app.post("/api/v1/entities/{entity_id}/scrutinize", response_model=List[ExceptionResponse])
+@router.post("/entities/{entity_id}/scrutinize", response_model=List[ExceptionResponse])
 def trigger_scrutiny(entity_id: int, db: Session = Depends(get_db)):
     """
     Trigger a scrutiny run for the specified entity, running all registered rules,
@@ -136,7 +134,7 @@ def trigger_scrutiny(entity_id: int, db: Session = Depends(get_db)):
     return response
 
 
-@app.get("/api/v1/entities/{entity_id}/exceptions", response_model=List[ExceptionResponse])
+@router.get("/entities/{entity_id}/exceptions", response_model=List[ExceptionResponse])
 def list_exceptions(
     entity_id: int,
     severity: Optional[str] = Query(None, description="Filter exceptions by severity"),
