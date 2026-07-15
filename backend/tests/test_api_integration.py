@@ -213,3 +213,38 @@ def test_gstin_lookup():
     res3 = client.post("/gstin/lookup", json={"gstin": "invalid-gstin"})
     assert res3.status_code == 400
     assert "Invalid GSTIN format" in res3.json()["detail"]
+
+
+def test_gstin_lookup_live_mocked():
+    from unittest.mock import patch, MagicMock
+    
+    # Mock environment variables for live API Setu call
+    with patch("app.routers.scrutiny.APISETU_API_KEY", "test-key"), \
+         patch("app.routers.scrutiny.APISETU_CLIENT_ID", "test-client"):
+             
+        # Mock httpx.Client.get call to return 200 OK with taxpayer details
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "lgnm": "Global Trade Ventures Pvt Ltd",
+            "tradeNam": "GTV",
+            "gstin": "27GTVTV1111V1Z1"
+        }
+        
+        with patch("httpx.Client.get", return_value=mock_response):
+            res = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"})
+            assert res.status_code == 200
+            data = res.json()
+            assert data["gstin"] == "27GTVTV1111V1Z1"
+            assert data["company_name"] == "Global Trade Ventures Pvt Ltd"
+            assert data["state"] == "Maharashtra"
+            assert data["pan"] == "GTVTV1111V"
+
+        # Mock 404 Not Found from API Setu
+        mock_response_404 = MagicMock()
+        mock_response_404.status_code = 404
+        
+        with patch("httpx.Client.get", return_value=mock_response_404):
+            res404 = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"})
+            assert res404.status_code == 404
+            assert "not found on API Setu" in res404.json()["detail"]

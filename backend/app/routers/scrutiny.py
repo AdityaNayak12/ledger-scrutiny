@@ -1,4 +1,6 @@
 import re
+import os
+import httpx
 from typing import Optional, List
 from decimal import Decimal
 from datetime import datetime, date
@@ -293,6 +295,12 @@ MOCK_GSTIN_REGISTRY = {
 }
 
 
+# Environment variables for API Setu taxpayer integration
+APISETU_BASE_URL = os.getenv("APISETU_BASE_URL", "https://apisetu.gov.in/gstn")
+APISETU_API_KEY = os.getenv("APISETU_API_KEY")
+APISETU_CLIENT_ID = os.getenv("APISETU_CLIENT_ID")
+
+
 @router.post("/gstin/lookup", response_model=GstinLookupResponse)
 def lookup_gstin(request: GstinLookupRequest):
     """
@@ -312,6 +320,45 @@ def lookup_gstin(request: GstinLookupRequest):
     pan = gstin_cleaned[2:12]
     state_name = STATE_CODES.get(state_code, "Unknown State")
     
+    # If API keys are configured, run the actual API Setu live request
+    if APISETU_API_KEY and APISETU_CLIENT_ID:
+        url = f"{APISETU_BASE_URL.rstrip('/')}/v1/taxpayers/{gstin_cleaned}"
+        headers = {
+            "X-APISETU-APIKEY": APISETU_API_KEY,
+            "X-APISETU-CLIENTID": APISETU_CLIENT_ID,
+            "Accept": "application/json"
+        }
+        try:
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get(url, headers=headers)
+                
+            if response.status_code == 200:
+                data = response.json()
+                company_name = data.get("lgnm") or data.get("tradeNam") or "Unknown Company"
+                return GstinLookupResponse(
+                    gstin=gstin_cleaned,
+                    company_name=company_name,
+                    state=state_name,
+                    pan=pan
+                )
+            elif response.status_code == 404:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Taxpayer with GSTIN {gstin_cleaned} not found on API Setu."
+                )
+            else:
+                print(f"[ERROR] API Setu error status {response.status_code}: {response.text}")
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"API Setu gateway returned error code {response.status_code}."
+                )
+        except httpx.RequestError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"API Setu request failed: {str(exc)}"
+            )
+
+    # Fallback to local / mock lookup if environment variables are not set
     # Check mock registry first
     if gstin_cleaned in MOCK_GSTIN_REGISTRY:
         company_info = MOCK_GSTIN_REGISTRY[gstin_cleaned]
