@@ -33,6 +33,8 @@ export default function App() {
     financial_year_end: "2026-03-31",
     materiality_threshold: "15000",
   });
+  const [gstinLookup, setGstinLookup] = useState<string>("");
+  const [isLookingUpGstin, setIsLookingUpGstin] = useState<boolean>(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -92,6 +94,58 @@ export default function App() {
       } finally {
         setIsLoadingEntities(false);
       }
+    }
+  };
+
+  const handleGstinLookup = async () => {
+    setErrorMsg(null);
+    const cleaned = gstinLookup.trim().toUpperCase();
+    if (!cleaned) return;
+
+    setIsLookingUpGstin(true);
+    try {
+      if (isMock) {
+        // Validate GSTIN format in mock mode
+        const gstinRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
+        if (!gstinRegex.test(cleaned)) {
+          throw new Error("Invalid GSTIN format. E.g. 27AAAAA1111A1Z1");
+        }
+
+        const stateCode = cleaned.substring(0, 2);
+        const pan = cleaned.substring(2, 12);
+        
+        const mockMap: Record<string, string> = {
+          "27AAAAA1111A1Z1": "Acme Industrial Solutions Pvt Ltd",
+          "07BBBBB2222B2Z2": "Capital Trading Corporation",
+          "29CCCCC3333C3Z3": "Bangalore Tech Ventures LLC",
+        };
+        
+        const companyName = mockMap[cleaned] || `${pan.substring(0, 5)} Enterprises Pvt Ltd`;
+        
+        setNewEntity((prev) => ({
+          ...prev,
+          name: companyName,
+        }));
+      } else {
+        const res = await fetch(`${BASE_URL}/gstin/lookup`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ gstin: cleaned }),
+        });
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.detail || "GSTIN lookup failed");
+        }
+        const data = await res.json();
+        setNewEntity((prev) => ({
+          ...prev,
+          name: data.company_name,
+        }));
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message);
+    } finally {
+      setIsLookingUpGstin(false);
     }
   };
 
@@ -347,7 +401,16 @@ export default function App() {
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-sm font-semibold tracking-wider uppercase text-slate-400 m-0">Client Entities</h2>
             <button
-              onClick={() => setShowAddModal(true)}
+              onClick={() => {
+                setGstinLookup("");
+                setNewEntity({
+                  name: "",
+                  financial_year_start: "2025-04-01",
+                  financial_year_end: "2026-03-31",
+                  materiality_threshold: "15000",
+                });
+                setShowAddModal(true);
+              }}
               className="bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg px-2.5 py-1 text-xs font-bold transition-all shadow-md shadow-indigo-900/30 flex items-center gap-1 cursor-pointer"
             >
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -687,6 +750,27 @@ export default function App() {
             {/* Modal Form */}
             <form onSubmit={handleCreateEntity} className="p-6 flex flex-col gap-4">
               
+              <div className="flex gap-2 items-end">
+                <div className="flex-1">
+                  <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Auto-Fill via GSTIN (Optional)</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. 27AAAAA1111A1Z1"
+                    value={gstinLookup}
+                    onChange={(e) => setGstinLookup(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 placeholder-slate-700 font-semibold"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={handleGstinLookup}
+                  disabled={isLookingUpGstin || !gstinLookup.trim()}
+                  className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl px-4 py-2.5 text-xs font-extrabold uppercase tracking-wide h-[42px] transition-all cursor-pointer focus:outline-none"
+                >
+                  {isLookingUpGstin ? "..." : "Lookup"}
+                </button>
+              </div>
+
               <div>
                 <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Company / Client Name</label>
                 <input

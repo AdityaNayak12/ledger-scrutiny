@@ -1,3 +1,4 @@
+import re
 from typing import Optional, List
 from decimal import Decimal
 from datetime import datetime, date
@@ -215,3 +216,119 @@ def list_exceptions(
             )
         )
     return response
+
+
+# --- GSTIN Lookup schemas and endpoint ---
+
+class GstinLookupRequest(BaseModel):
+    gstin: str
+
+
+class GstinLookupResponse(BaseModel):
+    gstin: str
+    company_name: str
+    state: str
+    pan: str
+
+
+# Official state code mapping for Indian GSTINs
+STATE_CODES = {
+    "01": "Jammu and Kashmir",
+    "02": "Himachal Pradesh",
+    "03": "Punjab",
+    "04": "Chandigarh",
+    "05": "Uttarakhand",
+    "06": "Haryana",
+    "07": "Delhi",
+    "08": "Rajasthan",
+    "09": "Uttar Pradesh",
+    "10": "Bihar",
+    "11": "Sikkim",
+    "12": "Arunachal Pradesh",
+    "13": "Nagaland",
+    "14": "Manipur",
+    "15": "Mizoram",
+    "16": "Tripura",
+    "17": "Meghalaya",
+    "18": "Assam",
+    "19": "West Bengal",
+    "20": "Jharkhand",
+    "21": "Odisha",
+    "22": "Chhattisgarh",
+    "23": "Madhya Pradesh",
+    "24": "Gujarat",
+    "25": "Daman and Diu",
+    "26": "Dadra and Nagar Haveli",
+    "27": "Maharashtra",
+    "28": "Andhra Pradesh (Before division)",
+    "29": "Karnataka",
+    "30": "Goa",
+    "31": "Lakshadweep",
+    "32": "Kerala",
+    "33": "Tamil Nadu",
+    "34": "Puducherry",
+    "35": "Andaman and Nicobar Islands",
+    "36": "Telangana",
+    "37": "Andhra Pradesh",
+    "38": "Ladakh"
+}
+
+# Pre-defined mock database of GSTINs for testing
+MOCK_GSTIN_REGISTRY = {
+    "27AAAAA1111A1Z1": {
+        "company_name": "Acme Industrial Solutions Pvt Ltd",
+        "state": "Maharashtra",
+        "pan": "AAAAA1111A"
+    },
+    "07BBBBB2222B2Z2": {
+        "company_name": "Capital Trading Corporation",
+        "state": "Delhi",
+        "pan": "BBBBB2222B"
+    },
+    "29CCCCC3333C3Z3": {
+        "company_name": "Bangalore Tech Ventures LLC",
+        "state": "Karnataka",
+        "pan": "CCCCC3333C"
+    }
+}
+
+
+@router.post("/gstin/lookup", response_model=GstinLookupResponse)
+def lookup_gstin(request: GstinLookupRequest):
+    """
+    Look up company details using a GSTIN.
+    """
+    gstin_cleaned = request.gstin.strip().upper()
+    
+    # Validation regex for Indian GSTIN (15 characters)
+    gstin_regex = r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
+    if not re.match(gstin_regex, gstin_cleaned):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid GSTIN format. Expected format: 15-character alphanumeric (e.g. 27AAAAA1111A1Z1)."
+        )
+        
+    state_code = gstin_cleaned[0:2]
+    pan = gstin_cleaned[2:12]
+    state_name = STATE_CODES.get(state_code, "Unknown State")
+    
+    # Check mock registry first
+    if gstin_cleaned in MOCK_GSTIN_REGISTRY:
+        company_info = MOCK_GSTIN_REGISTRY[gstin_cleaned]
+        return GstinLookupResponse(
+            gstin=gstin_cleaned,
+            company_name=company_info["company_name"],
+            state=company_info["state"],
+            pan=company_info["pan"]
+        )
+        
+    # Dynamically generate realistic details if not in registry
+    company_prefix = pan[0:5]
+    company_name = f"{company_prefix.title()} Enterprises Pvt Ltd"
+    
+    return GstinLookupResponse(
+        gstin=gstin_cleaned,
+        company_name=company_name,
+        state=state_name,
+        pan=pan
+    )

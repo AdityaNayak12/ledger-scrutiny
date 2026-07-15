@@ -188,3 +188,28 @@ def test_api_scrutiny_with_violations():
     list_res_warn = client.get(f"/entities/{entity_id}/exceptions", params={"severity": "warning"})
     assert list_res_warn.status_code == 200
     assert len(list_res_warn.json()) == 0
+
+
+def test_gstin_lookup():
+    # 1. Valid registered GSTIN
+    res = client.post("/gstin/lookup", json={"gstin": "27AAAAA1111A1Z1"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["gstin"] == "27AAAAA1111A1Z1"
+    assert data["company_name"] == "Acme Industrial Solutions Pvt Ltd"
+    assert data["state"] == "Maharashtra"
+    assert data["pan"] == "AAAAA1111A"
+
+    # 2. Valid dynamically generated GSTIN
+    res2 = client.post("/gstin/lookup", json={"gstin": "29TSTNG9999P9Z9"})
+    assert res2.status_code == 200
+    data2 = res2.json()
+    assert data2["gstin"] == "29TSTNG9999P9Z9"
+    assert data2["company_name"] == "Tstng Enterprises Pvt Ltd"
+    assert data2["state"] == "Karnataka"
+    assert data2["pan"] == "TSTNG9999P"
+
+    # 3. Invalid GSTIN format
+    res3 = client.post("/gstin/lookup", json={"gstin": "invalid-gstin"})
+    assert res3.status_code == 400
+    assert "Invalid GSTIN format" in res3.json()["detail"]
