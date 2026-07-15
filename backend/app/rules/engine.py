@@ -159,8 +159,8 @@ def filter_by_materiality(entity: Entity, exceptions: List[AuditException]) -> L
     filtered = []
     
     for exc in exceptions:
-        # Critical/system exceptions or normal balance classification checks should never be filtered out
-        if exc.severity == "critical" or exc.rule_name == "normal_balance_check":
+        # Critical/system exceptions should never be filtered out
+        if exc.severity == "critical":
             filtered.append(exc)
             continue
             

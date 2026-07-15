@@ -191,8 +191,11 @@ def normalize_tally_data(
         debits_sum = tb_aggregates[lid]["debits"]
         credits_sum = tb_aggregates[lid]["credits"]
         
-        # closing_balance = opening_balance + total_debits - total_credits
-        cl_bal = op_bal + debits_sum - credits_sum
+        # If closing balance is explicitly parsed from XML, use it. Otherwise, calculate.
+        if ld.get("closing_balance") is not None:
+            cl_bal = ld["closing_balance"]
+        else:
+            cl_bal = op_bal + debits_sum - credits_sum
         
         snapshot = TrialBalanceSnapshot(
             entity_id=entity.id,

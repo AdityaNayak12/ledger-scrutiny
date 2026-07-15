@@ -1,180 +1,144 @@
 <ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+  </HEADER>
   <BODY>
-    <IMPORTDATA>
+    <EXPORTDATA>
       <REQUESTDESC>
-        <REPORTNAME>All Ledger Entries</REPORTNAME>
+        <REPORTNAME>Trial Balance</REPORTNAME>
+        <STATICVARIABLES>
+          <SVFROMDATE>20250401</SVFROMDATE>
+          <SVTODATE>20260331</SVTODATE>
+          <SVCOMPANYNAME>Test Fixtures Pvt Ltd</SVCOMPANYNAME>
+        </STATICVARIABLES>
       </REQUESTDESC>
       <REQUESTDATA>
-        <COMPANY>
-          <RENAME>Test Fixture Corp</RENAME>
-          <BOOKSFROM>20250401</BOOKSFROM>
-          <BOOKSTO>20260331</BOOKSTO>
-        </COMPANY>
-        <!-- Ledger Accounts -->
+
+        <!-- CLEAN: normal balance, no issues. Should raise nothing. -->
         <TALLYMESSAGE>
           <LEDGER NAME="Share Capital">
             <PARENT>Capital Account</PARENT>
-            <OPENINGBALANCE>-100000.00</OPENINGBALANCE>
+            <OPENINGBALANCE>-500000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>-500000.00</CLOSINGBALANCE>
           </LEDGER>
         </TALLYMESSAGE>
+
+        <!-- CLEAN: normal balance, matches expected debit side. -->
         <TALLYMESSAGE>
           <LEDGER NAME="Furniture and Fixtures">
             <PARENT>Fixed Assets</PARENT>
-            <OPENINGBALANCE>50000.00</OPENINGBALANCE>
+            <OPENINGBALANCE>120000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>108000.00</CLOSINGBALANCE>
           </LEDGER>
         </TALLYMESSAGE>
+
+        <!-- TRIGGERS rule 1 (normal balance check): Sundry Debtors should
+             carry a debit balance, this one closes credit. Should raise
+             a normal-balance exception. -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Rahul Enterprises">
+            <PARENT>Sundry Debtors</PARENT>
+            <OPENINGBALANCE>85000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>-40000.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- TRIGGERS rule 1 again, on the liability side: Sundry
+             Creditors should carry a credit balance, this one closes
+             debit. -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Verma Traders">
+            <PARENT>Sundry Creditors</PARENT>
+            <OPENINGBALANCE>-95000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>35000.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- TRIGGERS rule 3 (materiality filter) if threshold is set
+             above 500: a tiny, immaterial abnormal balance that should
+             be suppressed when Entity.materiality_threshold >= 500, but
+             SHOULD appear if threshold is set to 0. Use this row to
+             confirm the threshold filter actually filters. -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Petty Cash Variance">
+            <PARENT>Cash-in-hand</PARENT>
+            <OPENINGBALANCE>2000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>-150.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- CLEAN: normal balance -->
         <TALLYMESSAGE>
           <LEDGER NAME="HDFC Bank Current Account">
             <PARENT>Bank Accounts</PARENT>
-            <OPENINGBALANCE>85000.00</OPENINGBALANCE>
+            <OPENINGBALANCE>250000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>410000.00</CLOSINGBALANCE>
           </LEDGER>
         </TALLYMESSAGE>
+
+        <!-- CLEAN: normal balance -->
         <TALLYMESSAGE>
           <LEDGER NAME="Sales Account">
             <PARENT>Sales Accounts</PARENT>
             <OPENINGBALANCE>0.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>-950000.00</CLOSINGBALANCE>
           </LEDGER>
         </TALLYMESSAGE>
+
+        <!-- CLEAN: normal balance -->
         <TALLYMESSAGE>
           <LEDGER NAME="Purchase Account">
             <PARENT>Purchase Accounts</PARENT>
             <OPENINGBALANCE>0.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>620000.00</CLOSINGBALANCE>
           </LEDGER>
         </TALLYMESSAGE>
+
+        <!-- CLEAN: normal balance -->
         <TALLYMESSAGE>
           <LEDGER NAME="Office Rent">
             <PARENT>Indirect Expenses</PARENT>
             <OPENINGBALANCE>0.00</OPENINGBALANCE>
-          </LEDGER>
-        </TALLYMESSAGE>
-        <TALLYMESSAGE>
-          <LEDGER NAME="Rahul Enterprises">
-            <PARENT>Sundry Creditors</PARENT>
-            <OPENINGBALANCE>-20000.00</OPENINGBALANCE>
-          </LEDGER>
-        </TALLYMESSAGE>
-        <TALLYMESSAGE>
-          <LEDGER NAME="Verma Traders">
-            <PARENT>Sundry Debtors</PARENT>
-            <OPENINGBALANCE>10000.00</OPENINGBALANCE>
-          </LEDGER>
-        </TALLYMESSAGE>
-        <TALLYMESSAGE>
-          <LEDGER NAME="Petty Cash Variance">
-            <PARENT>Cash-in-hand</PARENT>
-            <OPENINGBALANCE>100.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>144000.00</CLOSINGBALANCE>
           </LEDGER>
         </TALLYMESSAGE>
 
-        <!-- Voucher Transactions -->
+        <!-- Voucher-level entries for Transaction table testing -->
         <TALLYMESSAGE>
-          <VOUCHER VCHTYPE="Sales">
-            <DATE>20250410</DATE>
-            <VOUCHERNUMBER>VCH-0001</VOUCHERNUMBER>
-            <NARRATION>Service Sales</NARRATION>
+          <VOUCHER VCHTYPE="Sales" DATE="20250615">
+            <NARRATION>Sale of goods to Rahul Enterprises</NARRATION>
+            <VOUCHERNUMBER>SV-1042</VOUCHERNUMBER>
             <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>Verma Traders</LEDGERNAME>
+              <LEDGERNAME>Rahul Enterprises</LEDGERNAME>
               <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-              <AMOUNT>-30000.00</AMOUNT>
+              <AMOUNT>45000.00</AMOUNT>
             </ALLLEDGERENTRIES.LIST>
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>Sales Account</LEDGERNAME>
               <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-              <AMOUNT>30000.00</AMOUNT>
+              <AMOUNT>-45000.00</AMOUNT>
             </ALLLEDGERENTRIES.LIST>
           </VOUCHER>
         </TALLYMESSAGE>
 
         <TALLYMESSAGE>
-          <VOUCHER VCHTYPE="Purchase">
-            <DATE>20250512</DATE>
-            <VOUCHERNUMBER>VCH-0002</VOUCHERNUMBER>
-            <NARRATION>Material purchase</NARRATION>
+          <VOUCHER VCHTYPE="Purchase" DATE="20250720">
+            <NARRATION>Purchase of stock from Verma Traders</NARRATION>
+            <VOUCHERNUMBER>PV-0871</VOUCHERNUMBER>
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>Purchase Account</LEDGERNAME>
               <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-              <AMOUNT>-25000.00</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-              <AMOUNT>25000.00</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
-          </VOUCHER>
-        </TALLYMESSAGE>
-
-        <TALLYMESSAGE>
-          <VOUCHER VCHTYPE="Payment">
-            <DATE>20250615</DATE>
-            <VOUCHERNUMBER>VCH-0003</VOUCHERNUMBER>
-            <NARRATION>Office Rent paid</NARRATION>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>Office Rent</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-              <AMOUNT>-12000.00</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-              <AMOUNT>12000.00</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
-          </VOUCHER>
-        </TALLYMESSAGE>
-
-        <TALLYMESSAGE>
-          <VOUCHER VCHTYPE="Payment">
-            <DATE>20250720</DATE>
-            <VOUCHERNUMBER>VCH-0004</VOUCHERNUMBER>
-            <NARRATION>Payment to supplier with excess payout</NARRATION>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>Rahul Enterprises</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-              <AMOUNT>-32000.00</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-              <AMOUNT>32000.00</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
-          </VOUCHER>
-        </TALLYMESSAGE>
-
-        <TALLYMESSAGE>
-          <VOUCHER VCHTYPE="Receipt">
-            <DATE>20250825</DATE>
-            <VOUCHERNUMBER>VCH-0005</VOUCHERNUMBER>
-            <NARRATION>Excess deposit from customer</NARRATION>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-              <AMOUNT>-48000.00</AMOUNT>
+              <AMOUNT>60000.00</AMOUNT>
             </ALLLEDGERENTRIES.LIST>
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>Verma Traders</LEDGERNAME>
               <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-              <AMOUNT>48000.00</AMOUNT>
+              <AMOUNT>-60000.00</AMOUNT>
             </ALLLEDGERENTRIES.LIST>
           </VOUCHER>
         </TALLYMESSAGE>
 
-        <TALLYMESSAGE>
-          <VOUCHER VCHTYPE="Payment">
-            <DATE>20250930</DATE>
-            <VOUCHERNUMBER>VCH-0006</VOUCHERNUMBER>
-            <NARRATION>Petty cash spent</NARRATION>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-              <AMOUNT>-30.00</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
-            <ALLLEDGERENTRIES.LIST>
-              <LEDGERNAME>Petty Cash Variance</LEDGERNAME>
-              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-              <AMOUNT>30.00</AMOUNT>
-            </ALLLEDGERENTRIES.LIST>
-          </VOUCHER>
-        </TALLYMESSAGE>
       </REQUESTDATA>
-    </IMPORTDATA>
+    </EXPORTDATA>
   </BODY>
 </ENVELOPE>

@@ -106,7 +106,28 @@ def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
         books_to_node = company_node.find("BOOKSTO")
         if books_to_node is not None and books_to_node.text:
             fy_end = parse_tally_date(books_to_node.text)
-            
+    else:
+        # Fallback to parsing from STATICVARIABLES in Trial Balance exports
+        static_vars = root.find(".//STATICVARIABLES")
+        if static_vars is not None:
+            comp_name_node = static_vars.find("SVCOMPANYNAME")
+            if comp_name_node is not None and comp_name_node.text:
+                entity_name = comp_name_node.text.strip()
+                
+            from_date_node = static_vars.find("SVFROMDATE")
+            if from_date_node is not None and from_date_node.text:
+                try:
+                    fy_start = parse_tally_date(from_date_node.text)
+                except Exception:
+                    pass
+                    
+            to_date_node = static_vars.find("SVTODATE")
+            if to_date_node is not None and to_date_node.text:
+                try:
+                    fy_end = parse_tally_date(to_date_node.text)
+                except Exception:
+                    pass
+
     # 2. Parse Ledgers
     ledgers = []
     # Tally ledgers are usually defined inside <LEDGER> tags under <TALLYMESSAGE>
@@ -123,10 +144,16 @@ def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
         op_bal_str = op_bal_node.text if op_bal_node is not None else "0.00"
         opening_balance = parse_tally_amount(op_bal_str)
         
+        cl_bal_node = ledger.find("CLOSINGBALANCE")
+        closing_balance = None
+        if cl_bal_node is not None and cl_bal_node.text:
+            closing_balance = parse_tally_amount(cl_bal_node.text)
+        
         ledgers.append({
             "name": name.strip(),
             "group_name": group_name,
-            "opening_balance": opening_balance
+            "opening_balance": opening_balance,
+            "closing_balance": closing_balance
         })
         
     # 3. Parse Vouchers

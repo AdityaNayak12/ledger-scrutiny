@@ -19,7 +19,7 @@ def test_fixture_exceptions_matching_requirements():
 
     # 2. Parse XML content
     parsed_data = parse_tally_xml(xml_content)
-    assert parsed_data["entity"]["name"] == "Test Fixture Corp"
+    assert parsed_data["entity"]["name"] == "Test Fixtures Pvt Ltd"
 
     # 3. Create fresh DB
     engine = create_engine("sqlite:///:memory:")
@@ -33,24 +33,6 @@ def test_fixture_exceptions_matching_requirements():
         entity = normalize_tally_data(parsed_data, session, materiality_threshold=Decimal("15000.00"))
         session.commit()
 
-        # Find Petty Cash Variance ledger account to attach prior period snapshot
-        petty_cash_acc = session.query(LedgerAccount).filter_by(entity_id=entity.id, name="Petty Cash Variance").one()
-
-        # Insert a prior period snapshot for Petty Cash Variance with closing balance 250.00
-        # Given current period opening is 100.00, this creates an opening balance continuity variance of exactly 150.00
-        prior_snapshot = TrialBalanceSnapshot(
-            entity_id=entity.id,
-            ledger_account_id=petty_cash_acc.id,
-            period_start=date(2024, 4, 1),
-            period_end=date(2025, 3, 31),
-            opening_balance=Decimal("0.00"),
-            total_debits=Decimal("250.00"),
-            total_credits=Decimal("0.00"),
-            closing_balance=Decimal("250.00")
-        )
-        session.add(prior_snapshot)
-        session.commit()
-
         accounts = session.query(LedgerAccount).filter_by(entity_id=entity.id).all()
         snapshots = session.query(TrialBalanceSnapshot).filter_by(entity_id=entity.id).all()
 
@@ -60,9 +42,8 @@ def test_fixture_exceptions_matching_requirements():
         acc_name_map = {acc.id: acc.name for acc in accounts}
 
         # Verify exceptions at materiality >= 15000
-        # Rahul Enterprises (Sundry Creditors, Debit balance 12,000) and Verma Traders (Sundry Debtors, Credit balance -8,000)
-        # should be present as they are normal balance checks (categorical errors not subject to materiality).
-        # Petty Cash Variance (continuity check, variance 150.00 < 15000) is filtered out.
+        # Rahul Enterprises (abnormal balance 40,000 > 15,000) and Verma Traders (abnormal balance 35,000 > 15,000)
+        # should be present. Petty Cash Variance (abnormal balance 150 < 15,000) is filtered out.
         exc_names = {acc_name_map[e.ledger_account_id] for e in exceptions if e.ledger_account_id in acc_name_map}
         assert "Rahul Enterprises" in exc_names
         assert "Verma Traders" in exc_names
