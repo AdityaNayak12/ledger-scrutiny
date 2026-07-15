@@ -165,12 +165,12 @@
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>HDFC Bank Current Account</LEDGERNAME>
               <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
-              <AMOUNT>-220.00</AMOUNT>
+              <AMOUNT>-30.00</AMOUNT>
             </ALLLEDGERENTRIES.LIST>
             <ALLLEDGERENTRIES.LIST>
               <LEDGERNAME>Petty Cash Variance</LEDGERNAME>
               <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
-              <AMOUNT>220.00</AMOUNT>
+              <AMOUNT>30.00</AMOUNT>
             </ALLLEDGERENTRIES.LIST>
           </VOUCHER>
         </TALLYMESSAGE>

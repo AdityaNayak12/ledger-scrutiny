@@ -159,8 +159,8 @@ def filter_by_materiality(entity: Entity, exceptions: List[AuditException]) -> L
     filtered = []
     
     for exc in exceptions:
-        # Critical or system exceptions should never be filtered out
-        if exc.severity == "critical":
+        # Critical/system exceptions or normal balance classification checks should never be filtered out
+        if exc.severity == "critical" or exc.rule_name == "normal_balance_check":
             filtered.append(exc)
             continue
             
@@ -185,6 +185,10 @@ def run_scrutiny(
     for rule in _RULE_REGISTRY:
         try:
             exceptions = rule(entity, accounts, snapshots)
+            if rule.__name__ == "check_normal_balance":
+                print(f"[DEBUG] check_normal_balance generated exceptions count: {len(exceptions)}")
+                for e in exceptions:
+                    print(f"  - Account ID {e.ledger_account_id}: {e.message}")
             all_exceptions.extend(exceptions)
         except Exception as e:
             # Catch exceptions per-rule so one broken rule can't take down the whole run
