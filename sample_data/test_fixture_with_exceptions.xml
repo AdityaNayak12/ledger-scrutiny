@@ -39,7 +39,7 @@
           <LEDGER NAME="Rahul Enterprises">
             <PARENT>Sundry Debtors</PARENT>
             <OPENINGBALANCE>85000.00</OPENINGBALANCE>
-            <CLOSINGBALANCE>-40000.00</CLOSINGBALANCE>
+            <CLOSINGBALANCE>-12000.00</CLOSINGBALANCE>
           </LEDGER>
         </TALLYMESSAGE>
 
@@ -50,7 +50,7 @@
           <LEDGER NAME="Verma Traders">
             <PARENT>Sundry Creditors</PARENT>
             <OPENINGBALANCE>-95000.00</OPENINGBALANCE>
-            <CLOSINGBALANCE>35000.00</CLOSINGBALANCE>
+            <CLOSINGBALANCE>8000.00</CLOSINGBALANCE>
           </LEDGER>
         </TALLYMESSAGE>
 

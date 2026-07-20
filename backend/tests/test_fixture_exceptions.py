@@ -29,8 +29,8 @@ def test_fixture_exceptions_matching_requirements():
 
     try:
         # 4. Ingest and normalize current period
-        # Case A: Materiality threshold at 15000.00
-        entity = normalize_tally_data(parsed_data, session, materiality_threshold=Decimal("15000.00"))
+        # Case A: Materiality threshold at 5000.00
+        entity = normalize_tally_data(parsed_data, session, materiality_threshold=Decimal("5000.00"))
         session.commit()
 
         accounts = session.query(LedgerAccount).filter_by(entity_id=entity.id).all()
@@ -41,9 +41,9 @@ def test_fixture_exceptions_matching_requirements():
         # Create a map of account_id -> name for quick lookup without requiring session relationship loads
         acc_name_map = {acc.id: acc.name for acc in accounts}
 
-        # Verify exceptions at materiality >= 15000
-        # Rahul Enterprises (abnormal balance 40,000 > 15,000) and Verma Traders (abnormal balance 35,000 > 15,000)
-        # should be present. Petty Cash Variance (abnormal balance 150 < 15,000) is filtered out.
+        # Verify exceptions at materiality >= 5000
+        # Rahul Enterprises (abnormal balance 12,000 > 5,000) and Verma Traders (abnormal balance 8,000 > 5,000)
+        # should be present. Petty Cash Variance (abnormal balance 150 < 5,000) is filtered out.
         exc_names = {acc_name_map[e.ledger_account_id] for e in exceptions if e.ledger_account_id in acc_name_map}
         assert "Rahul Enterprises" in exc_names
         assert "Verma Traders" in exc_names
