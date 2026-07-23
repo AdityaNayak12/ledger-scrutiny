@@ -7,9 +7,7 @@ from app.rules.engine import (
     run_scrutiny,
     check_normal_balance,
     check_opening_balance_continuity,
-    filter_by_materiality,
-    register_rule,
-    clear_registered_rules
+    filter_by_materiality
 )
 
 
@@ -183,21 +181,17 @@ def test_materiality_threshold_filter(sample_entity):
 
 
 def test_rules_engine_isolation(sample_entity):
-    # Register a failing rule and a successful rule
-    clear_registered_rules()
-    
-    @register_rule
+    # Setup custom mock rules
     def failing_rule(ent, accs, snaps):
         raise RuntimeError("Something went wrong")
         
-    @register_rule
     def successful_rule(ent, accs, snaps):
         exc = AuditException(rule_name="successful_rule", severity="error", message="Successful rule warning")
         exc.variance = Decimal("2000.00")
         return [exc]
         
-    # Run the engine
-    exceptions = run_scrutiny(sample_entity, [], [])
+    # Run the engine passing custom rules list
+    exceptions = run_scrutiny(sample_entity, [], [], rules=[failing_rule, successful_rule])
     
     assert len(exceptions) == 2
     
@@ -209,8 +203,3 @@ def test_rules_engine_isolation(sample_entity):
     failing_exc = next(e for e in exceptions if e.rule_name == "failing_rule")
     assert failing_exc.severity == "critical"
     assert "failing_rule' failed with unexpected error: Something went wrong" in failing_exc.message
-    
-    # Restore standard rules for other tests by clearing and re-importing
-    clear_registered_rules()
-    register_rule(check_normal_balance)
-    register_rule(check_opening_balance_continuity)

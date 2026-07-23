@@ -7,24 +7,7 @@ from app.rules.account_groups import get_normal_balance
 # Rule function signature type
 RuleFunc = Callable[[Entity, List[LedgerAccount], List[TrialBalanceSnapshot]], List[AuditException]]
 
-# Global registry of rule functions
-_RULE_REGISTRY: List[RuleFunc] = []
 
-
-def register_rule(rule_fn: RuleFunc) -> RuleFunc:
-    """Decorator to register a rule function in the engine."""
-    if rule_fn not in _RULE_REGISTRY:
-        _RULE_REGISTRY.append(rule_fn)
-    return rule_fn
-
-
-
-def clear_registered_rules() -> None:
-    """Clears the rule registry (mainly for testing)."""
-    _RULE_REGISTRY.clear()
-
-
-@register_rule
 def check_normal_balance(
     entity: Entity, 
     accounts: List[LedgerAccount], 
@@ -89,7 +72,6 @@ def check_normal_balance(
     return exceptions
 
 
-@register_rule
 def check_opening_balance_continuity(
     entity: Entity, 
     accounts: List[LedgerAccount], 
@@ -190,18 +172,26 @@ def filter_by_materiality(entity: Entity, exceptions: List[AuditException]) -> L
     return filtered
 
 
+# Static list of scrutiny rules
+RULES: List[RuleFunc] = [check_normal_balance, check_opening_balance_continuity]
+
+
 def run_scrutiny(
     entity: Entity, 
     accounts: List[LedgerAccount], 
-    snapshots: List[TrialBalanceSnapshot]
+    snapshots: List[TrialBalanceSnapshot],
+    rules: Optional[List[RuleFunc]] = None
 ) -> List[AuditException]:
     """
-    Runs all registered scrutiny rules in isolation, catching exceptions 
+    Runs scrutiny rules in isolation, catching exceptions 
     per-rule, and applies the materiality filter at the end.
     """
+    if rules is None:
+        rules = RULES
+        
     all_exceptions: List[AuditException] = []
     
-    for rule in _RULE_REGISTRY:
+    for rule in rules:
         try:
             exceptions = rule(entity, accounts, snapshots)
             if rule.__name__ == "check_normal_balance":
