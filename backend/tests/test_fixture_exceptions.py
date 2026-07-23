@@ -109,3 +109,86 @@ def test_normal_balance_check_materiality_exempt():
         finally:
             session.close()
             Base.metadata.drop_all(engine)
+
+
+def test_opening_balance_continuity_regression():
+    xml_path_p1 = os.path.join(os.path.dirname(__file__), "../../sample_data/test_fixture_with_exceptions.xml")
+    xml_path_p2 = os.path.join(os.path.dirname(__file__), "../../sample_data/test_fixture_period2_continuity.xml")
+    
+    with open(xml_path_p1, "rb") as f:
+        xml_p1 = f.read()
+    with open(xml_path_p2, "rb") as f:
+        xml_p2 = f.read()
+
+    parsed_p1 = parse_tally_xml(xml_p1)
+    parsed_p2 = parse_tally_xml(xml_p2)
+    
+    # 1. Run at materiality = 15000.00
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        # Ingest Period 1
+        normalize_tally_data(parsed_p1, session, materiality_threshold=Decimal("15000.00"))
+        session.commit()
+        
+        # Ingest Period 2
+        entity2 = normalize_tally_data(parsed_p2, session, materiality_threshold=Decimal("15000.00"))
+        session.commit()
+        
+        accounts = session.query(LedgerAccount).filter_by(entity_id=entity2.id).all()
+        snapshots = session.query(TrialBalanceSnapshot).all()
+        
+        exceptions = run_scrutiny(entity2, accounts, snapshots)
+        acc_name_map = {acc.id: acc.name for acc in accounts}
+        
+        continuity_exceptions = [e for e in exceptions if e.rule_name == "opening_balance_continuity"]
+        exc_names = {acc_name_map[e.ledger_account_id] for e in continuity_exceptions if e.ledger_account_id in acc_name_map}
+        
+        # Expect exactly 1 continuity exception: Verma Traders
+        assert len(continuity_exceptions) == 1
+        assert "Verma Traders" in exc_names
+        assert "Rahul Enterprises" not in exc_names
+        assert "Petty Cash Variance" not in exc_names
+        assert "Sales Account" not in exc_names
+        assert "Purchase Account" not in exc_names
+        assert "Office Rent" not in exc_names
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+    # 2. Run at materiality = 0.00
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        # Ingest Period 1
+        normalize_tally_data(parsed_p1, session, materiality_threshold=Decimal("0.00"))
+        session.commit()
+        
+        # Ingest Period 2
+        entity2 = normalize_tally_data(parsed_p2, session, materiality_threshold=Decimal("0.00"))
+        session.commit()
+        
+        accounts = session.query(LedgerAccount).filter_by(entity_id=entity2.id).all()
+        snapshots = session.query(TrialBalanceSnapshot).all()
+        
+        exceptions = run_scrutiny(entity2, accounts, snapshots)
+        acc_name_map = {acc.id: acc.name for acc in accounts}
+        
+        continuity_exceptions = [e for e in exceptions if e.rule_name == "opening_balance_continuity"]
+        exc_names = {acc_name_map[e.ledger_account_id] for e in continuity_exceptions if e.ledger_account_id in acc_name_map}
+        
+        # Expect exactly 2 continuity exceptions: Verma Traders, Rahul Enterprises
+        assert len(continuity_exceptions) == 2
+        assert "Verma Traders" in exc_names
+        assert "Rahul Enterprises" in exc_names
+        assert "Petty Cash Variance" not in exc_names
+        assert "Sales Account" not in exc_names
+        assert "Purchase Account" not in exc_names
+        assert "Office Rent" not in exc_names
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)

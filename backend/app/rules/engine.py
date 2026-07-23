@@ -98,56 +98,68 @@ def check_opening_balance_continuity(
     """
     Rule 2: Opening Balance Continuity Check
     Checks if the opening balance of an account matches the prior period's closing balance.
+    Applies ONLY to balance sheet groups.
     """
     exceptions = []
     
-    # Group snapshots by ledger account
-    acc_snapshots: dict[int, List[TrialBalanceSnapshot]] = {}
+    # Balance sheet groups list from specifications
+    BALANCE_SHEET_GROUPS = {
+        "Capital Account", "Fixed Assets", "Investments", "Current Assets", 
+        "Sundry Debtors", "Cash-in-hand", "Bank Accounts", "Stock-in-hand", 
+        "Loans & Advances (Asset)", "Current Liabilities", "Sundry Creditors", 
+        "Duties & Taxes", "Provisions", "Secured Loans", "Unsecured Loans", 
+        "Loans (Liability)", "Reserves & Surplus"
+    }
+    
+    # Map accounts by ID to support local unit test lookups without database relations
+    acc_id_map = {acc.id: acc.name for acc in accounts}
+    
+    # Map snapshots by account name and period role
+    current_snaps = {}  # {account_name: TrialBalanceSnapshot}
+    prior_snaps = {}    # {account_name: TrialBalanceSnapshot}
+    
     for s in snapshots:
-        if s.entity_id == entity.id:
-            acc_snapshots.setdefault(s.ledger_account_id, []).append(s)
+        acc_name = s.ledger_account.name if s.ledger_account else acc_id_map.get(s.ledger_account_id)
+        if not acc_name:
+            continue
+            
+        if s.period_start == entity.financial_year_start:
+            current_snaps[acc_name] = s
+        elif s.period_end <= entity.financial_year_start:
+            # Keep the latest prior snapshot if there are multiple
+            if acc_name not in prior_snaps or s.period_end > prior_snaps[acc_name].period_end:
+                prior_snaps[acc_name] = s
             
     for acc in accounts:
-        snaps = acc_snapshots.get(acc.id, [])
-        if not snaps:
+        if acc.group_name not in BALANCE_SHEET_GROUPS:
             continue
             
-        # Find the snapshot for the current period
-        current_snap = next(
-            (s for s in snaps if s.period_start == entity.financial_year_start), 
-            None
-        )
-        if current_snap is None:
+        if acc.name not in current_snaps or acc.name not in prior_snaps:
             continue
             
-        # Find the prior period snapshot (the one ending just before current_snap starts)
-        prior_snap = None
-        for s in snaps:
-            if s.period_end <= current_snap.period_start:
-                if prior_snap is None or s.period_end > prior_snap.period_end:
-                    prior_snap = s
-                    
-        if prior_snap is not None:
-            curr_opening = current_snap.opening_balance
-            prior_closing = prior_snap.closing_balance
-            
-            if curr_opening != prior_closing:
-                variance = abs(curr_opening - prior_closing)
-                exc = AuditException(
-                    entity_id=entity.id,
-                    rule_name="opening_balance_continuity",
-                    ledger_account_id=acc.id,
-                    severity="error",
-                    message=(
-                        f"Account '{acc.name}' opening balance ({curr_opening}) does not match "
-                        f"prior period closing balance ({prior_closing}). Variance: {variance}."
-                    )
+        curr_snap = current_snaps[acc.name]
+        prior_snap = prior_snaps[acc.name]
+        
+        curr_opening = curr_snap.opening_balance
+        prior_closing = prior_snap.closing_balance
+        
+        if curr_opening != prior_closing:
+            variance = abs(curr_opening - prior_closing)
+            exc = AuditException(
+                entity_id=entity.id,
+                rule_name="opening_balance_continuity",
+                ledger_account_id=acc.id,
+                severity="error",
+                message=(
+                    f"Account '{acc.name}' opening balance ({curr_opening}) does not match "
+                    f"prior period closing balance ({prior_closing}). Variance: {variance}."
                 )
-                # Attach transient Python attribute for materiality filtering
-                exc.variance = variance
-                exc.apply_materiality = True
-                exceptions.append(exc)
-                
+            )
+            # Attach transient Python attribute for materiality filtering
+            exc.variance = variance
+            exc.apply_materiality = True
+            exceptions.append(exc)
+            
     return exceptions
 
 

@@ -159,9 +159,24 @@ def trigger_scrutiny_run(entity_id: int, db: Session = Depends(get_db)):
         select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)
     ).scalars().all()
     
-    snapshots = db.execute(
-        select(TrialBalanceSnapshot).where(TrialBalanceSnapshot.entity_id == entity_id)
-    ).scalars().all()
+    # Fetch prior period snapshots as well for continuity check
+    prior_entity = db.execute(
+        select(Entity)
+        .where(
+            Entity.name == entity.name,
+            Entity.financial_year_end < entity.financial_year_start
+        )
+        .order_by(Entity.financial_year_end.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    
+    snapshot_query = select(TrialBalanceSnapshot).options(
+        joinedload(TrialBalanceSnapshot.ledger_account)
+    ).where(
+        (TrialBalanceSnapshot.entity_id == entity_id) |
+        (TrialBalanceSnapshot.entity_id == prior_entity.id if prior_entity else False)
+    )
+    snapshots = db.execute(snapshot_query).scalars().all()
 
     # 3. Clear existing exceptions for this entity
     db.execute(delete(AuditException).where(AuditException.entity_id == entity_id))
