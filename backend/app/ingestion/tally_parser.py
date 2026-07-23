@@ -90,9 +90,9 @@ def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
     
     # 1. Parse Company Details
     company_node = root.find(".//COMPANY")
-    entity_name = "Unknown Entity"
-    fy_start = date(2025, 4, 1)
-    fy_end = date(2026, 3, 31)
+    entity_name = None
+    fy_start = None
+    fy_end = None
     
     if company_node is not None:
         rename_node = company_node.find("RENAME")
@@ -127,6 +127,11 @@ def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
                     fy_end = parse_tally_date(to_date_node.text)
                 except Exception:
                     pass
+
+    if not entity_name:
+        raise ValueError("Could not resolve company name from XML export.")
+    if not fy_start or not fy_end:
+        raise ValueError("Could not resolve financial year start or end dates from XML export.")
 
     # Detect if Trial Balance export
     report_node = root.find(".//REPORTNAME")
