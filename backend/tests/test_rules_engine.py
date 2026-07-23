@@ -15,13 +15,14 @@ from app.rules.engine import (
 
 @pytest.fixture
 def sample_entity():
-    return Entity(
+    entity = Entity(
         id=1,
         name="Test Company",
-        financial_year_start=date(2025, 4, 1),
-        financial_year_end=date(2026, 3, 31),
         materiality_threshold=Decimal("1000.00")
     )
+    entity.financial_year_start = date(2025, 4, 1)
+    entity.financial_year_end = date(2026, 3, 31)
+    return entity
 
 
 def test_normal_balance_check_clean(sample_entity):

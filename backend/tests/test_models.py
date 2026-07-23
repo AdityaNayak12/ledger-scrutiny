@@ -19,8 +19,6 @@ def test_database_models_lifecycle():
         # 1. Create and persist an Entity
         entity = Entity(
             name="Acme Corp",
-            financial_year_start=date(2025, 4, 1),
-            financial_year_end=date(2026, 3, 31),
             materiality_threshold=Decimal("10000.00"),
         )
         session.add(entity)
@@ -92,6 +90,8 @@ def test_database_models_lifecycle():
         # 5. Create an AuditException
         exception = AuditException(
             entity_id=entity.id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
             rule_name="normal_balance_check",
             ledger_account_id=cash_account.id,
             severity="error",
@@ -105,6 +105,45 @@ def test_database_models_lifecycle():
         assert exception.created_at is not None
         assert len(entity.exceptions) == 1
         assert len(cash_account.exceptions) == 1
+
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def test_entity_transient_properties_fail_loud():
+    import pytest
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    try:
+        entity = Entity(name="Fail Loud Corp", materiality_threshold=Decimal("10000.00"))
+        session.add(entity)
+        session.commit()
+        entity_id = entity.id
+
+        session.close()
+        session = Session()
+
+        loaded_entity = session.query(Entity).filter_by(id=entity_id).first()
+        assert loaded_entity is not None
+
+        # Verify accessing before setting raises RuntimeError
+        with pytest.raises(RuntimeError) as exc_info:
+            _ = loaded_entity.financial_year_start
+        assert "financial_year_start accessed before being set" in str(exc_info.value)
+
+        with pytest.raises(RuntimeError) as exc_info_end:
+            _ = loaded_entity.financial_year_end
+        assert "financial_year_end accessed before being set" in str(exc_info_end.value)
+
+        # Verify setting works
+        loaded_entity.financial_year_start = date(2025, 4, 1)
+        loaded_entity.financial_year_end = date(2026, 3, 31)
+        assert loaded_entity.financial_year_start == date(2025, 4, 1)
+        assert loaded_entity.financial_year_end == date(2026, 3, 31)
 
     finally:
         session.close()

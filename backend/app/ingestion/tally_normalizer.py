@@ -45,11 +45,17 @@ def decompose_entries(debits: List[Dict[str, Any]], credits: List[Dict[str, Any]
     return pairs
 
 
+from datetime import date
+from app.db.models import AuditException
+
 def normalize_tally_data(
     parsed_data: Dict[str, Any], 
     session: Session, 
     materiality_threshold: Decimal = Decimal("0.00"),
-    entity_id: Optional[int] = None
+    entity_id: Optional[int] = None,
+    clear_only_period: bool = False,
+    target_period_start: Optional[date] = None,
+    target_period_end: Optional[date] = None
 ) -> Entity:
     """
     Normalizes parsed Tally XML data and writes it to the database.
@@ -59,6 +65,9 @@ def normalize_tally_data(
         session: SQLAlchemy DB session.
         materiality_threshold: Materiality threshold for the entity.
         entity_id: Target entity ID to upload data for.
+        clear_only_period: If True, replace data only for the target_period_start/end period.
+        target_period_start: Start date of period to clear.
+        target_period_end: End date of period to clear.
         
     Returns:
         The created/retrieved Entity model object.
@@ -73,27 +82,15 @@ def normalize_tally_data(
         entity = session.execute(select(Entity).where(Entity.id == entity_id)).scalar_one_or_none()
         if not entity:
             raise ValueError(f"Entity with ID {entity_id} not found.")
-        
-        # Clear existing data for this entity to allow fresh upload overwrite
-        session.execute(delete(TrialBalanceSnapshot).where(TrialBalanceSnapshot.entity_id == entity.id))
-        session.execute(delete(Transaction).where(Transaction.entity_id == entity.id))
-        session.execute(delete(LedgerAccount).where(LedgerAccount.entity_id == entity.id))
-        session.flush()
     else:
-        # Check if entity already exists in DB by name and year
+        # Check if entity already exists in DB by name
         entity = session.execute(
-            select(Entity).where(
-                Entity.name == entity_name,
-                Entity.financial_year_start == fy_start,
-                Entity.financial_year_end == fy_end
-            )
+            select(Entity).where(Entity.name == entity_name)
         ).scalar_one_or_none()
         
         if not entity:
             entity = Entity(
                 name=entity_name,
-                financial_year_start=fy_start,
-                financial_year_end=fy_end,
                 materiality_threshold=materiality_threshold
             )
             session.add(entity)
@@ -102,6 +99,40 @@ def normalize_tally_data(
             # Update materiality threshold if provided
             entity.materiality_threshold = materiality_threshold
             session.flush()
+        
+    # Determine the period to clear (delete old snapshots/transactions/exceptions for this period)
+    p_start = target_period_start if clear_only_period and target_period_start else fy_start
+    p_end = target_period_end if clear_only_period and target_period_end else fy_end
+    
+    if clear_only_period and (fy_start != p_start or fy_end != p_end):
+        raise ValueError(
+            f"Uploaded XML period ({fy_start} to {fy_end}) does not match "
+            f"the currently selected period ({p_start} to {p_end}) for Re-upload."
+        )
+
+    # Clear existing snapshots, transactions, and exceptions for the target period
+    session.execute(
+        delete(TrialBalanceSnapshot).where(
+            TrialBalanceSnapshot.entity_id == entity.id,
+            TrialBalanceSnapshot.period_start == p_start,
+            TrialBalanceSnapshot.period_end == p_end
+        )
+    )
+    session.execute(
+        delete(Transaction).where(
+            Transaction.entity_id == entity.id,
+            Transaction.date >= p_start,
+            Transaction.date <= p_end
+        )
+    )
+    session.execute(
+        delete(AuditException).where(
+            AuditException.entity_id == entity.id,
+            AuditException.period_start == p_start,
+            AuditException.period_end == p_end
+        )
+    )
+    session.flush()
         
     # 2. Handle Ledger Accounts
     # Pre-validate all account groups to fail-loud without writing partial data
@@ -228,4 +259,7 @@ def normalize_tally_data(
         session.add(snapshot)
         
     session.flush()
+    # Set transient period attributes so rules can access them without database schema changes
+    entity.financial_year_start = fy_start
+    entity.financial_year_end = fy_end
     return entity

@@ -4,6 +4,17 @@ import type { Entity, Exception } from "./mockData";
 
 const BASE_URL = "http://localhost:8000";
 
+const formatPeriodLabel = (p: { period_start: string; period_end: string }) => {
+  const startYear = p.period_start.split("-")[0];
+  const endYear = p.period_end.split("-")[0];
+  const startYrNum = parseInt(startYear);
+  const endYrNum = parseInt(endYear);
+  if (!isNaN(startYrNum) && !isNaN(endYrNum)) {
+    return `FY ${startYear}-${String(endYrNum).substring(2)}`;
+  }
+  return `${p.period_start} to ${p.period_end}`;
+};
+
 export default function App() {
   const [isMock, setIsMock] = useState<boolean>(() => {
     const saved = localStorage.getItem("isMockMode");
@@ -29,12 +40,24 @@ export default function App() {
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [newEntity, setNewEntity] = useState({
     name: "",
-    financial_year_start: "2025-04-01",
-    financial_year_end: "2026-03-31",
     materiality_threshold: "15000",
   });
   const [gstinLookup, setGstinLookup] = useState<string>("");
   const [isLookingUpGstin, setIsLookingUpGstin] = useState<boolean>(false);
+
+  // Period management states
+  const [periods, setPeriods] = useState<{ period_start: string; period_end: string }[]>([]);
+  const [selectedPeriod, setSelectedPeriod] = useState<{ period_start: string; period_end: string } | null>(null);
+  const [showAddPeriodModal, setShowAddPeriodModal] = useState<boolean>(false);
+  const [newPeriodDates, setNewPeriodDates] = useState({
+    start: "2026-04-01",
+    end: "2027-03-31"
+  });
+  const [hasRunScrutiny, setHasRunScrutiny] = useState<boolean>(false);
+
+  useEffect(() => {
+    setHasRunScrutiny(false);
+  }, [selectedPeriod]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -51,19 +74,25 @@ export default function App() {
     fetchEntities();
   }, [isMock]);
 
-  // Fetch exceptions when selected entity changes
+  // Fetch periods when selected entity changes
   useEffect(() => {
     if (selectedEntityId !== null) {
-      const selected = entities.find((e) => e.id === selectedEntityId);
-      if (selected && selected.scrutinized) {
-        fetchExceptions(selectedEntityId);
-      } else {
-        setExceptions([]);
-      }
+      fetchPeriods(selectedEntityId);
+    } else {
+      setPeriods([]);
+      setSelectedPeriod(null);
+      setExceptions([]);
+    }
+  }, [selectedEntityId, isMock]);
+
+  // Fetch exceptions when selected period changes
+  useEffect(() => {
+    if (selectedEntityId !== null && selectedPeriod !== null) {
+      fetchExceptions(selectedEntityId, selectedPeriod.period_start, selectedPeriod.period_end);
     } else {
       setExceptions([]);
     }
-  }, [selectedEntityId, entities]);
+  }, [selectedEntityId, selectedPeriod, isMock]);
 
   const fetchEntities = async () => {
     setErrorMsg(null);
@@ -111,7 +140,6 @@ export default function App() {
           throw new Error("Invalid GSTIN format. E.g. 27AAAAA1111A1Z1");
         }
 
-        const stateCode = cleaned.substring(0, 2);
         const pan = cleaned.substring(2, 12);
         
         const mockMap: Record<string, string> = {
@@ -155,8 +183,6 @@ export default function App() {
     
     const payload = {
       name: newEntity.name.trim(),
-      financial_year_start: newEntity.financial_year_start,
-      financial_year_end: newEntity.financial_year_end,
       materiality_threshold: parseFloat(newEntity.materiality_threshold) || 0,
     };
 
@@ -170,8 +196,8 @@ export default function App() {
       const created: Entity = {
         id: nextId,
         name: payload.name,
-        financial_year_start: payload.financial_year_start,
-        financial_year_end: payload.financial_year_end,
+        financial_year_start: "2025-04-01",
+        financial_year_end: "2026-03-31",
         materiality_threshold: payload.materiality_threshold,
         has_uploaded: false,
         scrutinized: false,
@@ -184,8 +210,6 @@ export default function App() {
       // Reset form
       setNewEntity({
         name: "",
-        financial_year_start: "2025-04-01",
-        financial_year_end: "2026-03-31",
         materiality_threshold: "15000",
       });
     } else {
@@ -206,46 +230,104 @@ export default function App() {
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const fetchPeriods = async (entityId: number) => {
+    if (isMock) {
+      if (entityId === 1) {
+        const mockPeriods = [{ period_start: "2025-04-01", period_end: "2026-03-31" }];
+        setPeriods(mockPeriods);
+        setSelectedPeriod(mockPeriods[0]);
+      } else if (entityId === 3) {
+        const mockPeriods = [{ period_start: "2024-04-01", period_end: "2025-03-31" }];
+        setPeriods(mockPeriods);
+        setSelectedPeriod(mockPeriods[0]);
+      } else {
+        setPeriods([]);
+        setSelectedPeriod(null);
+      }
+    } else {
+      try {
+        const res = await fetch(`${BASE_URL}/entities/${entityId}/periods`);
+        if (!res.ok) throw new Error("Failed to fetch periods");
+        const data = await res.json();
+        setPeriods(data);
+        if (data.length > 0) {
+          setSelectedPeriod(data[0]); // Default to the most recent period
+        } else {
+          setSelectedPeriod(null);
+        }
+      } catch (err: any) {
+        setErrorMsg(`Failed to load periods: ${err.message}`);
+        setPeriods([]);
+        setSelectedPeriod(null);
+      }
+    }
+  };
+
+  const handleReuploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || selectedEntityId === null) return;
+    if (!file || selectedEntityId === null || !selectedPeriod) return;
     setErrorMsg(null);
+    setIsUploading(true);
 
     if (isMock) {
-      setIsUploading(true);
       setTimeout(() => {
-        const updated = entities.map((ent) =>
-          ent.id === selectedEntityId
-            ? { ...ent, has_uploaded: true, scrutinized: false }
-            : ent
-        );
-        setEntities(updated);
-        localStorage.setItem("mock_entities", JSON.stringify(updated));
         setIsUploading(false);
         if (fileInputRef.current) fileInputRef.current.value = "";
       }, 1500);
     } else {
-      setIsUploading(true);
       const formData = new FormData();
       formData.append("file", file);
       try {
-        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/upload`, {
+        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/upload?clear_only_period=true&target_period_start=${selectedPeriod.period_start}&target_period_end=${selectedPeriod.period_end}`, {
           method: "POST",
           body: formData,
         });
-        if (!res.ok) throw new Error("Failed to upload XML file");
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.detail || "Failed to upload XML file");
+        }
         
-        // Update local entities upload status
-        setEntities((prev) =>
-          prev.map((ent) =>
-            ent.id === selectedEntityId
-              ? { ...ent, has_uploaded: true, scrutinized: false }
-              : ent
-          )
-        );
+        await fetchPeriods(selectedEntityId);
         if (fileInputRef.current) fileInputRef.current.value = "";
       } catch (err: any) {
-        setErrorMsg(`Upload failed: ${err.message}`);
+        setErrorMsg(`Re-upload failed: ${err.message}`);
+      } finally {
+        setIsUploading(false);
+      }
+    }
+  };
+
+  const handleAddPeriodSubmit = async (file: File) => {
+    if (selectedEntityId === null) return;
+    setErrorMsg(null);
+    setIsUploading(true);
+
+    if (isMock) {
+      setTimeout(() => {
+        setIsUploading(false);
+        setShowAddPeriodModal(false);
+        const newP = { period_start: newPeriodDates.start, period_end: newPeriodDates.end };
+        const updatedPeriods = [...periods, newP];
+        setPeriods(updatedPeriods);
+        setSelectedPeriod(newP);
+      }, 1500);
+    } else {
+      const formData = new FormData();
+      formData.append("file", file);
+      try {
+        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/upload?clear_only_period=true&target_period_start=${newPeriodDates.start}&target_period_end=${newPeriodDates.end}`, {
+          method: "POST",
+          body: formData,
+        });
+        if (!res.ok) {
+          const errData = await res.json();
+          throw new Error(errData.detail || "Failed to upload XML file");
+        }
+        
+        setShowAddPeriodModal(false);
+        await fetchPeriods(selectedEntityId);
+      } catch (err: any) {
+        setErrorMsg(`Failed to add period: ${err.message}`);
       } finally {
         setIsUploading(false);
       }
@@ -253,38 +335,26 @@ export default function App() {
   };
 
   const handleTriggerScrutiny = async () => {
-    if (selectedEntityId === null) return;
+    if (selectedEntityId === null || !selectedPeriod) return;
     setErrorMsg(null);
     setIsScrutinizing(true);
 
     if (isMock) {
       setTimeout(() => {
-        // Set entity as scrutinized in mock state
-        const updated = entities.map((ent) =>
-          ent.id === selectedEntityId ? { ...ent, scrutinized: true } : ent
-        );
-        setEntities(updated);
-        localStorage.setItem("mock_entities", JSON.stringify(updated));
         setIsScrutinizing(false);
-        // Load fixture exceptions
         const mockExcs = MOCK_EXCEPTIONS[selectedEntityId] || [];
         setExceptions(mockExcs);
-      }, 1800);
+        setHasRunScrutiny(true);
+      }, 1500);
     } else {
       try {
-        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/scrutiny-run`, {
+        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/scrutiny-run?period_start=${selectedPeriod.period_start}&period_end=${selectedPeriod.period_end}`, {
           method: "POST",
         });
         if (!res.ok) throw new Error("Scrutiny run failed");
         
-        // Mark as scrutinized
-        setEntities((prev) =>
-          prev.map((ent) =>
-            ent.id === selectedEntityId ? { ...ent, scrutinized: true } : ent
-          )
-        );
-        // Fetch generated exceptions
-        await fetchExceptions(selectedEntityId);
+        await fetchExceptions(selectedEntityId, selectedPeriod.period_start, selectedPeriod.period_end);
+        setHasRunScrutiny(true);
       } catch (err: any) {
         setErrorMsg(`Scrutiny run failed: ${err.message}`);
       } finally {
@@ -293,18 +363,28 @@ export default function App() {
     }
   };
 
-  const fetchExceptions = async (entityId: number) => {
+  const fetchExceptions = async (entityId: number, start?: string, end?: string) => {
     setIsLoadingExceptions(true);
     if (isMock) {
       const mockExcs = MOCK_EXCEPTIONS[entityId] || [];
       setExceptions(mockExcs);
+      if (mockExcs.length > 0) {
+        setHasRunScrutiny(true);
+      }
       setIsLoadingExceptions(false);
     } else {
       try {
-        const res = await fetch(`${BASE_URL}/entities/${entityId}/exceptions`);
+        let url = `${BASE_URL}/entities/${entityId}/exceptions`;
+        if (start && end) {
+          url += `?period_start=${start}&period_end=${end}`;
+        }
+        const res = await fetch(url);
         if (!res.ok) throw new Error("Failed to load exceptions");
         const data = await res.json();
         setExceptions(data);
+        if (data.length > 0) {
+          setHasRunScrutiny(true);
+        }
       } catch (err: any) {
         setErrorMsg(`Failed to load exceptions: ${err.message}`);
       } finally {
@@ -405,8 +485,6 @@ export default function App() {
                 setGstinLookup("");
                 setNewEntity({
                   name: "",
-                  financial_year_start: "2025-04-01",
-                  financial_year_end: "2026-03-31",
                   materiality_threshold: "15000",
                 });
                 setShowAddModal(true);
@@ -448,21 +526,7 @@ export default function App() {
                   >
                     <h3 className="font-bold text-sm text-slate-100 mb-1 tracking-tight truncate">{ent.name}</h3>
                     <div className="flex justify-between items-center text-xxs text-slate-400 font-semibold uppercase tracking-wider">
-                      <span>FY: {ent.financial_year_start.split("-")[0]}-{ent.financial_year_end.split("-")[0].substring(2)}</span>
-                      <span>Mat: ₹{ent.materiality_threshold.toLocaleString()}</span>
-                    </div>
-
-                    {/* Status Badge */}
-                    <div className="mt-2.5 flex items-center justify-between">
-                      <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider ${
-                        ent.scrutinized
-                          ? "bg-emerald-950/60 text-emerald-400 border border-emerald-900/50"
-                          : ent.has_uploaded
-                          ? "bg-amber-950/60 text-amber-400 border border-amber-900/50"
-                          : "bg-slate-800 text-slate-400 border border-slate-700"
-                      }`}>
-                        {ent.scrutinized ? "Scrutinized" : ent.has_uploaded ? "Uploaded" : "Pending XML"}
-                      </span>
+                      <span>Materiality: ₹{ent.materiality_threshold.toLocaleString()}</span>
                     </div>
                   </button>
                 );
@@ -493,11 +557,29 @@ export default function App() {
                 <div>
                   <span className="text-xxs text-indigo-400 font-bold uppercase tracking-wider">Active Client Scrutiny Workspace</span>
                   <h2 className="text-2xl font-extrabold text-white mt-1 mb-2 tracking-tight">{selectedEntity.name}</h2>
-                  <div className="flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-400 font-medium">
-                    <span className="flex items-center gap-1.5">
-                      <svg className="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-                      Financial Period: <strong className="text-slate-200 font-semibold">{selectedEntity.financial_year_start} to {selectedEntity.financial_year_end}</strong>
-                    </span>
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-400 font-medium">
+                    {periods.length > 0 ? (
+                      <span className="flex items-center gap-1.5">
+                        <svg className="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                        Financial Period:
+                        <select
+                          value={selectedPeriod ? JSON.stringify(selectedPeriod) : ""}
+                          onChange={(e) => setSelectedPeriod(e.target.value ? JSON.parse(e.target.value) : null)}
+                          className="bg-slate-905 border border-slate-800 rounded-lg text-xs font-bold px-2 py-1 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer ml-1"
+                        >
+                          {periods.map((p, idx) => (
+                            <option key={idx} value={JSON.stringify(p)}>
+                              {formatPeriodLabel(p)} ({p.period_start} to {p.period_end})
+                            </option>
+                          ))}
+                        </select>
+                      </span>
+                    ) : (
+                      <span className="text-amber-400 font-semibold flex items-center gap-1">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
+                        Awaiting XML Ingestion
+                      </span>
+                    )}
                     <span className="flex items-center gap-1.5">
                       <svg className="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v12a2 2 0 00-2 2z" /></svg>
                       Materiality Threshold: <strong className="text-indigo-400 font-semibold">₹{selectedEntity.materiality_threshold.toLocaleString()}</strong>
@@ -507,59 +589,24 @@ export default function App() {
 
                 {/* Pipeline controls */}
                 <div className="flex items-center gap-3">
-                  {!selectedEntity.has_uploaded ? (
-                    <div className="flex flex-col gap-2">
-                      <label className="text-xs text-slate-400 font-semibold">Upload Tally XML Export</label>
-                      <input
-                        type="file"
-                        accept=".xml"
-                        ref={fileInputRef}
-                        onChange={handleFileUpload}
-                        disabled={isUploading}
-                        className="hidden"
-                      />
-                      <button
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={isUploading}
-                        className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-xl px-4 py-2.5 text-sm font-bold transition-all shadow-md shadow-indigo-900/30 flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
-                      >
-                        {isUploading ? (
-                          <>
-                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                            <span>Parsing XML...</span>
-                          </>
-                        ) : (
-                          <>
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-                            <span>Select XML file</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
+                  {periods.length === 0 ? (
+                    <button
+                      onClick={() => {
+                        setNewPeriodDates({ start: "2025-04-01", end: "2026-03-31" });
+                        setShowAddPeriodModal(true);
+                      }}
+                      className="bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl px-5 py-2.5 text-sm font-bold transition-all shadow-md shadow-indigo-900/30 flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
+                      <span>Add First Period</span>
+                    </button>
                   ) : (
                     <div className="flex flex-col sm:flex-row gap-3">
-                      {/* Upload new XML option */}
-                      <input
-                        type="file"
-                        accept=".xml"
-                        ref={fileInputRef}
-                        onChange={handleFileUpload}
-                        disabled={isUploading || isScrutinizing}
-                        className="hidden"
-                      />
-                      <button
-                        onClick={() => fileInputRef.current?.click()}
-                        disabled={isUploading || isScrutinizing}
-                        className="bg-slate-900 border border-slate-800 hover:border-slate-700 text-slate-300 rounded-xl px-4 py-2.5 text-sm font-bold transition-all flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
-                      >
-                        {isUploading ? "Uploading..." : "Re-upload XML"}
-                      </button>
-
-                      {/* Scrutiny trigger button */}
+                      {/* Run Scrutiny Pass */}
                       <button
                         onClick={handleTriggerScrutiny}
-                        disabled={isScrutinizing}
-                        className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-xl px-5 py-2.5 text-sm font-extrabold tracking-wide uppercase transition-all shadow-lg shadow-indigo-950/50 flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
+                        disabled={isScrutinizing || !selectedPeriod}
+                        className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-xl px-4 py-2.5 text-sm font-extrabold tracking-wide uppercase transition-all shadow-lg shadow-indigo-950/50 flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
                       >
                         {isScrutinizing ? (
                           <>
@@ -573,16 +620,49 @@ export default function App() {
                           </>
                         )}
                       </button>
+
+                      {/* Re-upload XML option */}
+                      <input
+                        type="file"
+                        accept=".xml"
+                        ref={fileInputRef}
+                        onChange={handleReuploadFile}
+                        className="hidden"
+                      />
+                      <button
+                        onClick={() => {
+                          if (window.confirm(`Warning: Re-uploading will overwrite all existing snapshot and transaction data for the selected period (${selectedPeriod ? formatPeriodLabel(selectedPeriod) : ""}). This cannot be undone. Do you wish to proceed?`)) {
+                            fileInputRef.current?.click();
+                          }
+                        }}
+                        disabled={isUploading || isScrutinizing || !selectedPeriod}
+                        className="bg-slate-905 border border-slate-800 hover:border-slate-700 text-slate-300 rounded-xl px-4 py-2.5 text-sm font-bold transition-all flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
+                      >
+                        {isUploading ? "Uploading..." : "Re-upload XML"}
+                      </button>
+
+                      {/* Add New Period */}
+                      <button
+                        onClick={() => {
+                          setNewPeriodDates({ start: "2026-04-01", end: "2027-03-31" });
+                          setShowAddPeriodModal(true);
+                        }}
+                        disabled={isUploading || isScrutinizing}
+                        className="bg-slate-905 border border-slate-800 hover:border-slate-700 text-indigo-400 hover:text-indigo-300 rounded-xl px-4 py-2.5 text-sm font-bold transition-all flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
+                        <span>Add Period</span>
+                      </button>
                     </div>
                   )}
                 </div>
               </div>
 
               {/* EXCEPTIONS REPORT WORKSPACE */}
-              {!selectedEntity.scrutinized ? (
+              {periods.length === 0 || !hasRunScrutiny ? (
                 <div className="flex-1 bg-slate-950/30 border border-slate-850 rounded-3xl p-12 text-center flex flex-col items-center justify-center">
                   <div className="bg-slate-900 border border-slate-800 text-slate-400 p-5 rounded-full mb-4">
-                    {selectedEntity.has_uploaded ? (
+                    {periods.length > 0 ? (
                       <svg className="w-12 h-12 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
                       </svg>
@@ -593,16 +673,16 @@ export default function App() {
                     )}
                   </div>
                   <h3 className="text-lg font-bold text-slate-200 mb-2">
-                    {selectedEntity.has_uploaded ? "XML Uploaded Successfully" : "Awaiting Tally XML Upload"}
+                    {periods.length > 0 ? "XML Uploaded Successfully" : "Awaiting Tally XML Upload"}
                   </h3>
                   <p className="text-sm text-slate-400 max-w-sm mb-6 leading-relaxed">
-                    {selectedEntity.has_uploaded
+                    {periods.length > 0
                       ? "The ledger data is normalized. Click 'Run Scrutiny Pass' to execute the rule validation pipeline."
                       : "Please upload the client's Tally XML export file to ingest their trial balance and transactions."}
                   </p>
                   
                   {/* Demo Helper Prompt for Tally XML upload */}
-                  {!selectedEntity.has_uploaded && (
+                  {periods.length === 0 && (
                     <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 max-w-md text-xxs text-slate-400 text-left">
                       <strong className="text-slate-300 font-bold block mb-1">Demonstration Notice:</strong>
                       In Mock Mode, any dummy XML file can be uploaded, or you can drag and drop [sample_tally_export.xml](file:///Users/adinayak18/Desktop/ledger-scrutiny/sample_data/sample_tally_export.xml) to trigger the simulated ingestion of their ledger records.
@@ -783,29 +863,6 @@ export default function App() {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">FY Start Date</label>
-                  <input
-                    type="date"
-                    required
-                    value={newEntity.financial_year_start}
-                    onChange={(e) => setNewEntity({ ...newEntity, financial_year_start: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 font-semibold"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">FY End Date</label>
-                  <input
-                    type="date"
-                    required
-                    value={newEntity.financial_year_end}
-                    onChange={(e) => setNewEntity({ ...newEntity, financial_year_end: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 font-semibold"
-                  />
-                </div>
-              </div>
-
               <div>
                 <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Materiality Threshold (INR)</label>
                 <input
@@ -836,6 +893,77 @@ export default function App() {
               </div>
 
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* ADD NEW PERIOD MODAL */}
+      {showAddPeriodModal && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-fadeIn">
+            
+            {/* Modal Header */}
+            <div className="bg-slate-950 py-4 px-6 border-b border-slate-850 flex justify-between items-center">
+              <h2 className="text-base font-bold text-white m-0">Ingest Financial Year Period</h2>
+              <button
+                onClick={() => setShowAddPeriodModal(false)}
+                className="text-slate-400 hover:text-white font-bold text-xl cursor-pointer focus:outline-none"
+              >
+                &times;
+              </button>
+            </div>
+
+            {/* Modal Form */}
+            <div className="p-6 flex flex-col gap-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Period Start Date</label>
+                  <input
+                    type="date"
+                    required
+                    value={newPeriodDates.start}
+                    onChange={(e) => setNewPeriodDates({ ...newPeriodDates, start: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Period End Date</label>
+                  <input
+                    type="date"
+                    required
+                    value={newPeriodDates.end}
+                    onChange={(e) => setNewPeriodDates({ ...newPeriodDates, end: e.target.value })}
+                    className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 font-semibold"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Select Tally XML Export</label>
+                <input
+                  type="file"
+                  accept=".xml"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      handleAddPeriodSubmit(file);
+                    }
+                  }}
+                  className="w-full text-sm text-slate-400 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-extrabold file:uppercase file:bg-slate-800 file:text-slate-300 hover:file:bg-slate-700 cursor-pointer"
+                />
+              </div>
+
+              {/* Modal Actions */}
+              <div className="flex gap-3 justify-end mt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowAddPeriodModal(false)}
+                  className="bg-slate-950 hover:bg-slate-850 border border-slate-800 text-slate-300 rounded-xl px-4 py-2.5 text-xs font-bold transition-all cursor-pointer focus:outline-none"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

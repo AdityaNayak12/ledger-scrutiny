@@ -24,16 +24,12 @@ router = APIRouter(
 # Pydantic schemas
 class EntityCreate(BaseModel):
     name: str
-    financial_year_start: date
-    financial_year_end: date
     materiality_threshold: Decimal
 
 
 class EntityResponse(BaseModel):
     id: int
     name: str
-    financial_year_start: date
-    financial_year_end: date
     materiality_threshold: Decimal
 
     model_config = ConfigDict(from_attributes=True)
@@ -46,6 +42,13 @@ class ExceptionResponse(BaseModel):
     message: str
     ledger_account_name: Optional[str] = None
     created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class PeriodResponse(BaseModel):
+    period_start: date
+    period_end: date
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -74,8 +77,6 @@ def create_entity(entity_in: EntityCreate, db: Session = Depends(get_db)):
     """Create a new business entity."""
     entity = Entity(
         name=entity_in.name,
-        financial_year_start=entity_in.financial_year_start,
-        financial_year_end=entity_in.financial_year_end,
         materiality_threshold=entity_in.materiality_threshold
     )
     db.add(entity)
@@ -84,11 +85,30 @@ def create_entity(entity_in: EntityCreate, db: Session = Depends(get_db)):
     return entity
 
 
+@router.get("/entities/{entity_id}/periods", response_model=List[PeriodResponse])
+def list_periods(entity_id: int, db: Session = Depends(get_db)):
+    """List all financial periods with data for this entity."""
+    results = db.execute(
+        select(TrialBalanceSnapshot.period_start, TrialBalanceSnapshot.period_end)
+        .where(TrialBalanceSnapshot.entity_id == entity_id)
+        .distinct()
+    ).all()
+    # Sort descending by period_start
+    sorted_results = sorted(results, key=lambda x: x.period_start, reverse=True)
+    return [
+        PeriodResponse(period_start=r.period_start, period_end=r.period_end)
+        for r in sorted_results
+    ]
+
+
 # --- Scrutiny and Ingestion endpoints ---
 
 @router.post("/entities/{entity_id}/upload", response_model=IngestionResponse)
 async def upload_tally_export(
     entity_id: int,
+    clear_only_period: bool = Query(False),
+    target_period_start: Optional[date] = Query(None),
+    target_period_end: Optional[date] = Query(None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db)
 ):
@@ -119,12 +139,15 @@ async def upload_tally_export(
         )
 
     try:
-        # Normalize and clear existing data for this entity
+        # Normalize and clear existing data for this entity/period
         normalize_tally_data(
             parsed_data, 
             db, 
             materiality_threshold=entity.materiality_threshold, 
-            entity_id=entity.id
+            entity_id=entity.id,
+            clear_only_period=clear_only_period,
+            target_period_start=target_period_start,
+            target_period_end=target_period_end
         )
         db.commit()
         return IngestionResponse(
@@ -141,10 +164,14 @@ async def upload_tally_export(
 
 
 @router.post("/entities/{entity_id}/scrutiny-run", response_model=ScrutinyRunSummary)
-def trigger_scrutiny_run(entity_id: int, db: Session = Depends(get_db)):
+def trigger_scrutiny_run(
+    entity_id: int,
+    period_start: date = Query(...),
+    period_end: date = Query(...),
+    db: Session = Depends(get_db)
+):
     """
-    Trigger the rules engine scrutiny run for the specified entity,
-    and return a summary containing the count of generated exceptions.
+    Trigger the rules engine scrutiny run for the specified entity and period.
     """
     # 1. Fetch Entity
     entity = db.execute(select(Entity).where(Entity.id == entity_id)).scalar_one_or_none()
@@ -154,39 +181,55 @@ def trigger_scrutiny_run(entity_id: int, db: Session = Depends(get_db)):
             detail=f"Entity with ID {entity_id} not found."
         )
 
-    # 2. Fetch Accounts and Snapshots
+    # Set transient period attributes so rules can access them without database schema changes
+    entity.financial_year_start = period_start
+    entity.financial_year_end = period_end
+
+    # 2. Fetch Accounts
     accounts = db.execute(
         select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)
     ).scalars().all()
     
-    # Fetch prior period snapshots as well for continuity check
-    prior_entity = db.execute(
-        select(Entity)
+    # Find prior period from TrialBalanceSnapshot
+    prior_period = db.execute(
+        select(TrialBalanceSnapshot.period_start, TrialBalanceSnapshot.period_end)
         .where(
-            Entity.name == entity.name,
-            Entity.financial_year_end < entity.financial_year_start
+            TrialBalanceSnapshot.entity_id == entity_id,
+            TrialBalanceSnapshot.period_end <= period_start
         )
-        .order_by(Entity.financial_year_end.desc())
+        .order_by(TrialBalanceSnapshot.period_end.desc())
         .limit(1)
-    ).scalar_one_or_none()
+    ).first()
     
+    # Fetch current and prior snapshots
     snapshot_query = select(TrialBalanceSnapshot).options(
         joinedload(TrialBalanceSnapshot.ledger_account)
     ).where(
-        (TrialBalanceSnapshot.entity_id == entity_id) |
-        (TrialBalanceSnapshot.entity_id == prior_entity.id if prior_entity else False)
+        TrialBalanceSnapshot.entity_id == entity_id
+    ).where(
+        ((TrialBalanceSnapshot.period_start == period_start) & (TrialBalanceSnapshot.period_end == period_end)) |
+        ((TrialBalanceSnapshot.period_start == prior_period.period_start) & (TrialBalanceSnapshot.period_end == prior_period.period_end) if prior_period else False)
     )
     snapshots = db.execute(snapshot_query).scalars().all()
 
-    # 3. Clear existing exceptions for this entity
-    db.execute(delete(AuditException).where(AuditException.entity_id == entity_id))
+    # 3. Clear existing exceptions for this entity and period
+    db.execute(
+        delete(AuditException)
+        .where(
+            AuditException.entity_id == entity_id,
+            AuditException.period_start == period_start,
+            AuditException.period_end == period_end
+        )
+    )
     db.flush()
 
     # 4. Run rules engine
     exceptions = run_scrutiny(entity, accounts, snapshots)
 
-    # 5. Persist exceptions to the database
+    # 5. Persist exceptions to the database, setting the period fields
     for exc in exceptions:
+        exc.period_start = period_start
+        exc.period_end = period_end
         db.add(exc)
     db.commit()
 
@@ -199,11 +242,13 @@ def trigger_scrutiny_run(entity_id: int, db: Session = Depends(get_db)):
 @router.get("/entities/{entity_id}/exceptions", response_model=List[ExceptionResponse])
 def list_exceptions(
     entity_id: int,
+    period_start: Optional[date] = Query(None),
+    period_end: Optional[date] = Query(None),
     severity: Optional[str] = Query(None, description="Filter exceptions by severity"),
     db: Session = Depends(get_db)
 ):
     """
-    Get the list of scrutiny exceptions persisted for the specified entity,
+    Get the list of scrutiny exceptions persisted for the specified entity and period,
     optionally filtered by severity level.
     """
     # Verify entity exists
@@ -215,6 +260,10 @@ def list_exceptions(
         )
 
     query = select(AuditException).options(joinedload(AuditException.ledger_account)).where(AuditException.entity_id == entity_id)
+    if period_start:
+        query = query.where(AuditException.period_start == period_start)
+    if period_end:
+        query = query.where(AuditException.period_end == period_end)
     if severity:
         query = query.where(AuditException.severity == severity)
 

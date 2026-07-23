@@ -15,8 +15,6 @@ class Entity(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    financial_year_start: Mapped[date] = mapped_column(Date, nullable=False)
-    financial_year_end: Mapped[date] = mapped_column(Date, nullable=False)
     materiality_threshold: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
 
     # Relationships
@@ -32,6 +30,33 @@ class Entity(Base):
     exceptions: Mapped[list["AuditException"]] = relationship(
         "AuditException", back_populates="entity", cascade="all, delete-orphan"
     )
+
+    # Transient attributes fallback mapping
+    @property
+    def financial_year_start(self) -> date:
+        if hasattr(self, "_transient_fy_start") and self._transient_fy_start is not None:
+            return self._transient_fy_start
+        raise RuntimeError(
+            "Entity.financial_year_start accessed before being set for this scrutiny run. "
+            "This indicates a code path that skipped explicit period attachment."
+        )
+
+    @financial_year_start.setter
+    def financial_year_start(self, value: date):
+        self._transient_fy_start = value
+
+    @property
+    def financial_year_end(self) -> date:
+        if hasattr(self, "_transient_fy_end") and self._transient_fy_end is not None:
+            return self._transient_fy_end
+        raise RuntimeError(
+            "Entity.financial_year_end accessed before being set for this scrutiny run. "
+            "This indicates a code path that skipped explicit period attachment."
+        )
+
+    @financial_year_end.setter
+    def financial_year_end(self, value: date):
+        self._transient_fy_end = value
 
 
 class LedgerAccount(Base):
@@ -123,6 +148,8 @@ class AuditException(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), nullable=False)
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
     rule_name: Mapped[str] = mapped_column(String(100), nullable=False)
     ledger_account_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("ledger_accounts.id", ondelete="CASCADE"), nullable=True

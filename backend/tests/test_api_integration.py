@@ -47,8 +47,6 @@ def test_api_entities_lifecycle_flow():
     # 1. Create an Entity
     entity_payload = {
         "name": "Acme Audited Corp",
-        "financial_year_start": "2025-04-01",
-        "financial_year_end": "2026-03-31",
         "materiality_threshold": "1000.00"
     }
     create_res = client.post("/entities", json=entity_payload)
@@ -77,14 +75,14 @@ def test_api_entities_lifecycle_flow():
     assert res_data["entity_id"] == entity_id
 
     # 4. Trigger Scrutiny Run
-    run_res = client.post(f"/entities/{entity_id}/scrutiny-run")
+    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
     assert run_res.status_code == 200
     summary = run_res.json()
     assert summary["status"] == "success"
     assert summary["exceptions_count"] == 0
 
     # 5. Check exceptions endpoint
-    list_exceptions_res = client.get(f"/entities/{entity_id}/exceptions")
+    list_exceptions_res = client.get(f"/entities/{entity_id}/exceptions?period_start=2025-04-01&period_end=2026-03-31")
     assert list_exceptions_res.status_code == 200
     assert len(list_exceptions_res.json()) == 0
 
@@ -93,8 +91,6 @@ def test_api_scrutiny_with_violations():
     # 1. Create the entity
     entity_payload = {
         "name": "Violating Company Ltd",
-        "financial_year_start": "2025-04-01",
-        "financial_year_end": "2026-03-31",
         "materiality_threshold": "5000.00"
     }
     create_res = client.post("/entities", json=entity_payload)
@@ -159,14 +155,14 @@ def test_api_scrutiny_with_violations():
     assert upload_res.status_code == 200
 
     # 4. Trigger Scrutiny
-    run_res = client.post(f"/entities/{entity_id}/scrutiny-run")
+    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
     assert run_res.status_code == 200
     summary = run_res.json()
     assert summary["status"] == "success"
     assert summary["exceptions_count"] == 2
 
     # 5. Query exceptions filterable by severity
-    list_res = client.get(f"/entities/{entity_id}/exceptions", params={"severity": "error"})
+    list_res = client.get(f"/entities/{entity_id}/exceptions", params={"severity": "error", "period_start": "2025-04-01", "period_end": "2026-03-31"})
     assert list_res.status_code == 200
     exceptions = list_res.json()
     assert len(exceptions) == 2

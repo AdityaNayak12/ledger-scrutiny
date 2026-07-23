@@ -1,0 +1,128 @@
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <EXPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Trial Balance</REPORTNAME>
+        <STATICVARIABLES>
+          <SVFROMDATE>20260401</SVFROMDATE>
+          <SVTODATE>20270331</SVTODATE>
+          <SVCOMPANYNAME>Test Fixtures Pvt Ltd</SVCOMPANYNAME>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+      <REQUESTDATA>
+
+        <!-- CLEAN continuity: opening exactly matches prior year's
+             closing balance from test_fixture_with_exceptions.xml
+             (-500000.00). Should raise nothing from the continuity rule. -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Share Capital">
+            <PARENT>Capital Account</PARENT>
+            <OPENINGBALANCE>-500000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>-500000.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- CLEAN continuity: prior year closed at 108000.00, this
+             year opens at 108000.00. Matches. -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Furniture and Fixtures">
+            <PARENT>Fixed Assets</PARENT>
+            <OPENINGBALANCE>108000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>97200.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- TRIGGERS continuity rule: prior year closed at -12000.00,
+             this year opens at -9000.00. A 3000.00 unexplained gap,
+             above the 15000 materiality threshold used elsewhere in
+             testing? NO, this is deliberately BELOW 15000 to test that
+             the materiality filter correctly suppresses small variances
+             for THIS rule (unlike normal_balance_check, this rule IS
+             magnitude-based and should respect the threshold). -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Rahul Enterprises">
+            <PARENT>Sundry Debtors</PARENT>
+            <OPENINGBALANCE>-9000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>15000.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- TRIGGERS continuity rule, ABOVE materiality threshold:
+             prior year closed at 8000.00, this year opens at
+             48000.00. A 40000.00 unexplained gap, well above the
+             15000 threshold. Should always appear regardless of
+             threshold used in normal testing. -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Verma Traders">
+            <PARENT>Sundry Creditors</PARENT>
+            <OPENINGBALANCE>48000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>22000.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- CLEAN continuity, and CLEAN normal balance too, this fixes
+             the abnormal balance from the prior period. Prior year
+             closed at -150.00 (a violation), this year OPENS at
+             -150.00, correctly carried forward, then normalizes back
+             to a proper debit balance by year end. Continuity holds
+             even though the account was flagged last year, continuity
+             only checks opening = prior closing, not whether that
+             balance was "correct". -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Petty Cash Variance">
+            <PARENT>Cash-in-hand</PARENT>
+            <OPENINGBALANCE>-150.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>500.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- CLEAN continuity: prior year closed at 410000.00, this
+             year opens at 410000.00. -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="HDFC Bank Current Account">
+            <PARENT>Bank Accounts</PARENT>
+            <OPENINGBALANCE>410000.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>580000.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- CLEAN: P&L accounts (Sales, Purchase, Expenses) reset to
+             zero at the start of a new financial year in standard
+             accounting practice, this is EXPECTED and should NOT be
+             flagged as a continuity break. This row exists specifically
+             to test that the continuity rule correctly excludes P&L
+             account types (Sales Accounts, Purchase Accounts, Direct/
+             Indirect Expenses, Direct/Indirect Income groups) from the
+             opening-must-equal-prior-closing check, since only balance
+             sheet accounts (assets, liabilities, capital) carry forward. -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Sales Account">
+            <PARENT>Sales Accounts</PARENT>
+            <OPENINGBALANCE>0.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>-1120000.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <TALLYMESSAGE>
+          <LEDGER NAME="Purchase Account">
+            <PARENT>Purchase Accounts</PARENT>
+            <OPENINGBALANCE>0.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>710000.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <TALLYMESSAGE>
+          <LEDGER NAME="Office Rent">
+            <PARENT>Indirect Expenses</PARENT>
+            <OPENINGBALANCE>0.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>156000.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+      </REQUESTDATA>
+    </EXPORTDATA>
+  </BODY>
+</ENVELOPE>
