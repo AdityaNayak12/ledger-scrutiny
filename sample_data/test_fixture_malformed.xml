@@ -1,0 +1,55 @@
+<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <EXPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>Trial Balance</REPORTNAME>
+        <STATICVARIABLES>
+          <SVFROMDATE>20250401</SVFROMDATE>
+          <SVTODATE>20260331</SVTODATE>
+          <SVCOMPANYNAME>Malformed test entity</SVCOMPANYNAME>
+        </STATICVARIABLES>
+      </REQUESTDESC>
+      <REQUESTDATA>
+
+        <!-- 1. Unmapped custom group -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Custom Account with Bad Group">
+            <PARENT>Unmapped Custom Group</PARENT>
+            <OPENINGBALANCE>0.00</OPENINGBALANCE>
+            <CLOSINGBALANCE>0.00</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- 2. Missing CLOSINGBALANCE -->
+        <TALLYMESSAGE>
+          <LEDGER NAME="Account Missing Closing Balance">
+            <PARENT>Capital Account</PARENT>
+            <OPENINGBALANCE>0.00</OPENINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+
+        <!-- 3. Unbalanced voucher -->
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="Journal" DATE="20250615">
+            <NARRATION>Unbalanced transaction</NARRATION>
+            <VOUCHERNUMBER>ERR-101</VOUCHERNUMBER>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Share Capital</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>1000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>Sales Account</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>-500.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+
+      </REQUESTDATA>
+    </EXPORTDATA>
+  </BODY>
+</ENVELOPE>

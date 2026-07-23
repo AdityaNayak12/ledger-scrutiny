@@ -104,6 +104,24 @@ def normalize_tally_data(
             session.flush()
         
     # 2. Handle Ledger Accounts
+    # Pre-validate all account groups to fail-loud without writing partial data
+    from app.rules.account_groups import UnrecognizedAccountGroupError
+    unmapped_accounts = []
+    for ld in parsed_data["ledgers"]:
+        lname = ld["name"]
+        gname = ld["group_name"]
+        try:
+            get_normal_balance(gname)
+        except UnrecognizedAccountGroupError:
+            unmapped_accounts.append((lname, gname))
+            
+    if unmapped_accounts:
+        details = "; ".join([f"Ledger '{lname}' has unmapped parent group '{gname}'" for lname, gname in unmapped_accounts])
+        raise ValueError(
+            f"Ingestion failed. Unrecognized account group(s) encountered: {details}. "
+            f"Please register these group(s) in rules/account_groups.py."
+        )
+
     # Keep a cache of {ledger_name: ledger_id} for mapping transactions
     ledger_cache: Dict[str, int] = {}
     
@@ -118,7 +136,7 @@ def normalize_tally_data(
         lname = ld["name"]
         gname = ld["group_name"]
         
-        # Get normal balance or raise UnrecognizedAccountGroupError
+        # Get normal balance
         normal_bal = get_normal_balance(gname)
         
         if lname not in ledger_cache:

@@ -125,3 +125,135 @@ def test_tally_ingestion_end_to_end():
     finally:
         session.close()
         Base.metadata.drop_all(engine)
+
+
+def test_tally_ingestion_edge_cases():
+    # 1. Test missing CLOSINGBALANCE
+    xml_missing_closing = b"""<ENVELOPE>
+      <BODY>
+        <EXPORTDATA>
+          <REQUESTDESC>
+            <REPORTNAME>Trial Balance</REPORTNAME>
+            <STATICVARIABLES>
+              <SVFROMDATE>20250401</SVFROMDATE>
+              <SVTODATE>20260331</SVTODATE>
+              <SVCOMPANYNAME>Test Corp</SVCOMPANYNAME>
+            </STATICVARIABLES>
+          </REQUESTDESC>
+          <REQUESTDATA>
+            <TALLYMESSAGE>
+              <LEDGER NAME="Bad Account">
+                <PARENT>Capital Account</PARENT>
+                <OPENINGBALANCE>100.00</OPENINGBALANCE>
+                <!-- Missing CLOSINGBALANCE entirely -->
+              </LEDGER>
+            </TALLYMESSAGE>
+          </REQUESTDATA>
+        </EXPORTDATA>
+      </BODY>
+    </ENVELOPE>"""
+    
+    import pytest
+    with pytest.raises(ValueError) as excinfo:
+        parse_tally_xml(xml_missing_closing)
+    assert "missing CLOSINGBALANCE" in str(excinfo.value)
+    
+    # 2. Test unbalanced voucher
+    xml_unbalanced_voucher = b"""<ENVELOPE>
+      <BODY>
+        <EXPORTDATA>
+          <REQUESTDESC>
+            <STATICVARIABLES>
+              <SVFROMDATE>20250401</SVFROMDATE>
+              <SVTODATE>20260331</SVTODATE>
+              <SVCOMPANYNAME>Test Corp</SVCOMPANYNAME>
+            </STATICVARIABLES>
+          </REQUESTDESC>
+          <REQUESTDATA>
+            <TALLYMESSAGE>
+              <LEDGER NAME="Share Capital">
+                <PARENT>Capital Account</PARENT>
+                <OPENINGBALANCE>0.00</OPENINGBALANCE>
+                <CLOSINGBALANCE>0.00</CLOSINGBALANCE>
+              </LEDGER>
+            </TALLYMESSAGE>
+            <TALLYMESSAGE>
+              <VOUCHER VCHTYPE="Journal" DATE="20250615">
+                <VOUCHERNUMBER>ERR-999</VOUCHERNUMBER>
+                <ALLLEDGERENTRIES.LIST>
+                  <LEDGERNAME>Share Capital</LEDGERNAME>
+                  <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+                  <AMOUNT>1000.00</AMOUNT>
+                </ALLLEDGERENTRIES.LIST>
+                <ALLLEDGERENTRIES.LIST>
+                  <LEDGERNAME>Sales Account</LEDGERNAME>
+                  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                  <AMOUNT>-400.00</AMOUNT>
+                </ALLLEDGERENTRIES.LIST>
+              </VOUCHER>
+            </TALLYMESSAGE>
+          </REQUESTDATA>
+        </EXPORTDATA>
+      </BODY>
+    </ENVELOPE>"""
+    
+    with pytest.raises(ValueError) as excinfo:
+        parse_tally_xml(xml_unbalanced_voucher)
+    assert "is unbalanced" in str(excinfo.value)
+    assert "ERR-999" in str(excinfo.value)
+    assert "1000.00" in str(excinfo.value)
+    assert "400.00" in str(excinfo.value)
+    
+    # 3. Test unmapped custom group
+    xml_unmapped_group = b"""<ENVELOPE>
+      <BODY>
+        <EXPORTDATA>
+          <REQUESTDESC>
+            <STATICVARIABLES>
+              <SVFROMDATE>20250401</SVFROMDATE>
+              <SVTODATE>20260331</SVTODATE>
+              <SVCOMPANYNAME>Test Corp</SVCOMPANYNAME>
+            </STATICVARIABLES>
+          </REQUESTDESC>
+          <REQUESTDATA>
+            <TALLYMESSAGE>
+              <LEDGER NAME="Custom Asset">
+                <PARENT>NonExistentGroup</PARENT>
+                <OPENINGBALANCE>0.00</OPENINGBALANCE>
+                <CLOSINGBALANCE>0.00</CLOSINGBALANCE>
+              </LEDGER>
+            </TALLYMESSAGE>
+          </REQUESTDATA>
+        </EXPORTDATA>
+      </BODY>
+    </ENVELOPE>"""
+    
+    parsed = parse_tally_xml(xml_unmapped_group)
+    
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    
+    try:
+        with pytest.raises(ValueError) as excinfo:
+            normalize_tally_data(parsed, session)
+        assert "Unrecognized account group" in str(excinfo.value)
+        assert "NonExistentGroup" in str(excinfo.value)
+        assert "Custom Asset" in str(excinfo.value)
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def test_malformed_xml_fixture():
+    fixture_path = os.path.join(os.path.dirname(__file__), "../../sample_data/test_fixture_malformed.xml")
+    with open(fixture_path, "rb") as f:
+        xml_content = f.read()
+
+    # The first error raised during parse_tally_xml will be missing closing balance
+    import pytest
+    with pytest.raises(ValueError) as excinfo:
+        parse_tally_xml(xml_content)
+    assert "missing CLOSINGBALANCE" in str(excinfo.value)
+    assert "Account Missing Closing Balance" in str(excinfo.value)

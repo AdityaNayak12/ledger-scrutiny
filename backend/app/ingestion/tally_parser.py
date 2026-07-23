@@ -128,6 +128,10 @@ def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
                 except Exception:
                     pass
 
+    # Detect if Trial Balance export
+    report_node = root.find(".//REPORTNAME")
+    is_trial_balance = report_node is not None and report_node.text and "Trial Balance" in report_node.text
+
     # 2. Parse Ledgers
     ledgers = []
     # Tally ledgers are usually defined inside <LEDGER> tags under <TALLYMESSAGE>
@@ -148,6 +152,8 @@ def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
         closing_balance = None
         if cl_bal_node is not None and cl_bal_node.text:
             closing_balance = parse_tally_amount(cl_bal_node.text)
+        elif is_trial_balance:
+            raise ValueError(f"Ledger account '{name.strip()}' is missing CLOSINGBALANCE node or has empty value in Trial Balance export.")
         
         ledgers.append({
             "name": name.strip(),
@@ -175,8 +181,8 @@ def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
         narration = narration_node.text.strip() if narration_node is not None and narration_node.text else None
         
         entries = []
-        # Ledger entries inside voucher
-        entry_nodes = vch.findall("ALLLEDGERENTRIES.LIST")
+        # Ledger entries inside voucher - support both standard and transactional tags
+        entry_nodes = vch.findall("ALLLEDGERENTRIES.LIST") + vch.findall("LEDGERENTRIES.LIST")
         for entry in entry_nodes:
             ledger_name_node = entry.find("LEDGERNAME")
             if ledger_name_node is not None and ledger_name_node.text:
@@ -203,6 +209,14 @@ def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
             })
             
         if entries:
+            # Validate that the voucher is balanced (debits == credits)
+            debit_sum = sum(e["amount"] for e in entries if e["type"] == "debit")
+            credit_sum = sum(e["amount"] for e in entries if e["type"] == "credit")
+            if abs(debit_sum - credit_sum) > Decimal("0.01"):
+                raise ValueError(
+                    f"Voucher number '{vch_num or 'N/A'}' of type '{vch_type}' on date '{vch_date}' "
+                    f"is unbalanced. Sum of debits (₹{debit_sum:.2f}) does not equal sum of credits (₹{credit_sum:.2f})."
+                )
             vouchers.append({
                 "date": vch_date,
                 "voucher_type": vch_type,
