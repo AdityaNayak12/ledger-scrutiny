@@ -145,6 +145,7 @@ def check_opening_balance_continuity(
                 )
                 # Attach transient Python attribute for materiality filtering
                 exc.variance = variance
+                exc.apply_materiality = True
                 exceptions.append(exc)
                 
     return exceptions
@@ -153,7 +154,8 @@ def check_opening_balance_continuity(
 def filter_by_materiality(entity: Entity, exceptions: List[AuditException]) -> List[AuditException]:
     """
     Rule 3: Materiality Threshold Filter
-    Suppresses exceptions where the variance is below the entity's materiality threshold.
+    Suppresses exceptions where the variance is below the entity's materiality threshold,
+    but only for rules that opted in (apply_materiality = True).
     """
     threshold = entity.materiality_threshold
     filtered = []
@@ -161,6 +163,11 @@ def filter_by_materiality(entity: Entity, exceptions: List[AuditException]) -> L
     for exc in exceptions:
         # Critical/system exceptions should never be filtered out
         if exc.severity == "critical":
+            filtered.append(exc)
+            continue
+            
+        # If the exception did not opt-in for materiality, it bypasses the filter entirely
+        if not getattr(exc, "apply_materiality", False):
             filtered.append(exc)
             continue
             

@@ -161,12 +161,15 @@ def test_materiality_threshold_filter(sample_entity):
     # Entity threshold is 1000.00
     exc1 = AuditException(id=1, rule_name="r1", severity="error", message="m1")
     exc1.variance = Decimal("500.00") # Suppress (500 < 1000)
+    exc1.apply_materiality = True
     
     exc2 = AuditException(id=2, rule_name="r2", severity="error", message="m2")
     exc2.variance = Decimal("1500.00") # Keep (1500 >= 1000)
+    exc2.apply_materiality = True
     
     exc3 = AuditException(id=3, rule_name="r3", severity="error", message="m3")
     exc3.variance = Decimal("1000.00") # Keep (1000 >= 1000)
+    exc3.apply_materiality = True
     
     exc_critical = AuditException(id=4, rule_name="system", severity="critical", message="critical error")
     # No variance attribute, but severity is critical, so must keep

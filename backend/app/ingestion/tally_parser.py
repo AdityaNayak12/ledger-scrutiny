@@ -61,7 +61,7 @@ def parse_tally_xml(xml_content: bytes) -> Dict[str, Any]:
     
     Returns a dictionary of the shape:
     {
-        "entity": {
+        "entity": { 
             "name": str,
             "financial_year_start": date,
             "financial_year_end": date
