@@ -34,7 +34,13 @@ export default function App() {
 
   // Filters & Sorting
   const [severityFilter, setSeverityFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useState<string>("all");
   const [sortBy, setSortBy] = useState<string>("severity");
+
+  // Review Drawer State
+  const [selectedException, setSelectedException] = useState<Exception | null>(null);
+  const [noteText, setNoteText] = useState<string>("");
+  const [updatingExcId, setUpdatingExcId] = useState<number | null>(null);
 
   // Modals & Forms
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
@@ -393,6 +399,51 @@ export default function App() {
     }
   };
 
+  const updateExceptionStatus = async (exceptionId: number, status: string, notes: string | null) => {
+    if (selectedEntityId === null) return;
+    setUpdatingExcId(exceptionId);
+    if (isMock) {
+      setExceptions((prev) =>
+        prev.map((exc) =>
+          exc.id === exceptionId
+            ? { ...exc, status: status as any, auditor_notes: notes }
+            : exc
+        )
+      );
+      setSelectedException((prev) =>
+        prev && prev.id === exceptionId
+          ? { ...prev, status: status as any, auditor_notes: notes }
+          : prev
+      );
+      setUpdatingExcId(null);
+    } else {
+      try {
+        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/exceptions/${exceptionId}`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            status: status,
+            auditor_notes: notes,
+          }),
+        });
+        if (!res.ok) throw new Error("Failed to update exception review state");
+        const updated = await res.json();
+        setExceptions((prev) =>
+          prev.map((exc) => (exc.id === exceptionId ? updated : exc))
+        );
+        setSelectedException((prev) =>
+          prev && prev.id === exceptionId ? updated : prev
+        );
+      } catch (err: any) {
+        setErrorMsg(`Failed to save review: ${err.message}`);
+      } finally {
+        setUpdatingExcId(null);
+      }
+    }
+  };
+
   const selectedEntity = entities.find((e) => e.id === selectedEntityId);
 
   // Sorting & Filtering Exceptions
@@ -402,6 +453,10 @@ export default function App() {
     .filter((exc) => {
       if (severityFilter === "all") return true;
       return exc.severity.toLowerCase() === severityFilter.toLowerCase();
+    })
+    .filter((exc) => {
+      if (statusFilter === "all") return true;
+      return exc.status === statusFilter;
     })
     .sort((a, b) => {
       if (sortBy === "severity") {
@@ -693,23 +748,44 @@ export default function App() {
                 <div className="flex-1 flex flex-col bg-slate-950/40 rounded-3xl border border-slate-800 overflow-hidden shadow-xl">
                   
                   {/* Filter & Sort Bar */}
-                  <div className="bg-slate-950 border-b border-slate-800 py-3.5 px-5 flex flex-col sm:flex-row justify-between sm:items-center gap-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Filter Severity:</span>
-                      <div className="flex bg-slate-900 border border-slate-850 p-1 rounded-xl">
-                        {["all", "critical", "warning", "info"].map((sev) => (
-                          <button
-                            key={sev}
-                            onClick={() => setSeverityFilter(sev)}
-                            className={`px-3 py-1 rounded-lg text-xs font-bold uppercase transition-all cursor-pointer ${
-                              severityFilter === sev
-                                ? "bg-indigo-600 text-white shadow-sm"
-                                : "text-slate-400 hover:text-slate-200"
-                            }`}
-                          >
-                            {sev}
-                          </button>
-                        ))}
+                  <div className="bg-slate-950 border-b border-slate-800 py-3.5 px-5 flex flex-col xl:flex-row justify-between xl:items-center gap-3">
+                    <div className="flex flex-wrap items-center gap-4">
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Filter Severity:</span>
+                        <div className="flex bg-slate-900 border border-slate-850 p-1 rounded-xl">
+                          {["all", "critical", "warning", "info"].map((sev) => (
+                            <button
+                              key={sev}
+                              onClick={() => setSeverityFilter(sev)}
+                              className={`px-3 py-1 rounded-lg text-xs font-bold uppercase transition-all cursor-pointer ${
+                                severityFilter === sev
+                                  ? "bg-indigo-600 text-white shadow-sm"
+                                  : "text-slate-400 hover:text-slate-200"
+                              }`}
+                            >
+                              {sev}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Review Status:</span>
+                        <div className="flex bg-slate-900 border border-slate-850 p-1 rounded-xl">
+                          {["all", "PENDING", "CLEARED", "FLAGGED_FOR_FOLLOWUP"].map((st) => (
+                            <button
+                              key={st}
+                              onClick={() => setStatusFilter(st)}
+                              className={`px-2.5 py-1 rounded-lg text-xxs font-bold uppercase transition-all cursor-pointer ${
+                                statusFilter === st
+                                  ? "bg-indigo-600 text-white shadow-sm"
+                                  : "text-slate-400 hover:text-slate-200"
+                              }`}
+                            >
+                              {st === "all" ? "all" : st === "FLAGGED_FOR_FOLLOWUP" ? "Followup" : st.toLowerCase()}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     </div>
 
@@ -727,82 +803,227 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* Exception Table Container */}
-                  <div className="flex-1 overflow-x-auto">
-                    {isLoadingExceptions ? (
-                      <div className="h-64 flex flex-col items-center justify-center text-slate-500 text-sm gap-2">
-                        <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-                        <span>Loading exceptions...</span>
-                      </div>
-                    ) : processedExceptions.length === 0 ? (
-                      <div className="h-64 flex flex-col items-center justify-center text-slate-500 text-sm p-4">
-                        <svg className="w-10 h-10 text-emerald-500/30 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                        </svg>
-                        <span className="font-semibold text-slate-300">Scrutiny Complete — Clean Run</span>
-                        <p className="text-slate-500 text-xs text-center mt-1">No exceptions match the selected filter/materiality configuration.</p>
-                      </div>
-                    ) : (
-                      <table className="w-full text-left border-collapse table-auto">
-                        <thead>
-                          <tr className="bg-slate-950/60 text-slate-400 border-b border-slate-850 uppercase text-xxs font-bold tracking-wider">
-                            <th className="py-3 px-5 w-32">Severity</th>
-                            <th className="py-3 px-5 w-48">Rule Name</th>
-                            <th className="py-3 px-5 w-52">Ledger Account</th>
-                            <th className="py-3 px-5">Scrutiny Audit Findings</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-850">
-                          {processedExceptions.map((exc) => {
-                            const isCritical = exc.severity === "critical";
-                            const isWarning = exc.severity === "warning";
-                            
-                            return (
-                              <tr key={exc.id} className="hover:bg-slate-900/30 transition-all group">
-                                
-                                {/* Severity Badge Column */}
-                                <td className="py-4 px-5">
-                                  <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xxs font-extrabold uppercase tracking-widest border ${
-                                    isCritical
-                                      ? "bg-rose-950/30 text-rose-400 border-rose-900/50 shadow-sm shadow-rose-950/20"
-                                      : isWarning
-                                      ? "bg-amber-950/30 text-amber-400 border-amber-900/50 shadow-sm shadow-amber-950/20"
-                                      : "bg-blue-950/30 text-blue-400 border-blue-900/50 shadow-sm shadow-blue-950/20"
-                                  }`}>
-                                    <span className={`w-1.5 h-1.5 rounded-full ${
-                                      isCritical ? "bg-rose-500" : isWarning ? "bg-amber-500" : "bg-blue-500"
-                                    }`} />
-                                    {exc.severity}
-                                  </span>
-                                </td>
-
-                                {/* Rule Name Column */}
-                                <td className="py-4 px-5 font-mono text-xs text-slate-300 font-semibold">
-                                  {exc.rule_name}
-                                </td>
-
-                                {/* Ledger Account Column */}
-                                <td className="py-4 px-5 font-bold text-sm text-slate-200 tracking-tight">
-                                  {exc.ledger_account_name ? (
-                                    <span className="flex items-center gap-1.5">
-                                      <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
-                                      {exc.ledger_account_name}
+                  {/* Exception Workspace Layout (Table + Review Drawer) */}
+                  <div className="flex-1 flex flex-row overflow-hidden min-h-0">
+                    
+                    {/* Exception Table Container */}
+                    <div className="flex-1 overflow-x-auto border-r border-slate-850">
+                      {isLoadingExceptions ? (
+                        <div className="h-64 flex flex-col items-center justify-center text-slate-500 text-sm gap-2">
+                          <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+                          <span>Loading exceptions...</span>
+                        </div>
+                      ) : processedExceptions.length === 0 ? (
+                        <div className="h-64 flex flex-col items-center justify-center text-slate-500 text-sm p-4">
+                          <svg className="w-10 h-10 text-emerald-500/30 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          <span className="font-semibold text-slate-300">Scrutiny Complete — Clean Run</span>
+                          <p className="text-slate-500 text-xs text-center mt-1">No exceptions match the selected filter/materiality configuration.</p>
+                        </div>
+                      ) : (
+                        <table className="w-full text-left border-collapse table-auto">
+                          <thead>
+                            <tr className="bg-slate-950/60 text-slate-400 border-b border-slate-850 uppercase text-xxs font-bold tracking-wider">
+                              <th className="py-3 px-5 w-28">Severity</th>
+                              <th className="py-3 px-5 w-40">Status</th>
+                              <th className="py-3 px-5 w-44">Rule Name</th>
+                              <th className="py-3 px-5 w-48">Ledger Account</th>
+                              <th className="py-3 px-5">Scrutiny Audit Findings</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-850">
+                            {processedExceptions.map((exc) => {
+                              const isCritical = exc.severity === "critical";
+                              const isWarning = exc.severity === "warning";
+                              
+                              return (
+                                <tr 
+                                  key={exc.id} 
+                                  onClick={() => {
+                                    setSelectedException(exc);
+                                    setNoteText(exc.auditor_notes || "");
+                                  }}
+                                  className={`hover:bg-slate-900/40 transition-all group cursor-pointer ${
+                                    selectedException?.id === exc.id ? "bg-indigo-950/20" : ""
+                                  }`}
+                                >
+                                  
+                                  {/* Severity Badge Column */}
+                                  <td className="py-4 px-5">
+                                    <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xxs font-extrabold uppercase tracking-widest border ${
+                                      isCritical
+                                        ? "bg-rose-950/30 text-rose-400 border-rose-900/50 shadow-sm shadow-rose-950/20"
+                                        : isWarning
+                                        ? "bg-amber-950/30 text-amber-400 border-amber-900/50 shadow-sm shadow-amber-950/20"
+                                        : "bg-blue-950/30 text-blue-400 border-blue-900/50 shadow-sm shadow-blue-950/20"
+                                    }`}>
+                                      <span className={`w-1.5 h-1.5 rounded-full ${
+                                        isCritical ? "bg-rose-500" : isWarning ? "bg-amber-500" : "bg-blue-500"
+                                      }`} />
+                                      {exc.severity}
                                     </span>
-                                  ) : (
-                                    <span className="text-slate-600 font-normal italic">N/A</span>
-                                  )}
-                                </td>
+                                  </td>
+  
+                                  {/* Review Status Column */}
+                                  <td className="py-4 px-5">
+                                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg text-xxs font-bold border uppercase ${
+                                      exc.status === "CLEARED"
+                                        ? "bg-emerald-950/30 text-emerald-400 border-emerald-900/50"
+                                        : exc.status === "FLAGGED_FOR_FOLLOWUP"
+                                        ? "bg-amber-950/30 text-amber-400 border-amber-900/50"
+                                        : "bg-slate-900 text-slate-400 border-slate-800"
+                                    }`}>
+                                      {exc.status === "FLAGGED_FOR_FOLLOWUP" ? "Followup" : exc.status?.toLowerCase() || "pending"}
+                                    </span>
+                                  </td>
+  
+                                  {/* Rule Name Column */}
+                                  <td className="py-4 px-5 font-mono text-xs text-slate-300 font-semibold">
+                                    {exc.rule_name}
+                                  </td>
+  
+                                  {/* Ledger Account Column */}
+                                  <td className="py-4 px-5 font-bold text-sm text-slate-200 tracking-tight">
+                                    {exc.ledger_account_name ? (
+                                      <span className="flex items-center gap-1.5">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+                                        {exc.ledger_account_name}
+                                      </span>
+                                    ) : (
+                                      <span className="text-slate-600 font-normal italic">N/A</span>
+                                    )}
+                                  </td>
+  
+                                  {/* Message Finding Column */}
+                                  <td className="py-4 px-5 text-sm text-slate-300 font-medium leading-relaxed">
+                                    <div className="flex items-start gap-3">
+                                      <span className="flex-1">{exc.message}</span>
+                                      {exc.auditor_notes && (
+                                        <span className="text-indigo-400 shrink-0 mt-0.5 bg-slate-900/80 p-1 rounded border border-slate-800" title={`Auditor notes: ${exc.auditor_notes}`}>
+                                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                          </svg>
+                                        </span>
+                                      )}
+                                    </div>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
 
-                                {/* Message Finding Column */}
-                                <td className="py-4 px-5 text-sm text-slate-300 font-medium leading-relaxed">
-                                  {exc.message}
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
+                    {/* Review Drawer Panel */}
+                    {selectedException && (
+                      <div className="w-96 bg-slate-950 border-l border-slate-850 flex flex-col h-full shrink-0 shadow-2xl relative">
+                        {/* Drawer Header */}
+                        <div className="p-4 border-b border-slate-850 flex justify-between items-center bg-slate-950">
+                          <div>
+                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Auditor Workpaper</h4>
+                            <span className="text-xxs text-indigo-400 font-bold uppercase font-mono">{selectedException.rule_name}</span>
+                          </div>
+                          <button
+                            onClick={() => setSelectedException(null)}
+                            className="text-slate-400 hover:text-white transition-all cursor-pointer focus:outline-none p-1.5 hover:bg-slate-900 rounded-lg"
+                          >
+                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+                            </svg>
+                          </button>
+                        </div>
+
+                        {/* Drawer Content */}
+                        <div className="flex-1 overflow-y-auto p-5 space-y-5">
+                          
+                          {/* Finding Details */}
+                          <div className="bg-slate-900/50 rounded-2xl border border-slate-850 p-4 space-y-3">
+                            <div>
+                              <span className="text-xxs text-slate-500 font-bold uppercase tracking-wider block mb-1">Ledger Account</span>
+                              <span className="text-sm font-extrabold text-slate-100 flex items-center gap-1.5">
+                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
+                                {selectedException.ledger_account_name || "N/A (System Rule)"}
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-xxs text-slate-500 font-bold uppercase tracking-wider block mb-1">Audit Finding</span>
+                              <p className="text-xs text-slate-300 leading-relaxed font-medium">{selectedException.message}</p>
+                            </div>
+                          </div>
+
+                          {/* Change Status */}
+                          <div className="space-y-2">
+                            <span className="text-xxs text-slate-400 font-bold uppercase tracking-wider block">Review Status</span>
+                            <div className="grid grid-cols-3 gap-2">
+                              {[
+                                { id: "PENDING", label: "Pending", color: "border-slate-850 text-slate-400 bg-slate-900/30 hover:bg-slate-900" },
+                                { id: "FLAGGED_FOR_FOLLOWUP", label: "Followup", color: "border-amber-900/40 text-amber-500 bg-amber-950/10 hover:bg-amber-950/20" },
+                                { id: "CLEARED", label: "Cleared", color: "border-emerald-900/40 text-emerald-500 bg-emerald-950/10 hover:bg-emerald-950/20" }
+                              ].map((btn) => {
+                                const isActive = selectedException.status === btn.id;
+                                return (
+                                  <button
+                                    key={btn.id}
+                                    onClick={() => updateExceptionStatus(selectedException.id, btn.id, noteText)}
+                                    disabled={updatingExcId === selectedException.id}
+                                    className={`border rounded-xl py-2 text-xxs font-extrabold uppercase transition-all tracking-wider cursor-pointer ${btn.color} ${
+                                      isActive 
+                                        ? btn.id === "CLEARED" 
+                                          ? "bg-emerald-950/40 border-emerald-500 text-emerald-400 shadow-sm ring-1 ring-emerald-500/20" 
+                                          : btn.id === "FLAGGED_FOR_FOLLOWUP"
+                                          ? "bg-amber-950/40 border-amber-500 text-amber-400 shadow-sm ring-1 ring-amber-500/20"
+                                          : "bg-slate-800 border-slate-500 text-slate-200"
+                                        : "opacity-60"
+                                    }`}
+                                  >
+                                    {btn.label}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+
+                          {/* Audit Notes */}
+                          <div className="space-y-2">
+                            <label className="text-xxs text-slate-400 font-bold uppercase tracking-wider block">Auditor Evidence & Notes</label>
+                            <textarea
+                              value={noteText}
+                              onChange={(e) => setNoteText(e.target.value)}
+                              placeholder="Document verification checks, reason for clearing, or follow-up details..."
+                              rows={5}
+                              className="w-full bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 leading-relaxed font-medium placeholder-slate-605 resize-none"
+                            />
+                          </div>
+
+                        </div>
+
+                        {/* Drawer Footer */}
+                        <div className="p-4 border-t border-slate-850 bg-slate-950/80 backdrop-blur flex gap-3">
+                          <button
+                            onClick={() => updateExceptionStatus(selectedException.id, selectedException.status, noteText)}
+                            disabled={updatingExcId === selectedException.id}
+                            className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl py-2.5 text-xs font-bold transition-all shadow-md shadow-indigo-900/30 flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
+                          >
+                            {updatingExcId === selectedException.id ? (
+                              <>
+                                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                <span>Saving Notes...</span>
+                              </>
+                            ) : (
+                              <>
+                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                </svg>
+                                <span>Save Workpaper</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
                     )}
+
                   </div>
                 </div>
               )}

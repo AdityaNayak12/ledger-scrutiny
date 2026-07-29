@@ -15,6 +15,8 @@ export interface Exception {
   severity: "critical" | "warning" | "info";
   message: string;
   ledger_account_name: string | null;
+  status: "PENDING" | "CLEARED" | "FLAGGED_FOR_FOLLOWUP";
+  auditor_notes: string | null;
   created_at: string;
 }
 
@@ -56,6 +58,8 @@ export const MOCK_EXCEPTIONS: Record<number, Exception[]> = {
       severity: "critical",
       message: "Account 'HDFC Bank' has normal balance 'debit' but has a credit closing balance of 45,000.00 (Unapproved Overdraft).",
       ledger_account_name: "HDFC Bank",
+      status: "PENDING",
+      auditor_notes: null,
       created_at: new Date().toISOString(),
     },
     {
@@ -64,6 +68,8 @@ export const MOCK_EXCEPTIONS: Record<number, Exception[]> = {
       severity: "warning",
       message: "Account 'Furniture and Fixtures' opening balance (1,50,000.00) does not match prior period closing balance (1,80,000.00). Continuity variance: 30,000.00.",
       ledger_account_name: "Furniture and Fixtures",
+      status: "PENDING",
+      auditor_notes: null,
       created_at: new Date().toISOString(),
     },
     {
@@ -72,6 +78,8 @@ export const MOCK_EXCEPTIONS: Record<number, Exception[]> = {
       severity: "warning",
       message: "Account 'Office Rent' has normal balance 'debit' but has a credit closing balance of 18,000.00 (Possible wrong accounting entry or prepayment code).",
       ledger_account_name: "Office Rent",
+      status: "PENDING",
+      auditor_notes: null,
       created_at: new Date().toISOString(),
     },
     {
@@ -80,6 +88,8 @@ export const MOCK_EXCEPTIONS: Record<number, Exception[]> = {
       severity: "info",
       message: "Account 'Share Capital' has normal balance 'credit' but has a debit closing balance of 2,000.00 (Pending allotment call money).",
       ledger_account_name: "Share Capital",
+      status: "PENDING",
+      auditor_notes: null,
       created_at: new Date().toISOString(),
     }
   ],
@@ -91,6 +101,8 @@ export const MOCK_EXCEPTIONS: Record<number, Exception[]> = {
       severity: "critical",
       message: "Account 'Verma Traders' has normal balance 'credit' but has a debit closing balance of 25,000.00 (Debit variance).",
       ledger_account_name: "Verma Traders",
+      status: "PENDING",
+      auditor_notes: null,
       created_at: new Date().toISOString(),
     }
   ]
