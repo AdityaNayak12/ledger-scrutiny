@@ -359,3 +359,22 @@ def test_api_exception_review_workflow():
     capital_exc_2 = next(e for e in exceptions_2 if e["ledger_account_name"] == "Owner Capital")
     assert capital_exc_2["status"] == "PENDING"
     assert capital_exc_2["auditor_notes"] is None
+
+
+def test_api_entity_delete():
+    # 1. Create an Entity
+    res = client.post("/entities", json={"name": "Delete Me Inc", "materiality_threshold": "10000.00"})
+    assert res.status_code == 201
+    entity_id = res.json()["id"]
+
+    # 2. Verify it is listed
+    list_res = client.get("/entities")
+    assert any(e["id"] == entity_id for e in list_res.json())
+
+    # 3. Delete it
+    delete_res = client.delete(f"/entities/{entity_id}")
+    assert delete_res.status_code == 204
+
+    # 4. Verify it is no longer listed
+    list_res_after = client.get("/entities")
+    assert not any(e["id"] == entity_id for e in list_res_after.json())
