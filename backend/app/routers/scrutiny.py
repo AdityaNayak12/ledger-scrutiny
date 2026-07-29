@@ -41,9 +41,16 @@ class ExceptionResponse(BaseModel):
     severity: str
     message: str
     ledger_account_name: Optional[str] = None
+    status: str
+    auditor_notes: Optional[str] = None
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ExceptionUpdate(BaseModel):
+    status: str
+    auditor_notes: Optional[str] = None
 
 
 class PeriodResponse(BaseModel):
@@ -212,7 +219,22 @@ def trigger_scrutiny_run(
     )
     snapshots = db.execute(snapshot_query).scalars().all()
 
-    # 3. Clear existing exceptions for this entity and period
+    # 3. Fetch existing exceptions to preserve status/notes
+    existing_exceptions_query = select(AuditException).where(
+        AuditException.entity_id == entity_id,
+        AuditException.period_start == period_start,
+        AuditException.period_end == period_end
+    )
+    existing_exceptions = db.execute(existing_exceptions_query).scalars().all()
+    
+    preserve_map = {}
+    for old_exc in existing_exceptions:
+        key = (old_exc.rule_name, old_exc.ledger_account_id, old_exc.message if old_exc.ledger_account_id is None else None)
+        # Preserve status and auditor_notes if they were changed from default/non-empty
+        if old_exc.status != "PENDING" or old_exc.auditor_notes:
+            preserve_map[key] = (old_exc.status, old_exc.auditor_notes)
+
+    # 4. Clear existing exceptions for this entity and period
     db.execute(
         delete(AuditException)
         .where(
@@ -223,13 +245,24 @@ def trigger_scrutiny_run(
     )
     db.flush()
 
-    # 4. Run rules engine
+    # 5. Run rules engine
     exceptions = run_scrutiny(entity, accounts, snapshots)
 
-    # 5. Persist exceptions to the database, setting the period fields
+    # 6. Persist exceptions to the database, setting the period fields and applying preserved status/notes
     for exc in exceptions:
         exc.period_start = period_start
         exc.period_end = period_end
+        
+        # Check if there is a preserved status/notes
+        key = (exc.rule_name, exc.ledger_account_id, exc.message if exc.ledger_account_id is None else None)
+        if key in preserve_map:
+            status, notes = preserve_map[key]
+            exc.status = status
+            exc.auditor_notes = notes
+        else:
+            exc.status = "PENDING"
+            exc.auditor_notes = None
+
         db.add(exc)
     db.commit()
 
@@ -278,10 +311,67 @@ def list_exceptions(
                 severity=exc.severity,
                 message=exc.message,
                 ledger_account_name=exc.ledger_account.name if exc.ledger_account else None,
+                status=exc.status,
+                auditor_notes=exc.auditor_notes,
                 created_at=exc.created_at
             )
         )
     return response
+
+
+@router.patch("/entities/{entity_id}/exceptions/{exception_id}", response_model=ExceptionResponse)
+def update_exception(
+    entity_id: int,
+    exception_id: int,
+    exception_update: ExceptionUpdate,
+    db: Session = Depends(get_db)
+):
+    """
+    Update the status and review notes of a specific audit exception.
+    """
+    # Verify entity exists
+    entity_exists = db.execute(select(Entity.id).where(Entity.id == entity_id)).scalar_one_or_none()
+    if not entity_exists:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Entity with ID {entity_id} not found."
+        )
+
+    # Find the exception
+    exc = db.execute(
+        select(AuditException)
+        .options(joinedload(AuditException.ledger_account))
+        .where(AuditException.id == exception_id, AuditException.entity_id == entity_id)
+    ).scalar_one_or_none()
+
+    if not exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Exception with ID {exception_id} not found for this entity."
+        )
+
+    # Update fields
+    if exception_update.status not in ["PENDING", "CLEARED", "FLAGGED_FOR_FOLLOWUP"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid status. Must be one of: PENDING, CLEARED, FLAGGED_FOR_FOLLOWUP"
+        )
+
+    exc.status = exception_update.status
+    exc.auditor_notes = exception_update.auditor_notes
+    db.commit()
+    db.refresh(exc)
+
+    return ExceptionResponse(
+        id=exc.id,
+        rule_name=exc.rule_name,
+        severity=exc.severity,
+        message=exc.message,
+        ledger_account_name=exc.ledger_account.name if exc.ledger_account else None,
+        status=exc.status,
+        auditor_notes=exc.auditor_notes,
+        created_at=exc.created_at
+    )
 
 
 # --- GSTIN Lookup schemas and endpoint ---
