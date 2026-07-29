@@ -244,3 +244,118 @@ def test_gstin_lookup_live_mocked():
             res404 = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"})
             assert res404.status_code == 404
             assert "not found on API Setu" in res404.json()["detail"]
+
+
+def test_api_exception_review_workflow():
+    # 1. Create Entity
+    entity_payload = {
+        "name": "Acme Workflow Corp",
+        "materiality_threshold": "1000.00"
+    }
+    create_res = client.post("/entities", json=entity_payload)
+    assert create_res.status_code == 201
+    entity_id = create_res.json()["id"]
+
+    # 2. Upload Violating XML
+    violating_xml = """<ENVELOPE>
+      <BODY>
+        <IMPORTDATA>
+          <REQUESTDESC>
+            <REPORTNAME>All Ledger Entries</REPORTNAME>
+          </REQUESTDESC>
+          <REQUESTDATA>
+            <COMPANY>
+              <RENAME>Acme Workflow Corp</RENAME>
+              <BOOKSFROM>20250401</BOOKSFROM>
+              <BOOKSTO>20260331</BOOKSTO>
+            </COMPANY>
+            <TALLYMESSAGE>
+              <LEDGER NAME="Cash-in-hand">
+                <PARENT>Cash-in-hand</PARENT>
+                <OPENINGBALANCE>10000.00</OPENINGBALANCE>
+              </LEDGER>
+            </TALLYMESSAGE>
+            <TALLYMESSAGE>
+              <LEDGER NAME="Owner Capital">
+                <PARENT>Capital Account</PARENT>
+                <OPENINGBALANCE>0.00</OPENINGBALANCE>
+              </LEDGER>
+            </TALLYMESSAGE>
+            <TALLYMESSAGE>
+              <VOUCHER VCHTYPE="Payment">
+                <DATE>20250410</DATE>
+                <VOUCHERNUMBER>VCH-0003</VOUCHERNUMBER>
+                <NARRATION>Excess drawing by owner</NARRATION>
+                <ALLLEDGERENTRIES.LIST>
+                  <LEDGERNAME>Owner Capital</LEDGERNAME>
+                  <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+                  <AMOUNT>-80000.00</AMOUNT>
+                </ALLLEDGERENTRIES.LIST>
+                <ALLLEDGERENTRIES.LIST>
+                  <LEDGERNAME>Cash-in-hand</LEDGERNAME>
+                  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                  <AMOUNT>80000.00</AMOUNT>
+                </ALLLEDGERENTRIES.LIST>
+              </VOUCHER>
+            </TALLYMESSAGE>
+          </REQUESTDATA>
+        </IMPORTDATA>
+      </BODY>
+    </ENVELOPE>
+    """
+    upload_res = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("violating_export.xml", violating_xml.encode("utf-8"), "text/xml")}
+    )
+    assert upload_res.status_code == 200
+
+    # 3. Trigger Scrutiny Run
+    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
+    assert run_res.status_code == 200
+    assert run_res.json()["exceptions_count"] == 2
+
+    # 4. List exceptions and verify default status and empty notes
+    list_res = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"})
+    assert list_res.status_code == 200
+    exceptions = list_res.json()
+    assert len(exceptions) == 2
+    
+    cash_exc = next(e for e in exceptions if e["ledger_account_name"] == "Cash-in-hand")
+    assert cash_exc["status"] == "PENDING"
+    assert cash_exc["auditor_notes"] is None
+    
+    capital_exc = next(e for e in exceptions if e["ledger_account_name"] == "Owner Capital")
+    assert capital_exc["status"] == "PENDING"
+    assert capital_exc["auditor_notes"] is None
+
+    # 5. Update Cash Exception to CLEARED with notes
+    patch_payload = {
+        "status": "CLEARED",
+        "auditor_notes": "Verified drawing, approved by board of directors."
+    }
+    patch_res = client.patch(
+        f"/entities/{entity_id}/exceptions/{cash_exc['id']}",
+        json=patch_payload
+    )
+    assert patch_res.status_code == 200
+    updated_cash_exc = patch_res.json()
+    assert updated_cash_exc["status"] == "CLEARED"
+    assert updated_cash_exc["auditor_notes"] == "Verified drawing, approved by board of directors."
+
+    # 6. Re-run Scrutiny Run
+    run_res_2 = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
+    assert run_res_2.status_code == 200
+    assert run_res_2.json()["exceptions_count"] == 2
+
+    # 7. List exceptions and verify status/notes are preserved
+    list_res_2 = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"})
+    assert list_res_2.status_code == 200
+    exceptions_2 = list_res_2.json()
+    
+    cash_exc_2 = next(e for e in exceptions_2 if e["ledger_account_name"] == "Cash-in-hand")
+    assert cash_exc_2["status"] == "CLEARED"
+    assert cash_exc_2["auditor_notes"] == "Verified drawing, approved by board of directors."
+    
+    capital_exc_2 = next(e for e in exceptions_2 if e["ledger_account_name"] == "Owner Capital")
+    assert capital_exc_2["status"] == "PENDING"
+    assert capital_exc_2["auditor_notes"] is None
