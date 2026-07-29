@@ -620,10 +620,10 @@ export default function App() {
                         <select
                           value={selectedPeriod ? JSON.stringify(selectedPeriod) : ""}
                           onChange={(e) => setSelectedPeriod(e.target.value ? JSON.parse(e.target.value) : null)}
-                          className="bg-slate-905 border border-slate-800 rounded-lg text-xs font-bold px-2 py-1 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer ml-1"
+                          className="bg-slate-900 border border-slate-850 rounded-lg text-xs font-bold px-2.5 py-1 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer ml-1"
                         >
                           {periods.map((p, idx) => (
-                            <option key={idx} value={JSON.stringify(p)}>
+                            <option key={idx} value={JSON.stringify(p)} className="text-slate-900 bg-white">
                               {formatPeriodLabel(p)} ({p.period_start} to {p.period_end})
                             </option>
                           ))}
