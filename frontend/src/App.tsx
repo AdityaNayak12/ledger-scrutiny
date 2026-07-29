@@ -369,6 +369,44 @@ export default function App() {
     }
   };
 
+  const handleDeleteEntity = async () => {
+    if (selectedEntityId === null) return;
+    const entity = entities.find((e) => e.id === selectedEntityId);
+    if (!entity) return;
+    
+    if (
+      !window.confirm(
+        `Are you sure you want to permanently delete the client workspace "${entity.name}"? This will delete all financial periods, XML snapshots, transactions, and audit exceptions. This action cannot be undone.`
+      )
+    ) {
+      return;
+    }
+
+    if (isMock) {
+      setEntities((prev) => prev.filter((e) => e.id !== selectedEntityId));
+      setSelectedEntityId(null);
+      setPeriods([]);
+      setSelectedPeriod(null);
+      setExceptions([]);
+      setSelectedException(null);
+    } else {
+      try {
+        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}`, {
+          method: "DELETE",
+        });
+        if (!res.ok) throw new Error("Failed to delete client");
+        setEntities((prev) => prev.filter((e) => e.id !== selectedEntityId));
+        setSelectedEntityId(null);
+        setPeriods([]);
+        setSelectedPeriod(null);
+        setExceptions([]);
+        setSelectedException(null);
+      } catch (err: any) {
+        setErrorMsg(`Failed to delete client: ${err.message}`);
+      }
+    }
+  };
+
   const fetchExceptions = async (entityId: number, start?: string, end?: string) => {
     setIsLoadingExceptions(true);
     if (isMock) {
@@ -611,7 +649,18 @@ export default function App() {
               <div className="bg-slate-950/60 rounded-2xl border border-slate-800 p-5 shadow-xl flex flex-col md:flex-row justify-between md:items-center gap-4">
                 <div>
                   <span className="text-xxs text-indigo-400 font-bold uppercase tracking-wider">Active Client Scrutiny Workspace</span>
-                  <h2 className="text-2xl font-extrabold text-white mt-1 mb-2 tracking-tight">{selectedEntity.name}</h2>
+                  <div className="flex items-center gap-3">
+                    <h2 className="text-2xl font-extrabold text-white mt-1 mb-2 tracking-tight">{selectedEntity.name}</h2>
+                    <button
+                      onClick={handleDeleteEntity}
+                      title="Delete Client Workspace"
+                      className="text-rose-500 hover:text-rose-400 hover:bg-rose-955/20 p-1.5 rounded-xl transition-all cursor-pointer focus:outline-none mb-1"
+                    >
+                      <svg className="w-4.5 h-4.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
+                  </div>
                   <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-400 font-medium">
                     {periods.length > 0 ? (
                       <span className="flex items-center gap-1.5">
