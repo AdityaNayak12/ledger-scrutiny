@@ -92,6 +92,20 @@ def create_entity(entity_in: EntityCreate, db: Session = Depends(get_db)):
     return entity
 
 
+@router.delete("/entities/{entity_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_entity(entity_id: int, db: Session = Depends(get_db)):
+    """Delete a business entity and all its associated data (cascade)."""
+    entity = db.execute(select(Entity).where(Entity.id == entity_id)).scalar_one_or_none()
+    if not entity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Entity with ID {entity_id} not found."
+        )
+    db.delete(entity)
+    db.commit()
+    return None
+
+
 @router.get("/entities/{entity_id}/periods", response_model=List[PeriodResponse])
 def list_periods(entity_id: int, db: Session = Depends(get_db)):
     """List all financial periods with data for this entity."""
