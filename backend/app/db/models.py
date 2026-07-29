@@ -156,6 +156,8 @@ class AuditException(Base):
     )
     severity: Mapped[str] = mapped_column(String(50), nullable=False)  # 'error', 'warning', etc.
     message: Mapped[str] = mapped_column(String(1000), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, server_default="PENDING", default="PENDING")
+    auditor_notes: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now(), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
