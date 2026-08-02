@@ -940,7 +940,7 @@ export default function App() {
                                         {exc.ledger_account_name}
                                       </span>
                                     ) : (
-                                      <span className="text-slate-600 font-normal italic">N/A</span>
+                                      <span className="text-slate-500 font-medium italic text-xs">N/A (Entity-wide)</span>
                                     )}
                                   </td>
   
@@ -993,7 +993,7 @@ export default function App() {
                               <span className="text-xxs text-slate-500 font-bold uppercase tracking-wider block mb-1">Ledger Account</span>
                               <span className="text-sm font-extrabold text-slate-100 flex items-center gap-1.5">
                                 <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
-                                {selectedException.ledger_account_name || "N/A (System Rule)"}
+                                {selectedException.ledger_account_name || "N/A (Entity-wide Rule)"}
                               </span>
                             </div>
                             <div>
