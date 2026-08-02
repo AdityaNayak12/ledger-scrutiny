@@ -24,6 +24,7 @@ TALLY_GROUPS_NORMAL_BALANCES = {
     "Provisions": "credit",
     "Investments": "debit",
     "Stock-in-hand": "debit",
+    "Suspense Account": "any",
 }
 
 

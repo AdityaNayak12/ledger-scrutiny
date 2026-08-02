@@ -22,9 +22,10 @@ def test_get_normal_balance_valid():
     assert get_normal_balance("Provisions") == "credit"
     assert get_normal_balance("Investments") == "debit"
     assert get_normal_balance("Stock-in-hand") == "debit"
+    assert get_normal_balance("Suspense Account") == "any"
 
 
 def test_get_normal_balance_invalid():
     with pytest.raises(UnrecognizedAccountGroupError) as exc_info:
-        get_normal_balance("Suspense Account")
-    assert "Unrecognized ledger account group: 'Suspense Account'" in str(exc_info.value)
+        get_normal_balance("Unregistered Dummy Group")
+    assert "Unrecognized ledger account group: 'Unregistered Dummy Group'" in str(exc_info.value)

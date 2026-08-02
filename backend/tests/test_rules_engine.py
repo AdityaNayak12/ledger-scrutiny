@@ -4,9 +4,13 @@ from datetime import date
 
 from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException
 from app.rules.engine import (
+    register_rule,
     run_scrutiny,
     check_normal_balance,
     check_opening_balance_continuity,
+    trial_balance_balances,
+    negative_cash_balance,
+    suspense_account_nonzero,
     filter_by_materiality
 )
 
@@ -171,7 +175,6 @@ def test_materiality_threshold_filter(sample_entity):
     exc3.apply_materiality = True
     
     exc_critical = AuditException(id=4, rule_name="system", severity="critical", message="critical error")
-    # No variance attribute, but severity is critical, so must keep
     
     filtered = filter_by_materiality(sample_entity, [exc1, exc2, exc3, exc_critical])
     assert len(filtered) == 3
@@ -181,25 +184,158 @@ def test_materiality_threshold_filter(sample_entity):
 
 
 def test_rules_engine_isolation(sample_entity):
-    # Setup custom mock rules
+    @register_rule(materiality_scope="exempt")
     def failing_rule(ent, accs, snaps):
         raise RuntimeError("Something went wrong")
         
+    @register_rule(materiality_scope="magnitude")
     def successful_rule(ent, accs, snaps):
         exc = AuditException(rule_name="successful_rule", severity="error", message="Successful rule warning")
         exc.variance = Decimal("2000.00")
         return [exc]
         
-    # Run the engine passing custom rules list
     exceptions = run_scrutiny(sample_entity, [], [], rules=[failing_rule, successful_rule])
     
     assert len(exceptions) == 2
-    
     rules_run = [e.rule_name for e in exceptions]
     assert "failing_rule" in rules_run
     assert "successful_rule" in rules_run
     
-    # Verify that the failing rule created a critical exception
     failing_exc = next(e for e in exceptions if e.rule_name == "failing_rule")
     assert failing_exc.severity == "critical"
     assert "failing_rule' failed with unexpected error: Something went wrong" in failing_exc.message
+
+
+def test_rule_missing_materiality_scope_fails_loud(sample_entity):
+    def unregistered_rule(ent, accs, snaps):
+        return []
+        
+    with pytest.raises(ValueError) as exc_info:
+        run_scrutiny(sample_entity, [], [], rules=[unregistered_rule])
+        
+    assert "missing explicit materiality_scope declaration" in str(exc_info.value)
+
+
+def test_trial_balance_balances_clean(sample_entity):
+    acc1 = LedgerAccount(id=1, entity_id=1, name="Capital", group_name="Capital Account", normal_balance="credit")
+    snap1 = TrialBalanceSnapshot(
+        entity_id=1,
+        ledger_account_id=1,
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        opening_balance=Decimal("0.00"),
+        total_debits=Decimal("0.00"),
+        total_credits=Decimal("50000.00"),
+        closing_balance=Decimal("-50000.00")
+    )
+    
+    acc2 = LedgerAccount(id=2, entity_id=1, name="Cash", group_name="Cash-in-hand", normal_balance="debit")
+    snap2 = TrialBalanceSnapshot(
+        entity_id=1,
+        ledger_account_id=2,
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        opening_balance=Decimal("0.00"),
+        total_debits=Decimal("50000.00"),
+        total_credits=Decimal("0.00"),
+        closing_balance=Decimal("50000.00")
+    )
+    
+    exceptions = trial_balance_balances(sample_entity, [acc1, acc2], [snap1, snap2])
+    assert len(exceptions) == 0
+
+
+def test_trial_balance_balances_imbalance(sample_entity):
+    acc1 = LedgerAccount(id=1, entity_id=1, name="Capital", group_name="Capital Account", normal_balance="credit")
+    snap1 = TrialBalanceSnapshot(
+        entity_id=1,
+        ledger_account_id=1,
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        opening_balance=Decimal("0.00"),
+        total_debits=Decimal("0.00"),
+        total_credits=Decimal("50000.00"),
+        closing_balance=Decimal("-50000.00")
+    )
+    
+    acc2 = LedgerAccount(id=2, entity_id=1, name="Cash", group_name="Cash-in-hand", normal_balance="debit")
+    snap2 = TrialBalanceSnapshot(
+        entity_id=1,
+        ledger_account_id=2,
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        opening_balance=Decimal("0.00"),
+        total_debits=Decimal("75000.00"),
+        total_credits=Decimal("0.00"),
+        closing_balance=Decimal("75000.00")
+    )
+    
+    exceptions = run_scrutiny(sample_entity, [acc1, acc2], [snap1, snap2], rules=[trial_balance_balances])
+    assert len(exceptions) == 1
+    exc = exceptions[0]
+    assert exc.rule_name == "trial_balance_balances"
+    assert exc.ledger_account_id is None
+    assert exc.variance == Decimal("25000.00")
+    assert "Trial balance does not balance: net variance of 25000.00 across 2 accounts" in exc.message
+
+
+def test_negative_cash_balance(sample_entity):
+    acc = LedgerAccount(id=1, entity_id=1, name="Petty Cash Variance", group_name="Cash-in-hand", normal_balance="debit")
+    snap = TrialBalanceSnapshot(
+        entity_id=1,
+        ledger_account_id=1,
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        opening_balance=Decimal("2000.00"),
+        total_debits=Decimal("0.00"),
+        total_credits=Decimal("2150.00"),
+        closing_balance=Decimal("-150.00")
+    )
+    
+    exceptions = run_scrutiny(sample_entity, [acc], [snap], rules=[negative_cash_balance])
+    assert len(exceptions) == 1
+    exc = exceptions[0]
+    assert exc.rule_name == "negative_cash_balance"
+    assert exc.ledger_account_id == 1
+    assert exc.variance == Decimal("150.00")
+    assert "has negative cash balance (150.00 credit)" in exc.message
+    assert "Cash balance cannot be negative" in exc.message
+
+
+def test_suspense_account_nonzero_flagged(sample_entity):
+    acc = LedgerAccount(id=1, entity_id=1, name="Unreconciled Suspense", group_name="Suspense Account", normal_balance="any")
+    snap = TrialBalanceSnapshot(
+        entity_id=1,
+        ledger_account_id=1,
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        opening_balance=Decimal("0.00"),
+        total_debits=Decimal("25000.00"),
+        total_credits=Decimal("0.00"),
+        closing_balance=Decimal("25000.00")
+    )
+    
+    exceptions = run_scrutiny(sample_entity, [acc], [snap], rules=[suspense_account_nonzero])
+    assert len(exceptions) == 1
+    exc = exceptions[0]
+    assert exc.rule_name == "suspense_account_nonzero"
+    assert exc.ledger_account_id == 1
+    assert exc.variance == Decimal("25000.00")
+    assert "Suspense account 'Unreconciled Suspense' has non-zero closing balance (25000.00)" in exc.message
+
+
+def test_suspense_account_nonzero_clean(sample_entity):
+    acc = LedgerAccount(id=1, entity_id=1, name="Suspense Account", group_name="Suspense Account", normal_balance="any")
+    snap = TrialBalanceSnapshot(
+        entity_id=1,
+        ledger_account_id=1,
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        opening_balance=Decimal("0.00"),
+        total_debits=Decimal("10000.00"),
+        total_credits=Decimal("10000.00"),
+        closing_balance=Decimal("0.00")
+    )
+    
+    exceptions = run_scrutiny(sample_entity, [acc], [snap], rules=[suspense_account_nonzero])
+    assert len(exceptions) == 0
