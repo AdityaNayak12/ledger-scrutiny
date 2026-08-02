@@ -54,7 +54,7 @@ def test_fixture_exceptions_matching_requirements():
         assert "Sales Account" not in exc_names
         assert "Purchase Account" not in exc_names
         assert "Office Rent" not in exc_names
-        assert len(exceptions) == 3
+        assert len(exceptions) == 4
 
         # Case B: Materiality threshold at 0 (Petty Cash Variance should be included)
         entity.materiality_threshold = Decimal("0.00")
@@ -65,7 +65,7 @@ def test_fixture_exceptions_matching_requirements():
         assert "Rahul Enterprises" in exc_names_low
         assert "Verma Traders" in exc_names_low
         assert "Petty Cash Variance" in exc_names_low
-        assert len(exceptions_low_materiality) == 3
+        assert len(exceptions_low_materiality) == 4
 
     finally:
         session.close()
@@ -95,13 +95,14 @@ def test_normal_balance_check_materiality_exempt():
             snapshots = session.query(TrialBalanceSnapshot).filter_by(entity_id=entity.id).all()
 
             exceptions = run_scrutiny(entity, accounts, snapshots)
+            normal_balance_exceptions = [e for e in exceptions if e.rule_name == "normal_balance_check"]
             acc_name_map = {acc.id: acc.name for acc in accounts}
 
             # Gather all account names with exceptions
-            exc_names = {acc_name_map[e.ledger_account_id] for e in exceptions if e.ledger_account_id in acc_name_map}
+            exc_names = {acc_name_map[e.ledger_account_id] for e in normal_balance_exceptions if e.ledger_account_id in acc_name_map}
             
             # Assert exactly the 3 normal balance violation accounts are flagged in all scenarios
-            assert len(exceptions) == 3, f"Expected 3 exceptions, got {len(exceptions)} at threshold {threshold}"
+            assert len(normal_balance_exceptions) == 3, f"Expected 3 exceptions, got {len(normal_balance_exceptions)} at threshold {threshold}"
             assert "Rahul Enterprises" in exc_names
             assert "Verma Traders" in exc_names
             assert "Petty Cash Variance" in exc_names

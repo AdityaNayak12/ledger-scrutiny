@@ -79,12 +79,14 @@ def test_api_entities_lifecycle_flow():
     assert run_res.status_code == 200
     summary = run_res.json()
     assert summary["status"] == "success"
-    assert summary["exceptions_count"] == 0
+    assert summary["exceptions_count"] == 1  # trial_balance_balances exception
 
     # 5. Check exceptions endpoint
     list_exceptions_res = client.get(f"/entities/{entity_id}/exceptions?period_start=2025-04-01&period_end=2026-03-31")
     assert list_exceptions_res.status_code == 200
-    assert len(list_exceptions_res.json()) == 0
+    exceptions = list_exceptions_res.json()
+    assert len(exceptions) == 1
+    assert exceptions[0]["rule_name"] == "trial_balance_balances"
 
 
 def test_api_scrutiny_with_violations():
@@ -159,22 +161,28 @@ def test_api_scrutiny_with_violations():
     assert run_res.status_code == 200
     summary = run_res.json()
     assert summary["status"] == "success"
-    assert summary["exceptions_count"] == 2
+    assert summary["exceptions_count"] == 4
 
     # 5. Query exceptions filterable by severity
     list_res = client.get(f"/entities/{entity_id}/exceptions", params={"severity": "error", "period_start": "2025-04-01", "period_end": "2026-03-31"})
     assert list_res.status_code == 200
     exceptions = list_res.json()
-    assert len(exceptions) == 2
+    assert len(exceptions) == 4
     
-    exc_accounts = {e["ledger_account_name"]: e for e in exceptions}
+    exc_accounts = {e["ledger_account_name"]: e for e in exceptions if e["ledger_account_name"]}
     assert "Cash-in-hand" in exc_accounts
     assert "Owner Capital" in exc_accounts
 
-    cash_exc = exc_accounts["Cash-in-hand"]
-    assert cash_exc["rule_name"] == "normal_balance_check"
-    assert cash_exc["severity"] == "error"
-    assert "credit closing balance of 70000" in cash_exc["message"]
+    cash_excs = [e for e in exceptions if e["ledger_account_name"] == "Cash-in-hand"]
+    assert len(cash_excs) == 2  # normal_balance_check and negative_cash_balance
+    
+    cash_normal_exc = next(e for e in cash_excs if e["rule_name"] == "normal_balance_check")
+    assert cash_normal_exc["severity"] == "error"
+    assert "credit closing balance of 70000" in cash_normal_exc["message"]
+
+    cash_neg_exc = next(e for e in cash_excs if e["rule_name"] == "negative_cash_balance")
+    assert cash_neg_exc["severity"] == "error"
+    assert "Cash balance cannot be negative" in cash_neg_exc["message"]
 
     capital_exc = exc_accounts["Owner Capital"]
     assert capital_exc["rule_name"] == "normal_balance_check"
@@ -312,15 +320,15 @@ def test_api_exception_review_workflow():
     # 3. Trigger Scrutiny Run
     run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
     assert run_res.status_code == 200
-    assert run_res.json()["exceptions_count"] == 2
+    assert run_res.json()["exceptions_count"] == 4
 
     # 4. List exceptions and verify default status and empty notes
     list_res = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"})
     assert list_res.status_code == 200
     exceptions = list_res.json()
-    assert len(exceptions) == 2
+    assert len(exceptions) == 4
     
-    cash_exc = next(e for e in exceptions if e["ledger_account_name"] == "Cash-in-hand")
+    cash_exc = next(e for e in exceptions if e["ledger_account_name"] == "Cash-in-hand" and e["rule_name"] == "normal_balance_check")
     assert cash_exc["status"] == "PENDING"
     assert cash_exc["auditor_notes"] is None
     
@@ -345,7 +353,7 @@ def test_api_exception_review_workflow():
     # 6. Re-run Scrutiny Run
     run_res_2 = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
     assert run_res_2.status_code == 200
-    assert run_res_2.json()["exceptions_count"] == 2
+    assert run_res_2.json()["exceptions_count"] == 4
 
     # 7. List exceptions and verify status/notes are preserved
     list_res_2 = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"})
