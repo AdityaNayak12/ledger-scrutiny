@@ -6,5 +6,6 @@ lxml
 pytest
 python-multipart
 httpx
-
-
+bcrypt
+pyjwt
+email-validator
