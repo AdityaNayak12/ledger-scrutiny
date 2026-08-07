@@ -2,6 +2,12 @@ import React, { useState, useEffect, useRef } from "react";
 import { INITIAL_MOCK_ENTITIES, MOCK_EXCEPTIONS } from "./mockData";
 import type { Entity, Exception } from "./mockData";
 
+declare global {
+  interface Window {
+    google?: any;
+  }
+}
+
 const BASE_URL = "http://localhost:8000";
 
 const formatPeriodLabel = (p: { period_start: string; period_end: string }) => {
@@ -15,11 +21,484 @@ const formatPeriodLabel = (p: { period_start: string; period_end: string }) => {
   return `${p.period_start} to ${p.period_end}`;
 };
 
+function AuthScreen({
+  baseUrl,
+  onSuccess,
+}: {
+  baseUrl: string;
+  onSuccess: (token: string, user: { email: string; organization_name: string }) => void;
+}) {
+  const [mode, setMode] = useState<"login" | "register">("login");
+  const [organizationName, setOrganizationName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Pending Google Registration state (when 422 requires organization_name)
+  const [pendingGoogleToken, setPendingGoogleToken] = useState<string | null>(null);
+  const [googleOrgNamePrompt, setGoogleOrgNamePrompt] = useState("");
+
+  const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+
+  const handleGoogleCredentialResponse = async (response: any) => {
+    if (!response?.credential) return;
+    setAuthError(null);
+    setIsSubmitting(true);
+    const idToken = response.credential;
+
+    try {
+      const res = await fetch(`${baseUrl}/auth/google`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id_token: idToken,
+        }),
+      });
+
+      if (res.status === 422) {
+        // New Google account requires an Organization Name
+        setPendingGoogleToken(idToken);
+        setAuthError(null);
+        setIsSubmitting(false);
+        return;
+      }
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Google authentication failed");
+      }
+
+      const data = await res.json();
+      onSuccess(data.access_token, {
+        email: data.email,
+        organization_name: data.organization_name,
+      });
+    } catch (err: any) {
+      setAuthError(err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleGoogleOrgSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pendingGoogleToken || !googleOrgNamePrompt.trim()) return;
+
+    setAuthError(null);
+    setIsSubmitting(true);
+
+    try {
+      const res = await fetch(`${baseUrl}/auth/google`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id_token: pendingGoogleToken,
+          organization_name: googleOrgNamePrompt.trim(),
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Google registration failed");
+      }
+
+      const data = await res.json();
+      setPendingGoogleToken(null);
+      onSuccess(data.access_token, {
+        email: data.email,
+        organization_name: data.organization_name,
+      });
+    } catch (err: any) {
+      setAuthError(err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (googleClientId && window.google?.accounts?.id && !pendingGoogleToken) {
+      try {
+        window.google.accounts.id.initialize({
+          client_id: googleClientId,
+          callback: handleGoogleCredentialResponse,
+        });
+
+        const btnContainer = document.getElementById("google-signin-btn");
+        if (btnContainer) {
+          btnContainer.innerHTML = "";
+          window.google.accounts.id.renderButton(btnContainer, {
+            theme: "outline",
+            size: "large",
+            width: 380,
+            text: mode === "login" ? "signin_with" : "signup_with",
+            shape: "rectangular",
+          });
+        }
+      } catch (e) {
+        console.error("GIS initialization error:", e);
+      }
+    }
+  }, [googleClientId, mode, pendingGoogleToken]);
+
+  const handleLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setIsSubmitting(true);
+
+    try {
+      const res = await fetch(`${baseUrl}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+
+      if (res.status === 401) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Invalid credentials");
+      }
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Login failed");
+      }
+
+      const data = await res.json();
+      onSuccess(data.access_token, {
+        email: data.email,
+        organization_name: data.organization_name,
+      });
+    } catch (err: any) {
+      setAuthError(err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+
+    if (password !== confirmPassword) {
+      setAuthError("Passwords do not match");
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const res = await fetch(`${baseUrl}/auth/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          organization_name: organizationName.trim(),
+          email: email.trim(),
+          password,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData.detail || "Registration failed");
+      }
+
+      const data = await res.json();
+      onSuccess(data.access_token, {
+        email: data.email,
+        organization_name: data.organization_name,
+      });
+    } catch (err: any) {
+      setAuthError(err.message);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // If new Google account needs Organization Name, render prompt view
+  if (pendingGoogleToken) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-6 bg-slate-900">
+        <div className="w-full max-w-md bg-slate-950/80 border border-indigo-500/40 rounded-2xl p-8 shadow-2xl backdrop-blur-xl">
+          <div className="text-center mb-6">
+            <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 mb-4 shadow-lg">
+              <svg className="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+              </svg>
+            </div>
+            <h2 className="text-xl font-bold text-white tracking-tight">Complete Google Registration</h2>
+            <p className="text-xs text-slate-400 mt-2">
+              Welcome! Please enter your CA Firm / Organization Name to finish setting up your account.
+            </p>
+          </div>
+
+          {authError && (
+            <div className="mb-4 p-3 bg-rose-950/60 border border-rose-800 text-rose-300 text-xs rounded-xl flex items-center gap-2">
+              <span>{authError}</span>
+            </div>
+          )}
+
+          <form onSubmit={handleGoogleOrgSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5 uppercase tracking-wider">
+                CA Firm / Organization Name *
+              </label>
+              <input
+                type="text"
+                required
+                value={googleOrgNamePrompt}
+                onChange={(e) => setGoogleOrgNamePrompt(e.target.value)}
+                placeholder="e.g. Shah & Mehta Chartered Accountants"
+                className="w-full bg-slate-900 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+              />
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={() => setPendingGoogleToken(null)}
+                className="w-1/3 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-xl py-3 text-xs transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="w-2/3 bg-indigo-600 hover:bg-indigo-500 text-white font-semibold rounded-xl py-3 text-xs transition-all shadow-lg cursor-pointer"
+              >
+                {isSubmitting ? "Completing..." : "Complete Registration"}
+              </button>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex-1 flex items-center justify-center p-6 bg-slate-900">
+      <div className="w-full max-w-md bg-slate-950/80 border border-slate-800/90 rounded-2xl p-8 shadow-2xl backdrop-blur-xl">
+        
+        {/* HEADER ICON & TITLE */}
+        <div className="text-center mb-8">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 mb-4 shadow-lg shadow-indigo-950/50">
+            <svg className="w-7 h-7" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+          </div>
+          <h2 className="text-2xl font-bold text-white tracking-tight">
+            {mode === "login" ? "Sign In to Firm Workspace" : "Register Your CA Firm"}
+          </h2>
+          <p className="text-xs text-slate-400 mt-2 leading-relaxed">
+            {mode === "login"
+              ? "Access your firm's multi-tenant client audit workspaces and pre-audit scrutiny engine"
+              : "Set up a new organization workspace to start analyzing Tally exports"}
+          </p>
+        </div>
+
+        {/* ERROR ALERT BANNER */}
+        {authError && (
+          <div className="mb-6 p-3.5 bg-rose-950/60 border border-rose-800/80 text-rose-300 text-xs rounded-xl flex items-center gap-2.5">
+            <svg className="w-4 h-4 text-rose-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>{authError}</span>
+          </div>
+        )}
+
+        {/* GOOGLE SIGN-IN BUTTON CONTAINER */}
+        <div className="mb-6">
+          {googleClientId ? (
+            <div id="google-signin-btn" className="flex justify-center w-full min-h-[44px]"></div>
+          ) : (
+            <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl text-center text-xs text-slate-500">
+              Set <code className="text-indigo-400">VITE_GOOGLE_CLIENT_ID</code> in <code className="text-indigo-400">frontend/.env</code> to enable "Continue with Google"
+            </div>
+          )}
+
+          <div className="relative my-6 text-center">
+            <div className="absolute inset-0 flex items-center">
+              <div className="w-full border-t border-slate-800"></div>
+            </div>
+            <span className="relative bg-slate-950 px-4 text-xxs font-semibold uppercase tracking-wider text-slate-500">
+              Or continue with email
+            </span>
+          </div>
+        </div>
+
+        {/* FORM */}
+        <form onSubmit={mode === "login" ? handleLoginSubmit : handleRegisterSubmit} className="space-y-4">
+          {mode === "register" && (
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5 uppercase tracking-wider">
+                CA Firm / Organization Name
+              </label>
+              <input
+                type="text"
+                required
+                value={organizationName}
+                onChange={(e) => setOrganizationName(e.target.value)}
+                placeholder="e.g. Acme & Co. Chartered Accountants"
+                className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1.5 uppercase tracking-wider">
+              Email Address
+            </label>
+            <input
+              type="email"
+              required
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="auditor@cafirm.com"
+              className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1.5 uppercase tracking-wider">
+              Password
+            </label>
+            <input
+              type="password"
+              required
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••••••"
+              className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
+            />
+          </div>
+
+          {mode === "register" && (
+            <div>
+              <label className="block text-xs font-semibold text-slate-300 mb-1.5 uppercase tracking-wider">
+                Confirm Password
+              </label>
+              <input
+                type="password"
+                required
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="••••••••••••"
+                className="w-full bg-slate-900 border border-slate-700/80 rounded-xl px-4 py-3 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors"
+              />
+            </div>
+          )}
+
+          <button
+            type="submit"
+            disabled={isSubmitting}
+            className="w-full mt-2 bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-800/50 text-white font-semibold rounded-xl py-3 text-sm transition-all shadow-lg shadow-indigo-950/60 cursor-pointer flex items-center justify-center gap-2"
+          >
+            {isSubmitting ? (
+              <>
+                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                <span>Please wait...</span>
+              </>
+            ) : mode === "login" ? (
+              "Sign In to Workspace"
+            ) : (
+              "Register Firm & Continue"
+            )}
+          </button>
+        </form>
+
+        {/* MODE TOGGLE LINK */}
+        <div className="mt-6 pt-6 border-t border-slate-800/80 text-center">
+          {mode === "login" ? (
+            <p className="text-xs text-slate-400">
+              Don't have a firm account?{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("register");
+                  setAuthError(null);
+                }}
+                className="text-indigo-400 hover:text-indigo-300 font-semibold transition-colors cursor-pointer"
+              >
+                Register CA Firm
+              </button>
+            </p>
+          ) : (
+            <p className="text-xs text-slate-400">
+              Already registered?{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setMode("login");
+                  setAuthError(null);
+                }}
+                className="text-indigo-400 hover:text-indigo-300 font-semibold transition-colors cursor-pointer"
+              >
+                Log In
+              </button>
+            </p>
+          )}
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [isMock, setIsMock] = useState<boolean>(() => {
     const saved = localStorage.getItem("isMockMode");
     return saved !== null ? saved === "true" : true;
   });
+
+  const [token, setToken] = useState<string | null>(() => {
+    return localStorage.getItem("ledger_scrutiny_token");
+  });
+
+  const [user, setUser] = useState<{ email: string; organization_name: string } | null>(() => {
+    const saved = localStorage.getItem("ledger_scrutiny_user");
+    return saved ? JSON.parse(saved) : null;
+  });
+
+  const isAuthenticated = Boolean(token);
+
+  const handleLogout = () => {
+    localStorage.removeItem("ledger_scrutiny_token");
+    localStorage.removeItem("ledger_scrutiny_user");
+    setToken(null);
+    setUser(null);
+    setSelectedEntityId(null);
+    setEntities([]);
+    setPeriods([]);
+    setSelectedPeriod(null);
+    setExceptions([]);
+    setSelectedException(null);
+  };
+
+  const handleAuthSuccess = (newToken: string, userInfo: { email: string; organization_name: string }) => {
+    localStorage.setItem("ledger_scrutiny_token", newToken);
+    localStorage.setItem("ledger_scrutiny_user", JSON.stringify(userInfo));
+    setToken(newToken);
+    setUser(userInfo);
+  };
+
+  const authFetch = async (url: string, options: RequestInit = {}) => {
+    const headers = new Headers(options.headers || {});
+    if (token) {
+      headers.set("Authorization", `Bearer ${token}`);
+    }
+
+    const res = await fetch(url, {
+      ...options,
+      headers,
+    });
+
+    if (res.status === 401 && !isMock) {
+      handleLogout();
+      throw new Error("Session expired or invalid credentials. Please log in again.");
+    }
+
+    return res;
+  };
 
   const [entities, setEntities] = useState<Entity[]>([]);
   const [selectedEntityId, setSelectedEntityId] = useState<number | null>(null);
@@ -77,8 +556,10 @@ export default function App() {
 
   // Fetch entities list
   useEffect(() => {
-    fetchEntities();
-  }, [isMock]);
+    if (isMock || token) {
+      fetchEntities();
+    }
+  }, [isMock, token]);
 
   // Fetch periods when selected entity changes
   useEffect(() => {
@@ -113,14 +594,13 @@ export default function App() {
     } else {
       setIsLoadingEntities(true);
       try {
-        const res = await fetch(`${BASE_URL}/entities`);
+        const res = await authFetch(`${BASE_URL}/entities`);
         if (!res.ok) throw new Error("Failed to fetch entities from server");
         const data = await res.json();
-        // Live data needs parsing helper properties for UI
         const enriched = data.map((e: any) => ({
           ...e,
-          has_uploaded: true, // If returned from API, assume they are registered
-          scrutinized: true,   // Assume scrutiny can be triggered/listed
+          has_uploaded: true,
+          scrutinized: true,
         }));
         setEntities(enriched);
       } catch (err: any) {
@@ -140,7 +620,6 @@ export default function App() {
     setIsLookingUpGstin(true);
     try {
       if (isMock) {
-        // Validate GSTIN format in mock mode
         const gstinRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
         if (!gstinRegex.test(cleaned)) {
           throw new Error("Invalid GSTIN format. E.g. 27AAAAA1111A1Z1");
@@ -161,7 +640,7 @@ export default function App() {
           name: companyName,
         }));
       } else {
-        const res = await fetch(`${BASE_URL}/gstin/lookup`, {
+        const res = await authFetch(`${BASE_URL}/gstin/lookup`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ gstin: cleaned }),
@@ -213,14 +692,13 @@ export default function App() {
       localStorage.setItem("mock_entities", JSON.stringify(updated));
       setSelectedEntityId(created.id);
       setShowAddModal(false);
-      // Reset form
       setNewEntity({
         name: "",
         materiality_threshold: "15000",
       });
     } else {
       try {
-        const res = await fetch(`${BASE_URL}/entities`, {
+        const res = await authFetch(`${BASE_URL}/entities`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -252,12 +730,12 @@ export default function App() {
       }
     } else {
       try {
-        const res = await fetch(`${BASE_URL}/entities/${entityId}/periods`);
+        const res = await authFetch(`${BASE_URL}/entities/${entityId}/periods`);
         if (!res.ok) throw new Error("Failed to fetch periods");
         const data = await res.json();
         setPeriods(data);
         if (data.length > 0) {
-          setSelectedPeriod(data[0]); // Default to the most recent period
+          setSelectedPeriod(data[0]);
         } else {
           setSelectedPeriod(null);
         }
@@ -284,7 +762,7 @@ export default function App() {
       const formData = new FormData();
       formData.append("file", file);
       try {
-        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/upload?clear_only_period=true&target_period_start=${selectedPeriod.period_start}&target_period_end=${selectedPeriod.period_end}`, {
+        const res = await authFetch(`${BASE_URL}/entities/${selectedEntityId}/upload?clear_only_period=true&target_period_start=${selectedPeriod.period_start}&target_period_end=${selectedPeriod.period_end}`, {
           method: "POST",
           body: formData,
         });
@@ -321,7 +799,7 @@ export default function App() {
       const formData = new FormData();
       formData.append("file", file);
       try {
-        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/upload?clear_only_period=true&target_period_start=${newPeriodDates.start}&target_period_end=${newPeriodDates.end}`, {
+        const res = await authFetch(`${BASE_URL}/entities/${selectedEntityId}/upload?clear_only_period=true&target_period_start=${newPeriodDates.start}&target_period_end=${newPeriodDates.end}`, {
           method: "POST",
           body: formData,
         });
@@ -354,7 +832,7 @@ export default function App() {
       }, 1500);
     } else {
       try {
-        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/scrutiny-run?period_start=${selectedPeriod.period_start}&period_end=${selectedPeriod.period_end}`, {
+        const res = await authFetch(`${BASE_URL}/entities/${selectedEntityId}/scrutiny-run?period_start=${selectedPeriod.period_start}&period_end=${selectedPeriod.period_end}`, {
           method: "POST",
         });
         if (!res.ok) throw new Error("Scrutiny run failed");
@@ -391,7 +869,7 @@ export default function App() {
       setSelectedException(null);
     } else {
       try {
-        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}`, {
+        const res = await authFetch(`${BASE_URL}/entities/${selectedEntityId}`, {
           method: "DELETE",
         });
         if (!res.ok) throw new Error("Failed to delete client");
@@ -422,7 +900,7 @@ export default function App() {
         if (start && end) {
           url += `?period_start=${start}&period_end=${end}`;
         }
-        const res = await fetch(url);
+        const res = await authFetch(url);
         if (!res.ok) throw new Error("Failed to load exceptions");
         const data = await res.json();
         setExceptions(data);
@@ -456,7 +934,7 @@ export default function App() {
       setUpdatingExcId(null);
     } else {
       try {
-        const res = await fetch(`${BASE_URL}/entities/${selectedEntityId}/exceptions/${exceptionId}`, {
+        const res = await authFetch(`${BASE_URL}/entities/${selectedEntityId}/exceptions/${exceptionId}`, {
           method: "PATCH",
           headers: {
             "Content-Type": "application/json",
@@ -484,8 +962,7 @@ export default function App() {
 
   const selectedEntity = entities.find((e) => e.id === selectedEntityId);
 
-  // Sorting & Filtering Exceptions
-  const severityWeight = { critical: 3, warning: 2, info: 1 };
+  const severityWeight: Record<string, number> = { critical: 3, error: 3, warning: 2, info: 1 };
 
   const processedExceptions = exceptions
     .filter((exc) => {
@@ -500,7 +977,7 @@ export default function App() {
       if (sortBy === "severity") {
         const weightA = severityWeight[a.severity] || 0;
         const weightB = severityWeight[b.severity] || 0;
-        return weightB - weightA; // Critical first by default
+        return weightB - weightA;
       }
       if (sortBy === "account") {
         const nameA = a.ledger_account_name || "";
@@ -512,6 +989,49 @@ export default function App() {
       }
       return 0;
     });
+
+  if (!isMock && !isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
+        {/* HEADER NAVBAR */}
+        <header className="bg-slate-950 border-b border-slate-800 py-4 px-6 flex items-center justify-between shadow-lg">
+          <div className="flex items-center gap-3">
+            <div className="bg-indigo-600 text-white rounded-lg p-2 font-bold text-lg tracking-wider shadow-md shadow-indigo-900/50">
+              LS
+            </div>
+            <div>
+              <h1 className="text-xl font-bold tracking-tight text-white m-0">LedgerScrutiny</h1>
+              <p className="text-xs text-indigo-400 font-semibold tracking-wider uppercase">CA Pre-Audit Scrutiny Engine</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4 bg-slate-900 px-4 py-2 rounded-xl border border-slate-800 shadow-inner">
+            <div className="flex flex-col text-right">
+              <span className="text-xs text-slate-400 font-medium">Environment Mode</span>
+              <span className={`text-sm font-bold ${isMock ? "text-indigo-400" : "text-emerald-400"}`}>
+                {isMock ? "Mock Demonstration Mode" : "Live API (Postgres)"}
+              </span>
+            </div>
+            <button
+              onClick={() => setIsMock(!isMock)}
+              className={`w-14 h-7 flex items-center rounded-full p-1 cursor-pointer transition-colors duration-300 focus:outline-none ${
+                isMock ? "bg-indigo-600" : "bg-emerald-600"
+              }`}
+            >
+              <div
+                className={`bg-white w-5 h-5 rounded-full shadow-md transform transition-transform duration-300 ${
+                  isMock ? "translate-x-7" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+        </header>
+
+        {/* AUTH SCREEN WITH GOOGLE GIS INTEGRATION */}
+        <AuthScreen baseUrl={BASE_URL} onSuccess={handleAuthSuccess} />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
@@ -528,26 +1048,49 @@ export default function App() {
           </div>
         </div>
 
-        {/* Mock Mode Control Toggle */}
-        <div className="flex items-center gap-4 bg-slate-900 px-4 py-2 rounded-xl border border-slate-800 shadow-inner">
-          <div className="flex flex-col text-right">
-            <span className="text-xs text-slate-400 font-medium">Environment Mode</span>
-            <span className={`text-sm font-bold ${isMock ? "text-indigo-400" : "text-emerald-400"}`}>
-              {isMock ? "Mock Demonstration Mode" : "Live API (Postgres)"}
-            </span>
-          </div>
-          <button
-            onClick={() => setIsMock(!isMock)}
-            className={`w-14 h-7 flex items-center rounded-full p-1 cursor-pointer transition-colors duration-300 focus:outline-none ${
-              isMock ? "bg-indigo-600" : "bg-emerald-600"
-            }`}
-          >
-            <div
-              className={`bg-white w-5 h-5 rounded-full shadow-md transform transition-transform duration-300 ${
-                isMock ? "translate-x-7" : "translate-x-0"
+        {/* RIGHT CONTROLS: Mock Mode + User Badge & Logout */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 bg-slate-900 px-4 py-2 rounded-xl border border-slate-800 shadow-inner">
+            <div className="flex flex-col text-right">
+              <span className="text-xs text-slate-400 font-medium">Environment Mode</span>
+              <span className={`text-sm font-bold ${isMock ? "text-indigo-400" : "text-emerald-400"}`}>
+                {isMock ? "Mock Demonstration Mode" : "Live API (Postgres)"}
+              </span>
+            </div>
+            <button
+              onClick={() => setIsMock(!isMock)}
+              className={`w-14 h-7 flex items-center rounded-full p-1 cursor-pointer transition-colors duration-300 focus:outline-none ${
+                isMock ? "bg-indigo-600" : "bg-emerald-600"
               }`}
-            />
-          </button>
+            >
+              <div
+                className={`bg-white w-5 h-5 rounded-full shadow-md transform transition-transform duration-300 ${
+                  isMock ? "translate-x-7" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+
+          {!isMock && isAuthenticated && (
+            <div className="flex items-center gap-3 pl-4 border-l border-slate-800">
+              <div className="flex flex-col text-right">
+                <span className="text-xs text-slate-400 font-medium">Logged in as</span>
+                <span className="text-sm font-semibold text-slate-200 truncate max-w-[180px]">
+                  {user?.organization_name || user?.email}
+                </span>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="px-3.5 py-2 text-xs font-semibold text-slate-300 hover:text-rose-400 bg-slate-900 hover:bg-rose-950/40 border border-slate-800 hover:border-rose-800/60 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
+                title="Log out of session"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+                </svg>
+                Log Out
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
@@ -648,587 +1191,416 @@ export default function App() {
               {/* ENTITY SUMMARY HEADER & ACTION BOARD */}
               <div className="bg-slate-950/60 rounded-2xl border border-slate-800 p-5 shadow-xl flex flex-col md:flex-row justify-between md:items-center gap-4">
                 <div>
-                  <span className="text-xxs text-indigo-400 font-bold uppercase tracking-wider">Active Client Scrutiny Workspace</span>
                   <div className="flex items-center gap-3">
-                    <h2 className="text-2xl font-extrabold text-white mt-1 mb-2 tracking-tight">{selectedEntity.name}</h2>
-                    <button
-                      onClick={handleDeleteEntity}
-                      title="Delete Client Workspace"
-                      className="bg-rose-950/40 text-rose-400 border border-rose-900/50 hover:bg-rose-900/30 hover:text-rose-200 p-2 rounded-xl transition-all cursor-pointer focus:outline-none mb-1 shadow-sm flex items-center justify-center"
-                    >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-400 font-medium">
-                    {periods.length > 0 ? (
-                      <span className="flex items-center gap-1.5">
-                        <svg className="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
-                        Financial Period:
-                        <select
-                          value={selectedPeriod ? JSON.stringify(selectedPeriod) : ""}
-                          onChange={(e) => setSelectedPeriod(e.target.value ? JSON.parse(e.target.value) : null)}
-                          className="bg-slate-900 border border-slate-850 rounded-lg text-xs font-bold px-2.5 py-1 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer ml-1"
-                        >
-                          {periods.map((p, idx) => (
-                            <option key={idx} value={JSON.stringify(p)} className="text-slate-900 bg-white">
-                              {formatPeriodLabel(p)} ({p.period_start} to {p.period_end})
-                            </option>
-                          ))}
-                        </select>
-                      </span>
-                    ) : (
-                      <span className="text-amber-400 font-semibold flex items-center gap-1">
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /></svg>
-                        Awaiting XML Ingestion
-                      </span>
-                    )}
-                    <span className="flex items-center gap-1.5">
-                      <svg className="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v12a2 2 0 00-2 2z" /></svg>
-                      Materiality Threshold: <strong className="text-indigo-400 font-semibold">₹{selectedEntity.materiality_threshold.toLocaleString()}</strong>
+                    <h2 className="text-2xl font-bold text-white tracking-tight m-0">{selectedEntity.name}</h2>
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-950 border border-indigo-800/60 text-indigo-300">
+                      Materiality: ₹{selectedEntity.materiality_threshold.toLocaleString()}
                     </span>
                   </div>
+                  <p className="text-xs text-slate-400 mt-1 m-0">Client Workspace ID: #{selectedEntity.id}</p>
                 </div>
 
-                {/* Pipeline controls */}
+                {/* ACTION BUTTONS */}
                 <div className="flex items-center gap-3">
+                  <button
+                    onClick={handleDeleteEntity}
+                    className="px-3.5 py-2 text-xs font-semibold text-rose-400 hover:text-rose-200 bg-rose-950/40 hover:bg-rose-900/60 border border-rose-800/60 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 shadow-sm"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                    </svg>
+                    Delete Workspace
+                  </button>
+                </div>
+              </div>
+
+              {/* FINANCIAL PERIOD CONTROL BAR */}
+              <div className="bg-slate-950/40 rounded-2xl border border-slate-800 p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Financial Period:</span>
+                  
                   {periods.length === 0 ? (
-                    <button
-                      onClick={() => {
-                        setNewPeriodDates({ start: "2025-04-01", end: "2026-03-31" });
-                        setShowAddPeriodModal(true);
-                      }}
-                      className="bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl px-5 py-2.5 text-sm font-bold transition-all shadow-md shadow-indigo-900/30 flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
-                    >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
-                      <span>Add First Period</span>
-                    </button>
+                    <span className="text-xs text-amber-400 bg-amber-950/50 border border-amber-800/60 px-3 py-1 rounded-lg">
+                      No XML data uploaded yet
+                    </span>
                   ) : (
-                    <div className="flex flex-col sm:flex-row gap-3">
-                      {/* Run Scrutiny Pass */}
+                    <div className="flex items-center gap-2">
+                      {periods.map((p, idx) => {
+                        const isSelected = selectedPeriod?.period_start === p.period_start && selectedPeriod?.period_end === p.period_end;
+                        return (
+                          <button
+                            key={idx}
+                            onClick={() => setSelectedPeriod(p)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                              isSelected
+                                ? "bg-indigo-600 text-white shadow-md shadow-indigo-900/50"
+                                : "bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800"
+                            }`}
+                          >
+                            {formatPeriodLabel(p)}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => setShowAddPeriodModal(true)}
+                    className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-800/50 px-2.5 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                    </svg>
+                    Add Period
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  {selectedPeriod && (
+                    <>
+                      <label className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer border border-slate-700/60 flex items-center gap-1.5">
+                        <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                        </svg>
+                        {isUploading ? "Uploading..." : `Re-upload XML (${formatPeriodLabel(selectedPeriod)})`}
+                        <input
+                          type="file"
+                          accept=".xml"
+                          onChange={handleReuploadFile}
+                          ref={fileInputRef}
+                          disabled={isUploading}
+                          className="hidden"
+                        />
+                      </label>
+
                       <button
                         onClick={handleTriggerScrutiny}
-                        disabled={isScrutinizing || !selectedPeriod}
-                        className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-600 text-white rounded-xl px-4 py-2.5 text-sm font-extrabold tracking-wide uppercase transition-all shadow-lg shadow-indigo-950/50 flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
+                        disabled={isScrutinizing}
+                        className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-900 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer shadow-lg shadow-indigo-950/50 flex items-center gap-1.5"
                       >
                         {isScrutinizing ? (
                           <>
-                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                            <span>Analyzing...</span>
+                            <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                            <span>Running Rules...</span>
                           </>
                         ) : (
                           <>
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-                            <span>Run Scrutiny Pass</span>
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            </svg>
+                            <span>Run Scrutiny Rules</span>
                           </>
                         )}
                       </button>
-
-                      {/* Re-upload XML option */}
-                      <input
-                        type="file"
-                        accept=".xml"
-                        ref={fileInputRef}
-                        onChange={handleReuploadFile}
-                        className="hidden"
-                      />
-                      <button
-                        onClick={() => {
-                          if (window.confirm(`Warning: Re-uploading will overwrite all existing snapshot and transaction data for the selected period (${selectedPeriod ? formatPeriodLabel(selectedPeriod) : ""}). This cannot be undone. Do you wish to proceed?`)) {
-                            fileInputRef.current?.click();
-                          }
-                        }}
-                        disabled={isUploading || isScrutinizing || !selectedPeriod}
-                        className="bg-slate-905 border border-slate-800 hover:border-slate-700 text-slate-300 rounded-xl px-4 py-2.5 text-sm font-bold transition-all flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
-                      >
-                        {isUploading ? "Uploading..." : "Re-upload XML"}
-                      </button>
-
-                      {/* Add New Period */}
-                      <button
-                        onClick={() => {
-                          setNewPeriodDates({ start: "2026-04-01", end: "2027-03-31" });
-                          setShowAddPeriodModal(true);
-                        }}
-                        disabled={isUploading || isScrutinizing}
-                        className="bg-slate-905 border border-slate-800 hover:border-slate-700 text-indigo-400 hover:text-indigo-300 rounded-xl px-4 py-2.5 text-sm font-bold transition-all flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
-                      >
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
-                        <span>Add Period</span>
-                      </button>
-                    </div>
+                    </>
                   )}
                 </div>
               </div>
 
-              {/* EXCEPTIONS REPORT WORKSPACE */}
-              {periods.length === 0 || !hasRunScrutiny ? (
-                <div className="flex-1 bg-slate-950/30 border border-slate-850 rounded-3xl p-12 text-center flex flex-col items-center justify-center">
-                  <div className="bg-slate-900 border border-slate-800 text-slate-400 p-5 rounded-full mb-4">
-                    {periods.length > 0 ? (
-                      <svg className="w-12 h-12 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-                      </svg>
-                    ) : (
-                      <svg className="w-12 h-12 text-slate-500 animate-pulse" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                      </svg>
-                    )}
+              {/* AUDIT EXCEPTIONS SECTION */}
+              <div className="flex-1 flex flex-col bg-slate-950/60 rounded-2xl border border-slate-800 p-5 shadow-xl overflow-hidden">
+                
+                {/* TOOLBAR: FILTERS & SORTING */}
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-5 pb-4 border-b border-slate-800/80">
+                  <div>
+                    <h3 className="text-base font-bold text-white tracking-tight m-0 flex items-center gap-2">
+                      <span>Audit Exception Register</span>
+                      {selectedPeriod && (
+                        <span className="text-xs font-medium text-slate-400 bg-slate-900 px-2.5 py-0.5 rounded-full border border-slate-800">
+                          {formatPeriodLabel(selectedPeriod)}
+                        </span>
+                      )}
+                    </h3>
+                    <p className="text-xs text-slate-400 mt-0.5 m-0">Flagged anomalies requiring audit review and documentation</p>
                   </div>
-                  <h3 className="text-lg font-bold text-slate-200 mb-2">
-                    {periods.length > 0 ? "XML Uploaded Successfully" : "Awaiting Tally XML Upload"}
-                  </h3>
-                  <p className="text-sm text-slate-400 max-w-sm mb-6 leading-relaxed">
-                    {periods.length > 0
-                      ? "The ledger data is normalized. Click 'Run Scrutiny Pass' to execute the rule validation pipeline."
-                      : "Please upload the client's Tally XML export file to ingest their trial balance and transactions."}
-                  </p>
-                  
-                  {/* Demo Helper Prompt for Tally XML upload */}
-                  {periods.length === 0 && (
-                    <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 max-w-md text-xxs text-slate-400 text-left">
-                      <strong className="text-slate-300 font-bold block mb-1">Demonstration Notice:</strong>
-                      In Mock Mode, any dummy XML file can be uploaded, or you can drag and drop [sample_tally_export.xml](file:///Users/adinayak18/Desktop/ledger-scrutiny/sample_data/sample_tally_export.xml) to trigger the simulated ingestion of their ledger records.
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="flex-1 flex flex-col bg-slate-950/40 rounded-3xl border border-slate-800 overflow-hidden shadow-xl">
-                  
-                  {/* Filter & Sort Bar */}
-                  <div className="bg-slate-950 border-b border-slate-800 py-3.5 px-5 flex flex-col xl:flex-row justify-between xl:items-center gap-3">
-                    <div className="flex flex-wrap items-center gap-4">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Filter Severity:</span>
-                        <div className="flex bg-slate-900 border border-slate-850 p-1 rounded-xl">
-                          {["all", "critical", "warning", "info"].map((sev) => (
-                            <button
-                              key={sev}
-                              onClick={() => setSeverityFilter(sev)}
-                              className={`px-3 py-1 rounded-lg text-xs font-bold uppercase transition-all cursor-pointer ${
-                                severityFilter === sev
-                                  ? "bg-indigo-600 text-white shadow-sm"
-                                  : "text-slate-400 hover:text-slate-200"
-                              }`}
-                            >
-                              {sev}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
 
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Review Status:</span>
-                        <div className="flex bg-slate-900 border border-slate-850 p-1 rounded-xl">
-                          {["all", "PENDING", "CLEARED", "FLAGGED_FOR_FOLLOWUP"].map((st) => (
-                            <button
-                              key={st}
-                              onClick={() => setStatusFilter(st)}
-                              className={`px-2.5 py-1 rounded-lg text-xxs font-bold uppercase transition-all cursor-pointer ${
-                                statusFilter === st
-                                  ? "bg-indigo-600 text-white shadow-sm"
-                                  : "text-slate-400 hover:text-slate-200"
-                              }`}
-                            >
-                              {st === "all" ? "all" : st === "FLAGGED_FOR_FOLLOWUP" ? "Followup" : st.toLowerCase()}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
+                  <div className="flex items-center gap-3 flex-wrap text-xs">
+                    
+                    {/* Severity Filter */}
+                    <div className="flex items-center gap-1.5 bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-800">
+                      <span className="text-slate-500 font-semibold uppercase tracking-wider text-xxs">Severity:</span>
+                      <select
+                        value={severityFilter}
+                        onChange={(e) => setSeverityFilter(e.target.value)}
+                        className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
+                      >
+                        <option value="all" className="bg-slate-900 text-slate-200">All Severities</option>
+                        <option value="critical" className="bg-slate-900 text-slate-200">Critical Only</option>
+                        <option value="warning" className="bg-slate-900 text-slate-200">Warning Only</option>
+                        <option value="info" className="bg-slate-900 text-slate-200">Info Only</option>
+                      </select>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Sort By:</label>
+                    {/* Status Filter */}
+                    <div className="flex items-center gap-1.5 bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-800">
+                      <span className="text-slate-500 font-semibold uppercase tracking-wider text-xxs">Status:</span>
+                      <select
+                        value={statusFilter}
+                        onChange={(e) => setStatusFilter(e.target.value)}
+                        className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
+                      >
+                        <option value="all" className="bg-slate-900 text-slate-200">All Statuses</option>
+                        <option value="PENDING" className="bg-slate-900 text-slate-200">Pending Only</option>
+                        <option value="REVIEWED" className="bg-slate-900 text-slate-200">Reviewed Only</option>
+                        <option value="CLEARED" className="bg-slate-900 text-slate-200">Cleared Only</option>
+                      </select>
+                    </div>
+
+                    {/* Sort By */}
+                    <div className="flex items-center gap-1.5 bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-800">
+                      <span className="text-slate-500 font-semibold uppercase tracking-wider text-xxs">Sort:</span>
                       <select
                         value={sortBy}
                         onChange={(e) => setSortBy(e.target.value)}
-                        className="bg-slate-900 border border-slate-800 rounded-xl text-xs font-semibold px-3 py-1.5 text-slate-200 focus:outline-none focus:border-indigo-500 cursor-pointer"
+                        className="bg-transparent text-slate-200 font-semibold focus:outline-none cursor-pointer"
                       >
-                        <option value="severity">Severity (Critical First)</option>
-                        <option value="account">Ledger Account Name</option>
-                        <option value="rule">Audit Rule Name</option>
+                        <option value="severity" className="bg-slate-900 text-slate-200">Severity (High to Low)</option>
+                        <option value="account" className="bg-slate-900 text-slate-200">Ledger Account</option>
+                        <option value="rule" className="bg-slate-900 text-slate-200">Scrutiny Rule Name</option>
                       </select>
                     </div>
                   </div>
+                </div>
 
-                  {/* Exception Workspace Layout (Table + Review Drawer) */}
-                  <div className="flex-1 flex flex-row overflow-hidden min-h-0">
-                    
-                    {/* Exception Table Container */}
-                    <div className="flex-1 overflow-x-auto border-r border-slate-850">
-                      {isLoadingExceptions ? (
-                        <div className="h-64 flex flex-col items-center justify-center text-slate-500 text-sm gap-2">
-                          <div className="w-8 h-8 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-                          <span>Loading exceptions...</span>
-                        </div>
-                      ) : processedExceptions.length === 0 ? (
-                        <div className="h-64 flex flex-col items-center justify-center text-slate-500 text-sm p-4">
-                          <svg className="w-10 h-10 text-emerald-500/30 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-                          </svg>
-                          <span className="font-semibold text-slate-300">Scrutiny Complete — Clean Run</span>
-                          <p className="text-slate-500 text-xs text-center mt-1">No exceptions match the selected filter/materiality configuration.</p>
-                        </div>
-                      ) : (
-                        <table className="w-full text-left border-collapse table-auto">
-                          <thead>
-                            <tr className="bg-slate-950/60 text-slate-400 border-b border-slate-850 uppercase text-xxs font-bold tracking-wider">
-                              <th className="py-3 px-5 w-28">Severity</th>
-                              <th className="py-3 px-5 w-40">Status</th>
-                              <th className="py-3 px-5 w-44">Rule Name</th>
-                              <th className="py-3 px-5 w-48">Ledger Account</th>
-                              <th className="py-3 px-5">Scrutiny Audit Findings</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-850">
-                            {processedExceptions.map((exc) => {
-                              const isCritical = exc.severity === "critical";
-                              const isWarning = exc.severity === "warning";
+                {/* TABLE OF EXCEPTIONS */}
+                <div className="flex-1 overflow-y-auto">
+                  {isLoadingExceptions ? (
+                    <div className="h-48 flex flex-col items-center justify-center text-slate-500 gap-2">
+                      <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+                      <span className="text-xs">Loading exception items...</span>
+                    </div>
+                  ) : processedExceptions.length === 0 ? (
+                    <div className="h-48 flex flex-col items-center justify-center text-slate-500 text-center border-2 border-dashed border-slate-850 rounded-2xl p-6">
+                      <svg className="w-10 h-10 text-slate-700 mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                      <p className="text-sm font-semibold text-slate-400 m-0">No Audit Exceptions Found</p>
+                      <p className="text-xs text-slate-600 mt-1 m-0">
+                        {!hasRunScrutiny 
+                          ? "Click 'Run Scrutiny Rules' above to analyze ledger trial balances against accounting principles."
+                          : "All accounts cleared scrutiny checks without matching any rule exception patterns."}
+                      </p>
+                    </div>
+                  ) : (
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-xxs bg-slate-900/60 sticky top-0 z-10">
+                          <th className="py-3 px-4">Severity</th>
+                          <th className="py-3 px-4">Ledger Account</th>
+                          <th className="py-3 px-4">Scrutiny Rule</th>
+                          <th className="py-3 px-4">Exception Description</th>
+                          <th className="py-3 px-4">Status</th>
+                          <th className="py-3 px-4 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-850">
+                        {processedExceptions.map((exc) => {
+                          const isCritical = exc.severity.toLowerCase() === "critical" || exc.severity.toLowerCase() === "error";
+                          const isWarning = exc.severity.toLowerCase() === "warning";
+                          
+                          return (
+                            <tr key={exc.id} className="hover:bg-slate-900/50 transition-colors group">
                               
-                              return (
-                                <tr 
-                                  key={exc.id} 
+                              {/* Severity Badge */}
+                              <td className="py-3 px-4 whitespace-nowrap">
+                                <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xxs font-bold uppercase tracking-wider ${
+                                  isCritical
+                                    ? "bg-rose-950 text-rose-300 border border-rose-800/60"
+                                    : isWarning
+                                    ? "bg-amber-950 text-amber-300 border border-amber-800/60"
+                                    : "bg-blue-950 text-blue-300 border border-blue-800/60"
+                                }`}>
+                                  {exc.severity}
+                                </span>
+                              </td>
+
+                              {/* Ledger Account */}
+                              <td className="py-3 px-4 font-bold text-slate-200 whitespace-nowrap">
+                                {exc.ledger_account_name || (
+                                  <span className="text-slate-500 italic font-normal">N/A (Entity-wide)</span>
+                                )}
+                              </td>
+
+                              {/* Rule Name */}
+                              <td className="py-3 px-4 font-semibold text-indigo-300 whitespace-nowrap">
+                                {exc.rule_name}
+                              </td>
+
+                              {/* Message */}
+                              <td className="py-3 px-4 text-slate-300 max-w-xs truncate" title={exc.message}>
+                                {exc.message}
+                              </td>
+
+                              {/* Status Badge */}
+                              <td className="py-3 px-4 whitespace-nowrap">
+                                <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xxs font-bold ${
+                                  exc.status === "CLEARED"
+                                    ? "bg-emerald-950 text-emerald-300 border border-emerald-800/60"
+                                    : exc.status === "REVIEWED"
+                                    ? "bg-indigo-950 text-indigo-300 border border-indigo-800/60"
+                                    : "bg-slate-800 text-slate-400 border border-slate-700"
+                                }`}>
+                                  {exc.status}
+                                </span>
+                              </td>
+
+                              {/* Action Button */}
+                              <td className="py-3 px-4 text-right whitespace-nowrap">
+                                <button
                                   onClick={() => {
                                     setSelectedException(exc);
                                     setNoteText(exc.auditor_notes || "");
                                   }}
-                                  className={`hover:bg-slate-900/40 transition-all group cursor-pointer ${
-                                    selectedException?.id === exc.id ? "bg-indigo-950/20" : ""
-                                  }`}
+                                  className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-800/50 px-3 py-1 rounded-lg transition-all cursor-pointer"
                                 >
-                                  
-                                  {/* Severity Badge Column */}
-                                  <td className="py-4 px-5">
-                                    <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xxs font-extrabold uppercase tracking-widest border ${
-                                      isCritical
-                                        ? "bg-rose-950/30 text-rose-400 border-rose-900/50 shadow-sm shadow-rose-950/20"
-                                        : isWarning
-                                        ? "bg-amber-950/30 text-amber-400 border-amber-900/50 shadow-sm shadow-amber-950/20"
-                                        : "bg-blue-950/30 text-blue-400 border-blue-900/50 shadow-sm shadow-blue-950/20"
-                                    }`}>
-                                      <span className={`w-1.5 h-1.5 rounded-full ${
-                                        isCritical ? "bg-rose-500" : isWarning ? "bg-amber-500" : "bg-blue-500"
-                                      }`} />
-                                      {exc.severity}
-                                    </span>
-                                  </td>
-  
-                                  {/* Review Status Column */}
-                                  <td className="py-4 px-5">
-                                    <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg text-xxs font-bold border uppercase ${
-                                      exc.status === "CLEARED"
-                                        ? "bg-emerald-950/30 text-emerald-400 border-emerald-900/50"
-                                        : exc.status === "FLAGGED_FOR_FOLLOWUP"
-                                        ? "bg-amber-950/30 text-amber-400 border-amber-900/50"
-                                        : "bg-slate-900 text-slate-400 border-slate-800"
-                                    }`}>
-                                      {exc.status === "FLAGGED_FOR_FOLLOWUP" ? "Followup" : exc.status?.toLowerCase() || "pending"}
-                                    </span>
-                                  </td>
-  
-                                  {/* Rule Name Column */}
-                                  <td className="py-4 px-5 font-mono text-xs text-slate-300 font-semibold">
-                                    {exc.rule_name}
-                                  </td>
-  
-                                  {/* Ledger Account Column */}
-                                  <td className="py-4 px-5 font-bold text-sm text-slate-200 tracking-tight">
-                                    {exc.ledger_account_name ? (
-                                      <span className="flex items-center gap-1.5">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
-                                        {exc.ledger_account_name}
-                                      </span>
-                                    ) : (
-                                      <span className="text-slate-500 font-medium italic text-xs">N/A (Entity-wide)</span>
-                                    )}
-                                  </td>
-  
-                                  {/* Message Finding Column */}
-                                  <td className="py-4 px-5 text-sm text-slate-300 font-medium leading-relaxed">
-                                    <div className="flex items-start gap-3">
-                                      <span className="flex-1">{exc.message}</span>
-                                      {exc.auditor_notes && (
-                                        <span className="text-indigo-400 shrink-0 mt-0.5 bg-slate-900/80 p-1 rounded border border-slate-800" title={`Auditor notes: ${exc.auditor_notes}`}>
-                                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                          </svg>
-                                        </span>
-                                      )}
-                                    </div>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      )}
-                    </div>
-
-                    {/* Review Drawer Panel */}
-                    {selectedException && (
-                      <div className="w-96 bg-slate-950 border-l border-slate-850 flex flex-col h-full shrink-0 shadow-2xl relative">
-                        {/* Drawer Header */}
-                        <div className="p-4 border-b border-slate-850 flex justify-between items-center bg-slate-950">
-                          <div>
-                            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest">Auditor Workpaper</h4>
-                            <span className="text-xxs text-indigo-400 font-bold uppercase font-mono">{selectedException.rule_name}</span>
-                          </div>
-                          <button
-                            onClick={() => setSelectedException(null)}
-                            className="text-slate-400 hover:text-white transition-all cursor-pointer focus:outline-none p-1.5 hover:bg-slate-900 rounded-lg"
-                          >
-                            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
-                            </svg>
-                          </button>
-                        </div>
-
-                        {/* Drawer Content */}
-                        <div className="flex-1 overflow-y-auto p-5 space-y-5">
-                          
-                          {/* Finding Details */}
-                          <div className="bg-slate-900/50 rounded-2xl border border-slate-850 p-4 space-y-3">
-                            <div>
-                              <span className="text-xxs text-slate-500 font-bold uppercase tracking-wider block mb-1">Ledger Account</span>
-                              <span className="text-sm font-extrabold text-slate-100 flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-indigo-500" />
-                                {selectedException.ledger_account_name || "N/A (Entity-wide Rule)"}
-                              </span>
-                            </div>
-                            <div>
-                              <span className="text-xxs text-slate-500 font-bold uppercase tracking-wider block mb-1">Audit Finding</span>
-                              <p className="text-xs text-slate-300 leading-relaxed font-medium">{selectedException.message}</p>
-                            </div>
-                          </div>
-
-                          {/* Change Status */}
-                          <div className="space-y-2">
-                            <span className="text-xxs text-slate-400 font-bold uppercase tracking-wider block">Review Status</span>
-                            <div className="grid grid-cols-3 gap-2">
-                              {[
-                                { id: "PENDING", label: "Pending", color: "border-slate-850 text-slate-400 bg-slate-900/30 hover:bg-slate-900" },
-                                { id: "FLAGGED_FOR_FOLLOWUP", label: "Followup", color: "border-amber-900/40 text-amber-500 bg-amber-950/10 hover:bg-amber-950/20" },
-                                { id: "CLEARED", label: "Cleared", color: "border-emerald-900/40 text-emerald-500 bg-emerald-950/10 hover:bg-emerald-950/20" }
-                              ].map((btn) => {
-                                const isActive = selectedException.status === btn.id;
-                                return (
-                                  <button
-                                    key={btn.id}
-                                    onClick={() => updateExceptionStatus(selectedException.id, btn.id, noteText)}
-                                    disabled={updatingExcId === selectedException.id}
-                                    className={`border rounded-xl py-2 text-xxs font-extrabold uppercase transition-all tracking-wider cursor-pointer ${btn.color} ${
-                                      isActive 
-                                        ? btn.id === "CLEARED" 
-                                          ? "bg-emerald-950/40 border-emerald-500 text-emerald-400 shadow-sm ring-1 ring-emerald-500/20" 
-                                          : btn.id === "FLAGGED_FOR_FOLLOWUP"
-                                          ? "bg-amber-950/40 border-amber-500 text-amber-400 shadow-sm ring-1 ring-amber-500/20"
-                                          : "bg-slate-800 border-slate-500 text-slate-200"
-                                        : "opacity-60"
-                                    }`}
-                                  >
-                                    {btn.label}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </div>
-
-                          {/* Audit Notes */}
-                          <div className="space-y-2">
-                            <label className="text-xxs text-slate-400 font-bold uppercase tracking-wider block">Auditor Evidence & Notes</label>
-                            <textarea
-                              value={noteText}
-                              onChange={(e) => setNoteText(e.target.value)}
-                              placeholder="Document verification checks, reason for clearing, or follow-up details..."
-                              rows={5}
-                              className="w-full bg-slate-900/80 border border-slate-800 rounded-xl p-3 text-xs text-slate-200 focus:outline-none focus:border-indigo-500 leading-relaxed font-medium placeholder-slate-605 resize-none"
-                            />
-                          </div>
-
-                        </div>
-
-                        {/* Drawer Footer */}
-                        <div className="p-4 border-t border-slate-850 bg-slate-950/80 backdrop-blur flex gap-3">
-                          <button
-                            onClick={() => updateExceptionStatus(selectedException.id, selectedException.status, noteText)}
-                            disabled={updatingExcId === selectedException.id}
-                            className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl py-2.5 text-xs font-bold transition-all shadow-md shadow-indigo-900/30 flex items-center justify-center gap-2 cursor-pointer focus:outline-none"
-                          >
-                            {updatingExcId === selectedException.id ? (
-                              <>
-                                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                                <span>Saving Notes...</span>
-                              </>
-                            ) : (
-                              <>
-                                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                </svg>
-                                <span>Save Workpaper</span>
-                              </>
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                  </div>
+                                  Review Workpaper
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
-              )}
+              </div>
+
             </div>
           )}
         </section>
       </main>
 
-      {/* CREATE NEW CLIENT ENTITY MODAL */}
+      {/* MODAL: ADD CLIENT ENTITY */}
       {showAddModal && (
-        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-fadeIn">
-            
-            {/* Modal Header */}
-            <div className="bg-slate-950 py-4 px-6 border-b border-slate-850 flex justify-between items-center">
-              <h2 className="text-base font-bold text-white m-0">Register Client Entity</h2>
-              <button
-                onClick={() => setShowAddModal(false)}
-                className="text-slate-400 hover:text-white font-bold text-xl cursor-pointer focus:outline-none"
-              >
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold text-white m-0">Register Client Entity</h3>
+              <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-slate-200 font-bold text-xl cursor-pointer">
                 &times;
               </button>
             </div>
 
-            {/* Modal Form */}
-            <form onSubmit={handleCreateEntity} className="p-6 flex flex-col gap-4">
-              
-              <div className="flex gap-2 items-end">
-                <div className="flex-1">
-                  <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Auto-Fill via GSTIN (Optional)</label>
-                  <input
-                    type="text"
-                    placeholder="e.g. 27AAAAA1111A1Z1"
-                    value={gstinLookup}
-                    onChange={(e) => setGstinLookup(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 placeholder-slate-700 font-semibold"
-                  />
-                </div>
+            {/* GSTIN LOOKUP INTEGRATION */}
+            <div className="mb-5 p-4 bg-slate-950/60 rounded-xl border border-slate-800">
+              <label className="block text-xs font-semibold text-slate-400 mb-1.5 uppercase tracking-wider">
+                GSTIN Lookup (Auto-fill Details)
+              </label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={gstinLookup}
+                  onChange={(e) => setGstinLookup(e.target.value)}
+                  placeholder="e.g. 27AAAAA1111A1Z1"
+                  className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                />
                 <button
                   type="button"
                   onClick={handleGstinLookup}
-                  disabled={isLookingUpGstin || !gstinLookup.trim()}
-                  className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-800 disabled:text-slate-500 text-white rounded-xl px-4 py-2.5 text-xs font-extrabold uppercase tracking-wide h-[42px] transition-all cursor-pointer focus:outline-none"
+                  disabled={isLookingUpGstin}
+                  className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-900 text-white px-3 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer"
                 >
-                  {isLookingUpGstin ? "..." : "Lookup"}
+                  {isLookingUpGstin ? "Looking up..." : "Fetch Company"}
                 </button>
               </div>
+            </div>
 
+            <form onSubmit={handleCreateEntity} className="space-y-4">
               <div>
-                <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Company / Client Name</label>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Entity Name *</label>
                 <input
                   type="text"
                   required
-                  placeholder="e.g. Rahul Enterprises"
                   value={newEntity.name}
                   onChange={(e) => setNewEntity({ ...newEntity, name: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 placeholder-slate-600 font-semibold"
+                  placeholder="Acme Industrial Pvt Ltd"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                 />
               </div>
 
               <div>
-                <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Materiality Threshold (INR)</label>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Materiality Threshold (₹)</label>
                 <input
                   type="number"
-                  required
-                  placeholder="e.g. 15000"
                   value={newEntity.materiality_threshold}
                   onChange={(e) => setNewEntity({ ...newEntity, materiality_threshold: e.target.value })}
-                  className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 placeholder-slate-600 font-bold"
+                  placeholder="15000"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                 />
               </div>
 
-              {/* Modal Actions */}
-              <div className="flex gap-3 justify-end mt-4">
+              <div className="flex justify-end gap-3 pt-2">
                 <button
                   type="button"
                   onClick={() => setShowAddModal(false)}
-                  className="bg-slate-950 hover:bg-slate-850 border border-slate-800 text-slate-300 rounded-xl px-4 py-2.5 text-xs font-bold transition-all cursor-pointer focus:outline-none"
+                  className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 bg-slate-800 rounded-xl transition-all cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl px-4 py-2.5 text-xs font-extrabold uppercase tracking-wide transition-all shadow-md shadow-indigo-900/30 cursor-pointer focus:outline-none"
+                  className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 rounded-xl transition-all shadow-md shadow-indigo-950/50 cursor-pointer"
                 >
-                  Create Workspace
+                  Create Client
                 </button>
               </div>
-
             </form>
           </div>
         </div>
       )}
 
-      {/* ADD NEW PERIOD MODAL */}
-      {showAddPeriodModal && (
-        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md shadow-2xl overflow-hidden animate-fadeIn">
-            
-            {/* Modal Header */}
-            <div className="bg-slate-950 py-4 px-6 border-b border-slate-850 flex justify-between items-center">
-              <h2 className="text-base font-bold text-white m-0">Ingest Financial Year Period</h2>
-              <button
-                onClick={() => setShowAddPeriodModal(false)}
-                className="text-slate-400 hover:text-white font-bold text-xl cursor-pointer focus:outline-none"
-              >
+      {/* MODAL: ADD FINANCIAL PERIOD */}
+      {showAddPeriodModal && selectedEntity && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-lg font-bold text-white m-0">Add Financial Period for {selectedEntity.name}</h3>
+              <button onClick={() => setShowAddPeriodModal(false)} className="text-slate-400 hover:text-slate-200 font-bold text-xl cursor-pointer">
                 &times;
               </button>
             </div>
 
-            {/* Modal Form */}
-            <div className="p-6 flex flex-col gap-4">
-              <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Period Start Date</label>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Period Start</label>
                   <input
                     type="date"
-                    required
                     value={newPeriodDates.start}
                     onChange={(e) => setNewPeriodDates({ ...newPeriodDates, start: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 font-semibold"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
                 <div>
-                  <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Period End Date</label>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Period End</label>
                   <input
                     type="date"
-                    required
                     value={newPeriodDates.end}
                     onChange={(e) => setNewPeriodDates({ ...newPeriodDates, end: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-850 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 font-semibold"
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="block text-xxs font-extrabold uppercase text-slate-400 tracking-wider mb-1.5">Select Tally XML Export</label>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Tally XML Export File *</label>
                 <input
                   type="file"
                   accept=".xml"
                   onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) {
-                      handleAddPeriodSubmit(file);
-                    }
+                    const f = e.target.files?.[0];
+                    if (f) handleAddPeriodSubmit(f);
                   }}
-                  className="w-full text-sm text-slate-400 file:mr-4 file:py-2.5 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-extrabold file:uppercase file:bg-slate-800 file:text-slate-300 hover:file:bg-slate-700 cursor-pointer"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer"
                 />
               </div>
 
-              {/* Modal Actions */}
-              <div className="flex gap-3 justify-end mt-4">
+              <div className="flex justify-end gap-3 pt-2">
                 <button
                   type="button"
                   onClick={() => setShowAddPeriodModal(false)}
-                  className="bg-slate-950 hover:bg-slate-850 border border-slate-800 text-slate-300 rounded-xl px-4 py-2.5 text-xs font-bold transition-all cursor-pointer focus:outline-none"
+                  className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 bg-slate-800 rounded-xl transition-all cursor-pointer"
                 >
                   Cancel
                 </button>
@@ -1237,6 +1609,120 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* WORKPAPER REVIEW DRAWER */}
+      {selectedException && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-50 flex justify-end">
+          <div className="w-full max-w-xl bg-slate-900 border-l border-slate-800 h-full flex flex-col p-6 shadow-2xl overflow-y-auto">
+            <div className="flex justify-between items-center pb-4 border-b border-slate-800 mb-6">
+              <div>
+                <span className="text-xxs font-bold uppercase tracking-wider text-indigo-400 bg-indigo-950 border border-indigo-800/60 px-2.5 py-0.5 rounded-full">
+                  Audit Workpaper Review
+                </span>
+                <h3 className="text-xl font-bold text-white mt-2 m-0">Exception #{selectedException.id}</h3>
+              </div>
+              <button
+                onClick={() => setSelectedException(null)}
+                className="text-slate-400 hover:text-slate-200 text-2xl font-bold focus:outline-none cursor-pointer"
+              >
+                &times;
+              </button>
+            </div>
+
+            <div className="space-y-6 flex-1">
+              
+              {/* DETAILS CARD */}
+              <div className="bg-slate-950/60 rounded-xl border border-slate-800 p-4 space-y-3">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-400 font-semibold">Ledger Account:</span>
+                  <span className="font-bold text-slate-100">{selectedException.ledger_account_name || "N/A (Entity-wide)"}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-400 font-semibold">Rule Triggered:</span>
+                  <span className="font-bold text-indigo-300">{selectedException.rule_name}</span>
+                </div>
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-slate-400 font-semibold">Severity:</span>
+                  <span className="font-bold uppercase text-rose-400">{selectedException.severity}</span>
+                </div>
+              </div>
+
+              {/* MESSAGE */}
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Audit Observation Description</h4>
+                <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 text-xs text-slate-200 leading-relaxed font-mono">
+                  {selectedException.message}
+                </div>
+              </div>
+
+              {/* AUDITOR NOTES INPUT */}
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Auditor Notes & Justification</h4>
+                <textarea
+                  rows={4}
+                  value={noteText}
+                  onChange={(e) => setNoteText(e.target.value)}
+                  placeholder="Enter auditor review notes, justification, or board resolution details..."
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-xs text-slate-100 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition-colors"
+                />
+              </div>
+
+              {/* REVIEW STATUS ACTION BUTTONS */}
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Update Review State</h4>
+                <div className="grid grid-cols-3 gap-3">
+                  <button
+                    onClick={() => updateExceptionStatus(selectedException.id, "PENDING", noteText)}
+                    disabled={updatingExcId === selectedException.id}
+                    className={`py-2.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                      selectedException.status === "PENDING"
+                        ? "bg-slate-800 border-slate-600 text-slate-100"
+                        : "bg-slate-950 border-slate-800 text-slate-400 hover:bg-slate-850"
+                    }`}
+                  >
+                    Set Pending
+                  </button>
+                  
+                  <button
+                    onClick={() => updateExceptionStatus(selectedException.id, "REVIEWED", noteText)}
+                    disabled={updatingExcId === selectedException.id}
+                    className={`py-2.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                      selectedException.status === "REVIEWED"
+                        ? "bg-indigo-900/80 border-indigo-600 text-indigo-200"
+                        : "bg-slate-950 border-slate-800 text-slate-400 hover:bg-indigo-950/40"
+                    }`}
+                  >
+                    Mark Reviewed
+                  </button>
+
+                  <button
+                    onClick={() => updateExceptionStatus(selectedException.id, "CLEARED", noteText)}
+                    disabled={updatingExcId === selectedException.id}
+                    className={`py-2.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                      selectedException.status === "CLEARED"
+                        ? "bg-emerald-900/80 border-emerald-600 text-emerald-200"
+                        : "bg-slate-950 border-slate-800 text-slate-400 hover:bg-emerald-950/40"
+                    }`}
+                  >
+                    Clear Exception
+                  </button>
+                </div>
+              </div>
+
+            </div>
+
+            <div className="pt-6 border-t border-slate-800 flex justify-end">
+              <button
+                onClick={() => setSelectedException(null)}
+                className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-5 py-2.5 rounded-xl text-xs transition-all shadow-lg shadow-indigo-950/50 cursor-pointer"
+              >
+                Close Workpaper
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

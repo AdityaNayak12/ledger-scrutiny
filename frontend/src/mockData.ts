@@ -12,10 +12,10 @@ export interface Entity {
 export interface Exception {
   id: number;
   rule_name: string;
-  severity: "critical" | "warning" | "info";
+  severity: string;
   message: string;
   ledger_account_name: string | null;
-  status: "PENDING" | "CLEARED" | "FLAGGED_FOR_FOLLOWUP";
+  status: "PENDING" | "REVIEWED" | "CLEARED" | "FLAGGED_FOR_FOLLOWUP" | string;
   auditor_notes: string | null;
   created_at: string;
 }
