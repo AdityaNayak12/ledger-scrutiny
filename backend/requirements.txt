@@ -9,3 +9,5 @@ httpx
 bcrypt
 pyjwt
 email-validator
+google-auth
+requests

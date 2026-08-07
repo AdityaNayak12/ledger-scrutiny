@@ -14,6 +14,7 @@ TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False)
 @pytest.fixture(autouse=True)
 def db_session_fixture(monkeypatch):
     monkeypatch.setenv("SECRET_KEY", "test-secret-key-for-auth-unit-tests-only-12345")
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-google-client-id-12345.apps.googleusercontent.com")
     connection = engine.connect()
     connection.execute(text("PRAGMA foreign_keys=ON"))
     TestingSessionLocal.configure(bind=connection)

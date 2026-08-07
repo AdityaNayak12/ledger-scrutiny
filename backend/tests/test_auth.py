@@ -156,3 +156,74 @@ def test_secret_key_missing_raises_startup_error(monkeypatch):
     with pytest.raises(RuntimeError) as startup_exc_info:
         on_startup()
     assert "SECRET_KEY environment variable is not set" in str(startup_exc_info.value)
+
+
+def test_google_client_id_missing_raises_startup_error(monkeypatch):
+    monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+    
+    from app.auth.security import get_google_client_id
+    from app.main import on_startup
+
+    with pytest.raises(RuntimeError) as exc_info:
+        get_google_client_id()
+    assert "GOOGLE_CLIENT_ID environment variable is not set" in str(exc_info.value)
+
+    with pytest.raises(RuntimeError) as startup_exc_info:
+        on_startup()
+    assert "GOOGLE_CLIENT_ID environment variable is not set" in str(startup_exc_info.value)
+
+
+def test_auth_login_google_account_password_attempt_rejected():
+    from unittest.mock import patch
+    
+    # 1. Register a Google account via /auth/google
+    with patch("google.oauth2.id_token.verify_oauth2_token") as mock_verify:
+        mock_verify.return_value = {"email": "google_user@gmail.com"}
+        
+        reg_res = client.post("/auth/google", json={
+            "id_token": "valid-mock-id-token",
+            "organization_name": "Google User Firm"
+        })
+        assert reg_res.status_code == 200
+        assert reg_res.json()["organization_name"] == "Google User Firm"
+
+    # 2. Attempt login via password endpoint -> should reject with explicit Google Sign-In message
+    login_res = client.post("/auth/login", json={
+        "email": "google_user@gmail.com",
+        "password": "AnyPassword123"
+    })
+    assert login_res.status_code == 401
+    assert "This account uses Google Sign-In" in login_res.json()["detail"]
+
+
+def test_auth_google_account_linking_and_new_org_flow():
+    from unittest.mock import patch
+
+    with patch("google.oauth2.id_token.verify_oauth2_token") as mock_verify:
+        mock_verify.return_value = {"email": "new_google_auditor@gmail.com"}
+
+        # 1. First attempt: new account without organization_name -> 422 Unprocessable Entity
+        res_no_org = client.post("/auth/google", json={"id_token": "mock-token-1"})
+        assert res_no_org.status_code == 422
+        assert "organization_name is required" in res_no_org.json()["detail"]
+
+        # 2. Second attempt: provide organization_name -> 200 Created
+        res_with_org = client.post("/auth/google", json={
+            "id_token": "mock-token-1",
+            "organization_name": "New Google Firm Ltd"
+        })
+        assert res_with_org.status_code == 200
+        token = res_with_org.json()["access_token"]
+        assert res_with_org.json()["email"] == "new_google_auditor@gmail.com"
+        assert res_with_org.json()["organization_name"] == "New Google Firm Ltd"
+
+        # Verify token works on protected endpoints
+        ent_res = client.get("/entities", headers={"Authorization": f"Bearer {token}"})
+        assert ent_res.status_code == 200
+
+        # 3. Third attempt (Account Linking): sign in again with same Google account -> logs straight in without org_name
+        res_relogin = client.post("/auth/google", json={"id_token": "mock-token-1"})
+        assert res_relogin.status_code == 200
+        assert res_relogin.json()["email"] == "new_google_auditor@gmail.com"
+        assert res_relogin.json()["organization_name"] == "New Google Firm Ltd"
+

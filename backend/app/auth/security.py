@@ -26,6 +26,16 @@ def get_secret_key() -> str:
     return secret
 
 
+def get_google_client_id() -> str:
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    if not client_id:
+        raise RuntimeError(
+            "GOOGLE_CLIENT_ID environment variable is not set. "
+            "A valid GOOGLE_CLIENT_ID must be provided for Google Sign-In authentication."
+        )
+    return client_id
+
+
 def hash_password(plain_password: str) -> str:
     salt = bcrypt.gensalt()
     hashed = bcrypt.hashpw(plain_password.encode("utf-8"), salt)
