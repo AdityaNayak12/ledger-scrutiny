@@ -4,7 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
-from app.db.models import Entity, LedgerAccount, Transaction, TrialBalanceSnapshot, AuditException
+from app.db.models import Organization, User, Entity, LedgerAccount, Transaction, TrialBalanceSnapshot, AuditException
 
 
 def test_database_models_lifecycle():
@@ -16,8 +16,26 @@ def test_database_models_lifecycle():
     session = Session()
 
     try:
+        # 0. Create an Organization and User
+        org = Organization(name="Test CA Firm")
+        session.add(org)
+        session.flush()
+
+        user = User(
+            organization_id=org.id,
+            email="auditor@cafirm.com",
+            hashed_password="hashed_pass_secret"
+        )
+        session.add(user)
+        session.commit()
+
+        assert org.id is not None
+        assert user.id is not None
+        assert user.organization.name == "Test CA Firm"
+
         # 1. Create and persist an Entity
         entity = Entity(
+            organization_id=org.id,
             name="Acme Corp",
             materiality_threshold=Decimal("10000.00"),
         )
@@ -26,6 +44,7 @@ def test_database_models_lifecycle():
 
         assert entity.id is not None
         assert entity.name == "Acme Corp"
+        assert entity.organization_id == org.id
         assert entity.materiality_threshold == Decimal("10000.00")
 
         # 2. Create Ledger Accounts
@@ -119,7 +138,11 @@ def test_entity_transient_properties_fail_loud():
     session = Session()
 
     try:
-        entity = Entity(name="Fail Loud Corp", materiality_threshold=Decimal("10000.00"))
+        org = Organization(name="Test Org")
+        session.add(org)
+        session.flush()
+
+        entity = Entity(organization_id=org.id, name="Fail Loud Corp", materiality_threshold=Decimal("10000.00"))
         session.add(entity)
         session.commit()
         entity_id = entity.id

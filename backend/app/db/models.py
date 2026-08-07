@@ -7,17 +7,54 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
 
 
+class Organization(Base):
+    """
+    Represents a CA firm / accounting organization.
+    """
+    __tablename__ = "organizations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
+    # Relationships
+    users: Mapped[list["User"]] = relationship("User", back_populates="organization", cascade="all, delete-orphan")
+    entities: Mapped[list["Entity"]] = relationship("Entity", back_populates="organization", cascade="all, delete-orphan")
+
+
+class User(Base):
+    """
+    Represents an auditor / user belonging to an Organization.
+    """
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, server_default=func.now(), default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
+    # Relationships
+    organization: Mapped["Organization"] = relationship("Organization", back_populates="users")
+
+
 class Entity(Base):
     """
-    Represents a client business entity.
+    Represents a client business entity belonging to an Organization.
     """
     __tablename__ = "entities"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     materiality_threshold: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
 
     # Relationships
+    organization: Mapped["Organization"] = relationship("Organization", back_populates="entities")
     accounts: Mapped[list["LedgerAccount"]] = relationship(
         "LedgerAccount", back_populates="entity", cascade="all, delete-orphan"
     )
