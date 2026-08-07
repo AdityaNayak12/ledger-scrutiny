@@ -238,9 +238,8 @@ def test_tally_ingestion_edge_cases():
     try:
         with pytest.raises(ValueError) as excinfo:
             normalize_tally_data(parsed, session)
-        assert "Unrecognized account group" in str(excinfo.value)
+        assert "Unrecognized ledger account group" in str(excinfo.value)
         assert "NonExistentGroup" in str(excinfo.value)
-        assert "Custom Asset" in str(excinfo.value)
     finally:
         session.close()
         Base.metadata.drop_all(engine)

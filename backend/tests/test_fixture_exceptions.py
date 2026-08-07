@@ -31,6 +31,8 @@ def test_fixture_exceptions_matching_requirements():
         # 4. Ingest and normalize current period
         # Case A: Materiality threshold at 5000.00
         entity = normalize_tally_data(parsed_data, session, materiality_threshold=Decimal("5000.00"))
+        entity.financial_year_start = parsed_data["entity"]["financial_year_start"]
+        entity.financial_year_end = parsed_data["entity"]["financial_year_end"]
         session.commit()
 
         accounts = session.query(LedgerAccount).filter_by(entity_id=entity.id).all()
@@ -89,6 +91,8 @@ def test_normal_balance_check_materiality_exempt():
 
         try:
             entity = normalize_tally_data(parsed_data, session, materiality_threshold=threshold)
+            entity.financial_year_start = parsed_data["entity"]["financial_year_start"]
+            entity.financial_year_end = parsed_data["entity"]["financial_year_end"]
             session.commit()
 
             accounts = session.query(LedgerAccount).filter_by(entity_id=entity.id).all()
@@ -136,6 +140,8 @@ def test_opening_balance_continuity_regression():
         
         # Ingest Period 2
         entity2 = normalize_tally_data(parsed_p2, session, materiality_threshold=Decimal("15000.00"))
+        entity2.financial_year_start = parsed_p2["entity"]["financial_year_start"]
+        entity2.financial_year_end = parsed_p2["entity"]["financial_year_end"]
         session.commit()
         
         accounts = session.query(LedgerAccount).filter_by(entity_id=entity2.id).all()
@@ -171,6 +177,8 @@ def test_opening_balance_continuity_regression():
         
         # Ingest Period 2
         entity2 = normalize_tally_data(parsed_p2, session, materiality_threshold=Decimal("0.00"))
+        entity2.financial_year_start = parsed_p2["entity"]["financial_year_start"]
+        entity2.financial_year_end = parsed_p2["entity"]["financial_year_end"]
         session.commit()
         
         accounts = session.query(LedgerAccount).filter_by(entity_id=entity2.id).all()

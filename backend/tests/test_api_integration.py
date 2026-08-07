@@ -3,60 +3,38 @@ from decimal import Decimal
 from datetime import date
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
 
-from app.db.base import Base
-from app.db.session import get_db
 from app.main import app
-
-# Create persistent connection for in-memory SQLite database
-engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False)
-_connection = None
-
-
-@pytest.fixture(autouse=True)
-def setup_db():
-    global _connection
-    _connection = engine.connect()
-    # Enable foreign keys in SQLite
-    _connection.execute(text("PRAGMA foreign_keys=ON"))
-    TestingSessionLocal.configure(bind=_connection)
-    Base.metadata.create_all(bind=_connection)
-    yield
-    Base.metadata.drop_all(bind=_connection)
-    _connection.close()
-
-
-def override_get_db():
-    db = TestingSessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-# Apply the dependency override to the app
-app.dependency_overrides[get_db] = override_get_db
 
 client = TestClient(app)
 
 
+def get_auth_headers():
+    res = client.post("/auth/register", json={
+        "organization_name": "Integration Test Firm",
+        "email": "test@integration.com",
+        "password": "Password123"
+    })
+    token = res.json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
 def test_api_entities_lifecycle_flow():
+    headers = get_auth_headers()
+    
     # 1. Create an Entity
     entity_payload = {
         "name": "Acme Audited Corp",
         "materiality_threshold": "1000.00"
     }
-    create_res = client.post("/entities", json=entity_payload)
+    create_res = client.post("/entities", json=entity_payload, headers=headers)
     assert create_res.status_code == 201
     entity = create_res.json()
     assert entity["name"] == "Acme Audited Corp"
     entity_id = entity["id"]
 
     # 2. List Entities
-    list_entities_res = client.get("/entities")
+    list_entities_res = client.get("/entities", headers=headers)
     assert list_entities_res.status_code == 200
     assert len(list_entities_res.json()) == 1
     assert list_entities_res.json()[0]["id"] == entity_id
@@ -66,7 +44,8 @@ def test_api_entities_lifecycle_flow():
     with open(xml_path, "rb") as f:
         upload_res = client.post(
             f"/entities/{entity_id}/upload",
-            files={"file": ("sample_tally_export.xml", f, "text/xml")}
+            files={"file": ("sample_tally_export.xml", f, "text/xml")},
+            headers=headers
         )
     
     assert upload_res.status_code == 200
@@ -75,14 +54,14 @@ def test_api_entities_lifecycle_flow():
     assert res_data["entity_id"] == entity_id
 
     # 4. Trigger Scrutiny Run
-    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
+    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
     assert run_res.status_code == 200
     summary = run_res.json()
     assert summary["status"] == "success"
     assert summary["exceptions_count"] == 1  # trial_balance_balances exception
 
     # 5. Check exceptions endpoint
-    list_exceptions_res = client.get(f"/entities/{entity_id}/exceptions?period_start=2025-04-01&period_end=2026-03-31")
+    list_exceptions_res = client.get(f"/entities/{entity_id}/exceptions?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
     assert list_exceptions_res.status_code == 200
     exceptions = list_exceptions_res.json()
     assert len(exceptions) == 1
@@ -90,18 +69,18 @@ def test_api_entities_lifecycle_flow():
 
 
 def test_api_scrutiny_with_violations():
+    headers = get_auth_headers()
+    
     # 1. Create the entity
     entity_payload = {
         "name": "Violating Company Ltd",
         "materiality_threshold": "5000.00"
     }
-    create_res = client.post("/entities", json=entity_payload)
+    create_res = client.post("/entities", json=entity_payload, headers=headers)
     assert create_res.status_code == 201
     entity_id = create_res.json()["id"]
 
     # 2. Create a Tally XML with engineered violations:
-    # We record a payment of 80,000 from Cash-in-hand (opening 10,000), 
-    # leaving a Credit closing balance of 70,000 (which violates normal Debit balance check).
     violating_xml = """<ENVELOPE>
       <BODY>
         <IMPORTDATA>
@@ -152,19 +131,20 @@ def test_api_scrutiny_with_violations():
     # 3. Upload the violating XML
     upload_res = client.post(
         f"/entities/{entity_id}/upload",
-        files={"file": ("violating_export.xml", violating_xml.encode("utf-8"), "text/xml")}
+        files={"file": ("violating_export.xml", violating_xml.encode("utf-8"), "text/xml")},
+        headers=headers
     )
     assert upload_res.status_code == 200
 
     # 4. Trigger Scrutiny
-    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
+    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
     assert run_res.status_code == 200
     summary = run_res.json()
     assert summary["status"] == "success"
     assert summary["exceptions_count"] == 4
 
     # 5. Query exceptions filterable by severity
-    list_res = client.get(f"/entities/{entity_id}/exceptions", params={"severity": "error", "period_start": "2025-04-01", "period_end": "2026-03-31"})
+    list_res = client.get(f"/entities/{entity_id}/exceptions", params={"severity": "error", "period_start": "2025-04-01", "period_end": "2026-03-31"}, headers=headers)
     assert list_res.status_code == 200
     exceptions = list_res.json()
     assert len(exceptions) == 4
@@ -189,14 +169,16 @@ def test_api_scrutiny_with_violations():
     assert capital_exc["severity"] == "error"
     assert "debit closing balance of 80000" in capital_exc["message"]
 
-    list_res_warn = client.get(f"/entities/{entity_id}/exceptions", params={"severity": "warning"})
+    list_res_warn = client.get(f"/entities/{entity_id}/exceptions", params={"severity": "warning"}, headers=headers)
     assert list_res_warn.status_code == 200
     assert len(list_res_warn.json()) == 0
 
 
 def test_gstin_lookup():
+    headers = get_auth_headers()
+    
     # 1. Valid registered GSTIN
-    res = client.post("/gstin/lookup", json={"gstin": "27AAAAA1111A1Z1"})
+    res = client.post("/gstin/lookup", json={"gstin": "27AAAAA1111A1Z1"}, headers=headers)
     assert res.status_code == 200
     data = res.json()
     assert data["gstin"] == "27AAAAA1111A1Z1"
@@ -205,7 +187,7 @@ def test_gstin_lookup():
     assert data["pan"] == "AAAAA1111A"
 
     # 2. Valid dynamically generated GSTIN
-    res2 = client.post("/gstin/lookup", json={"gstin": "29TSTNG9999P9Z9"})
+    res2 = client.post("/gstin/lookup", json={"gstin": "29TSTNG9999P9Z9"}, headers=headers)
     assert res2.status_code == 200
     data2 = res2.json()
     assert data2["gstin"] == "29TSTNG9999P9Z9"
@@ -214,19 +196,18 @@ def test_gstin_lookup():
     assert data2["pan"] == "TSTNG9999P"
 
     # 3. Invalid GSTIN format
-    res3 = client.post("/gstin/lookup", json={"gstin": "invalid-gstin"})
+    res3 = client.post("/gstin/lookup", json={"gstin": "invalid-gstin"}, headers=headers)
     assert res3.status_code == 400
     assert "Invalid GSTIN format" in res3.json()["detail"]
 
 
 def test_gstin_lookup_live_mocked():
+    headers = get_auth_headers()
     from unittest.mock import patch, MagicMock
     
-    # Mock environment variables for live API Setu call
     with patch("app.routers.scrutiny.APISETU_API_KEY", "test-key"), \
          patch("app.routers.scrutiny.APISETU_CLIENT_ID", "test-client"):
              
-        # Mock httpx.Client.get call to return 200 OK with taxpayer details
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -236,7 +217,7 @@ def test_gstin_lookup_live_mocked():
         }
         
         with patch("httpx.Client.get", return_value=mock_response):
-            res = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"})
+            res = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"}, headers=headers)
             assert res.status_code == 200
             data = res.json()
             assert data["gstin"] == "27GTVTV1111V1Z1"
@@ -244,23 +225,24 @@ def test_gstin_lookup_live_mocked():
             assert data["state"] == "Maharashtra"
             assert data["pan"] == "GTVTV1111V"
 
-        # Mock 404 Not Found from API Setu
         mock_response_404 = MagicMock()
         mock_response_404.status_code = 404
         
         with patch("httpx.Client.get", return_value=mock_response_404):
-            res404 = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"})
+            res404 = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"}, headers=headers)
             assert res404.status_code == 404
             assert "not found on API Setu" in res404.json()["detail"]
 
 
 def test_api_exception_review_workflow():
+    headers = get_auth_headers()
+    
     # 1. Create Entity
     entity_payload = {
         "name": "Acme Workflow Corp",
         "materiality_threshold": "1000.00"
     }
-    create_res = client.post("/entities", json=entity_payload)
+    create_res = client.post("/entities", json=entity_payload, headers=headers)
     assert create_res.status_code == 201
     entity_id = create_res.json()["id"]
 
@@ -313,17 +295,18 @@ def test_api_exception_review_workflow():
     """
     upload_res = client.post(
         f"/entities/{entity_id}/upload",
-        files={"file": ("violating_export.xml", violating_xml.encode("utf-8"), "text/xml")}
+        files={"file": ("violating_export.xml", violating_xml.encode("utf-8"), "text/xml")},
+        headers=headers
     )
     assert upload_res.status_code == 200
 
     # 3. Trigger Scrutiny Run
-    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
+    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
     assert run_res.status_code == 200
     assert run_res.json()["exceptions_count"] == 4
 
     # 4. List exceptions and verify default status and empty notes
-    list_res = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"})
+    list_res = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"}, headers=headers)
     assert list_res.status_code == 200
     exceptions = list_res.json()
     assert len(exceptions) == 4
@@ -343,7 +326,8 @@ def test_api_exception_review_workflow():
     }
     patch_res = client.patch(
         f"/entities/{entity_id}/exceptions/{cash_exc['id']}",
-        json=patch_payload
+        json=patch_payload,
+        headers=headers
     )
     assert patch_res.status_code == 200
     updated_cash_exc = patch_res.json()
@@ -351,12 +335,12 @@ def test_api_exception_review_workflow():
     assert updated_cash_exc["auditor_notes"] == "Verified drawing, approved by board of directors."
 
     # 6. Re-run Scrutiny Run
-    run_res_2 = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31")
+    run_res_2 = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
     assert run_res_2.status_code == 200
     assert run_res_2.json()["exceptions_count"] == 4
 
     # 7. List exceptions and verify status/notes are preserved
-    list_res_2 = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"})
+    list_res_2 = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"}, headers=headers)
     assert list_res_2.status_code == 200
     exceptions_2 = list_res_2.json()
     
@@ -370,19 +354,21 @@ def test_api_exception_review_workflow():
 
 
 def test_api_entity_delete():
+    headers = get_auth_headers()
+    
     # 1. Create an Entity
-    res = client.post("/entities", json={"name": "Delete Me Inc", "materiality_threshold": "10000.00"})
+    res = client.post("/entities", json={"name": "Delete Me Inc", "materiality_threshold": "10000.00"}, headers=headers)
     assert res.status_code == 201
     entity_id = res.json()["id"]
 
     # 2. Verify it is listed
-    list_res = client.get("/entities")
+    list_res = client.get("/entities", headers=headers)
     assert any(e["id"] == entity_id for e in list_res.json())
 
     # 3. Delete it
-    delete_res = client.delete(f"/entities/{entity_id}")
+    delete_res = client.delete(f"/entities/{entity_id}", headers=headers)
     assert delete_res.status_code == 204
 
     # 4. Verify it is no longer listed
-    list_res_after = client.get("/entities")
+    list_res_after = client.get("/entities", headers=headers)
     assert not any(e["id"] == entity_id for e in list_res_after.json())
