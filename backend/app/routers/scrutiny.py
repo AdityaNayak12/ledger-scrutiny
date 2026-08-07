@@ -10,10 +10,11 @@ from sqlalchemy import select, delete
 from pydantic import BaseModel, ConfigDict
 
 from app.db.session import get_db
-from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException
+from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException, User
 from app.ingestion.tally_parser import parse_tally_xml
 from app.ingestion.tally_normalizer import normalize_tally_data
 from app.rules.engine import run_scrutiny
+from app.auth.security import get_current_user
 
 # Router without prefix to match the exact URL layout
 router = APIRouter(
@@ -74,15 +75,25 @@ class ScrutinyRunSummary(BaseModel):
 # --- Entity management endpoints ---
 
 @router.get("/entities", response_model=List[EntityResponse])
-def list_entities(db: Session = Depends(get_db)):
-    """List all business entities."""
-    return db.execute(select(Entity)).scalars().all()
+def list_entities(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """List all business entities belonging to the user's organization."""
+    return db.execute(
+        select(Entity).where(Entity.organization_id == current_user.organization_id)
+    ).scalars().all()
 
 
 @router.post("/entities", response_model=EntityResponse, status_code=status.HTTP_201_CREATED)
-def create_entity(entity_in: EntityCreate, db: Session = Depends(get_db)):
-    """Create a new business entity."""
+def create_entity(
+    entity_in: EntityCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Create a new business entity associated with the user's organization."""
     entity = Entity(
+        organization_id=current_user.organization_id,
         name=entity_in.name,
         materiality_threshold=entity_in.materiality_threshold
     )
@@ -93,9 +104,18 @@ def create_entity(entity_in: EntityCreate, db: Session = Depends(get_db)):
 
 
 @router.delete("/entities/{entity_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_entity(entity_id: int, db: Session = Depends(get_db)):
+def delete_entity(
+    entity_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Delete a business entity and all its associated data (cascade)."""
-    entity = db.execute(select(Entity).where(Entity.id == entity_id)).scalar_one_or_none()
+    entity = db.execute(
+        select(Entity).where(
+            Entity.id == entity_id,
+            Entity.organization_id == current_user.organization_id
+        )
+    ).scalar_one_or_none()
     if not entity:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -107,14 +127,29 @@ def delete_entity(entity_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/entities/{entity_id}/periods", response_model=List[PeriodResponse])
-def list_periods(entity_id: int, db: Session = Depends(get_db)):
+def list_periods(
+    entity_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """List all financial periods with data for this entity."""
+    entity = db.execute(
+        select(Entity.id).where(
+            Entity.id == entity_id,
+            Entity.organization_id == current_user.organization_id
+        )
+    ).scalar_one_or_none()
+    if not entity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Entity with ID {entity_id} not found."
+        )
+
     results = db.execute(
         select(TrialBalanceSnapshot.period_start, TrialBalanceSnapshot.period_end)
         .where(TrialBalanceSnapshot.entity_id == entity_id)
         .distinct()
     ).all()
-    # Sort descending by period_start
     sorted_results = sorted(results, key=lambda x: x.period_start, reverse=True)
     return [
         PeriodResponse(period_start=r.period_start, period_end=r.period_end)
@@ -131,6 +166,7 @@ async def upload_tally_export(
     target_period_start: Optional[date] = Query(None),
     target_period_end: Optional[date] = Query(None),
     file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
@@ -142,8 +178,13 @@ async def upload_tally_export(
             detail="Only XML files are supported."
         )
 
-    # Verify entity exists
-    entity = db.execute(select(Entity).where(Entity.id == entity_id)).scalar_one_or_none()
+    # Verify entity exists in the user's organization
+    entity = db.execute(
+        select(Entity).where(
+            Entity.id == entity_id,
+            Entity.organization_id == current_user.organization_id
+        )
+    ).scalar_one_or_none()
     if not entity:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -160,12 +201,12 @@ async def upload_tally_export(
         )
 
     try:
-        # Normalize and clear existing data for this entity/period
         normalize_tally_data(
             parsed_data, 
             db, 
             materiality_threshold=entity.materiality_threshold, 
             entity_id=entity.id,
+            organization_id=current_user.organization_id,
             clear_only_period=clear_only_period,
             target_period_start=target_period_start,
             target_period_end=target_period_end
@@ -189,29 +230,31 @@ def trigger_scrutiny_run(
     entity_id: int,
     period_start: date = Query(...),
     period_end: date = Query(...),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Trigger the rules engine scrutiny run for the specified entity and period.
     """
-    # 1. Fetch Entity
-    entity = db.execute(select(Entity).where(Entity.id == entity_id)).scalar_one_or_none()
+    entity = db.execute(
+        select(Entity).where(
+            Entity.id == entity_id,
+            Entity.organization_id == current_user.organization_id
+        )
+    ).scalar_one_or_none()
     if not entity:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Entity with ID {entity_id} not found."
         )
 
-    # Set transient period attributes so rules can access them without database schema changes
     entity.financial_year_start = period_start
     entity.financial_year_end = period_end
 
-    # 2. Fetch Accounts
     accounts = db.execute(
         select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)
     ).scalars().all()
     
-    # Find prior period from TrialBalanceSnapshot
     prior_period = db.execute(
         select(TrialBalanceSnapshot.period_start, TrialBalanceSnapshot.period_end)
         .where(
@@ -222,7 +265,6 @@ def trigger_scrutiny_run(
         .limit(1)
     ).first()
     
-    # Fetch current and prior snapshots
     snapshot_query = select(TrialBalanceSnapshot).options(
         joinedload(TrialBalanceSnapshot.ledger_account)
     ).where(
@@ -233,7 +275,6 @@ def trigger_scrutiny_run(
     )
     snapshots = db.execute(snapshot_query).scalars().all()
 
-    # 3. Fetch existing exceptions to preserve status/notes
     existing_exceptions_query = select(AuditException).where(
         AuditException.entity_id == entity_id,
         AuditException.period_start == period_start,
@@ -244,11 +285,9 @@ def trigger_scrutiny_run(
     preserve_map = {}
     for old_exc in existing_exceptions:
         key = (old_exc.rule_name, old_exc.ledger_account_id, old_exc.message if old_exc.ledger_account_id is None else None)
-        # Preserve status and auditor_notes if they were changed from default/non-empty
         if old_exc.status != "PENDING" or old_exc.auditor_notes:
             preserve_map[key] = (old_exc.status, old_exc.auditor_notes)
 
-    # 4. Clear existing exceptions for this entity and period
     db.execute(
         delete(AuditException)
         .where(
@@ -259,20 +298,17 @@ def trigger_scrutiny_run(
     )
     db.flush()
 
-    # 5. Run rules engine
     exceptions = run_scrutiny(entity, accounts, snapshots)
 
-    # 6. Persist exceptions to the database, setting the period fields and applying preserved status/notes
     for exc in exceptions:
         exc.period_start = period_start
         exc.period_end = period_end
         
-        # Check if there is a preserved status/notes
         key = (exc.rule_name, exc.ledger_account_id, exc.message if exc.ledger_account_id is None else None)
         if key in preserve_map:
-            status, notes = preserve_map[key]
-            exc.status = status
-            exc.auditor_notes = notes
+            old_status, old_notes = preserve_map[key]
+            exc.status = old_status
+            exc.auditor_notes = old_notes
         else:
             exc.status = "PENDING"
             exc.auditor_notes = None
@@ -292,14 +328,19 @@ def list_exceptions(
     period_start: Optional[date] = Query(None),
     period_end: Optional[date] = Query(None),
     severity: Optional[str] = Query(None, description="Filter exceptions by severity"),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Get the list of scrutiny exceptions persisted for the specified entity and period,
     optionally filtered by severity level.
     """
-    # Verify entity exists
-    entity_exists = db.execute(select(Entity.id).where(Entity.id == entity_id)).scalar_one_or_none()
+    entity_exists = db.execute(
+        select(Entity.id).where(
+            Entity.id == entity_id,
+            Entity.organization_id == current_user.organization_id
+        )
+    ).scalar_one_or_none()
     if not entity_exists:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -338,20 +379,24 @@ def update_exception(
     entity_id: int,
     exception_id: int,
     exception_update: ExceptionUpdate,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
     """
     Update the status and review notes of a specific audit exception.
     """
-    # Verify entity exists
-    entity_exists = db.execute(select(Entity.id).where(Entity.id == entity_id)).scalar_one_or_none()
+    entity_exists = db.execute(
+        select(Entity.id).where(
+            Entity.id == entity_id,
+            Entity.organization_id == current_user.organization_id
+        )
+    ).scalar_one_or_none()
     if not entity_exists:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Entity with ID {entity_id} not found."
         )
 
-    # Find the exception
     exc = db.execute(
         select(AuditException)
         .options(joinedload(AuditException.ledger_account))
@@ -364,7 +409,6 @@ def update_exception(
             detail=f"Exception with ID {exception_id} not found for this entity."
         )
 
-    # Update fields
     if exception_update.status not in ["PENDING", "CLEARED", "FLAGGED_FOR_FOLLOWUP"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -401,82 +445,40 @@ class GstinLookupResponse(BaseModel):
     pan: str
 
 
-# Official state code mapping for Indian GSTINs
 STATE_CODES = {
-    "01": "Jammu and Kashmir",
-    "02": "Himachal Pradesh",
-    "03": "Punjab",
-    "04": "Chandigarh",
-    "05": "Uttarakhand",
-    "06": "Haryana",
-    "07": "Delhi",
-    "08": "Rajasthan",
-    "09": "Uttar Pradesh",
-    "10": "Bihar",
-    "11": "Sikkim",
-    "12": "Arunachal Pradesh",
-    "13": "Nagaland",
-    "14": "Manipur",
-    "15": "Mizoram",
-    "16": "Tripura",
-    "17": "Meghalaya",
-    "18": "Assam",
-    "19": "West Bengal",
-    "20": "Jharkhand",
-    "21": "Odisha",
-    "22": "Chhattisgarh",
-    "23": "Madhya Pradesh",
-    "24": "Gujarat",
-    "25": "Daman and Diu",
-    "26": "Dadra and Nagar Haveli",
-    "27": "Maharashtra",
-    "28": "Andhra Pradesh (Before division)",
-    "29": "Karnataka",
-    "30": "Goa",
-    "31": "Lakshadweep",
-    "32": "Kerala",
-    "33": "Tamil Nadu",
-    "34": "Puducherry",
-    "35": "Andaman and Nicobar Islands",
-    "36": "Telangana",
-    "37": "Andhra Pradesh",
-    "38": "Ladakh"
+    "01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
+    "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan",
+    "09": "Uttar Pradesh", "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh",
+    "13": "Nagaland", "14": "Manipur", "15": "Mizoram", "16": "Tripura",
+    "17": "Meghalaya", "18": "Assam", "19": "West Bengal", "20": "Jharkhand",
+    "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+    "25": "Daman and Diu", "26": "Dadra and Nagar Haveli", "27": "Maharashtra",
+    "28": "Andhra Pradesh (Before division)", "29": "Karnataka", "30": "Goa",
+    "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu", "34": "Puducherry",
+    "35": "Andaman and Nicobar Islands", "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh"
 }
 
-# Pre-defined mock database of GSTINs for testing
 MOCK_GSTIN_REGISTRY = {
-    "27AAAAA1111A1Z1": {
-        "company_name": "Acme Industrial Solutions Pvt Ltd",
-        "state": "Maharashtra",
-        "pan": "AAAAA1111A"
-    },
-    "07BBBBB2222B2Z2": {
-        "company_name": "Capital Trading Corporation",
-        "state": "Delhi",
-        "pan": "BBBBB2222B"
-    },
-    "29CCCCC3333C3Z3": {
-        "company_name": "Bangalore Tech Ventures LLC",
-        "state": "Karnataka",
-        "pan": "CCCCC3333C"
-    }
+    "27AAAAA1111A1Z1": {"company_name": "Acme Industrial Solutions Pvt Ltd", "state": "Maharashtra", "pan": "AAAAA1111A"},
+    "07BBBBB2222B2Z2": {"company_name": "Capital Trading Corporation", "state": "Delhi", "pan": "BBBBB2222B"},
+    "29CCCCC3333C3Z3": {"company_name": "Bangalore Tech Ventures LLC", "state": "Karnataka", "pan": "CCCCC3333C"}
 }
 
-
-# Environment variables for API Setu taxpayer integration
 APISETU_BASE_URL = os.getenv("APISETU_BASE_URL", "https://apisetu.gov.in/gstn")
 APISETU_API_KEY = os.getenv("APISETU_API_KEY")
 APISETU_CLIENT_ID = os.getenv("APISETU_CLIENT_ID")
 
 
 @router.post("/gstin/lookup", response_model=GstinLookupResponse)
-def lookup_gstin(request: GstinLookupRequest):
+def lookup_gstin(
+    request: GstinLookupRequest,
+    current_user: User = Depends(get_current_user)
+):
     """
-    Look up company details using a GSTIN.
+    Look up company details using a GSTIN. Protected endpoint.
     """
     gstin_cleaned = request.gstin.strip().upper()
     
-    # Validation regex for Indian GSTIN (15 characters)
     gstin_regex = r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
     if not re.match(gstin_regex, gstin_cleaned):
         raise HTTPException(
@@ -488,7 +490,6 @@ def lookup_gstin(request: GstinLookupRequest):
     pan = gstin_cleaned[2:12]
     state_name = STATE_CODES.get(state_code, "Unknown State")
     
-    # If API keys are configured, run the actual API Setu live request
     if APISETU_API_KEY and APISETU_CLIENT_ID:
         url = f"{APISETU_BASE_URL.rstrip('/')}/v1/taxpayers/{gstin_cleaned}"
         headers = {
@@ -526,8 +527,6 @@ def lookup_gstin(request: GstinLookupRequest):
                 detail=f"API Setu request failed: {str(exc)}"
             )
 
-    # Fallback to local / mock lookup if environment variables are not set
-    # Check mock registry first
     if gstin_cleaned in MOCK_GSTIN_REGISTRY:
         company_info = MOCK_GSTIN_REGISTRY[gstin_cleaned]
         return GstinLookupResponse(
@@ -537,7 +536,6 @@ def lookup_gstin(request: GstinLookupRequest):
             pan=company_info["pan"]
         )
         
-    # Dynamically generate realistic details if not in registry
     company_prefix = pan[0:5]
     company_name = f"{company_prefix.title()} Enterprises Pvt Ltd"
     
