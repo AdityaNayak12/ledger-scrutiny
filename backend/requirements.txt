@@ -11,3 +11,4 @@ pyjwt
 email-validator
 google-auth
 requests
+python-dotenv
