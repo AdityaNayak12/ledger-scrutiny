@@ -1,10 +1,11 @@
 import re
 import os
+import json
 import httpx
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from decimal import Decimal
 from datetime import datetime, date
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, status
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, Form, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select, delete
 from pydantic import BaseModel, ConfigDict
@@ -13,6 +14,8 @@ from app.db.session import get_db
 from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException, User
 from app.ingestion.tally_parser import parse_tally_xml
 from app.ingestion.tally_normalizer import normalize_tally_data
+from app.ingestion.xlsx_parser import detect_headers_and_parse
+from app.ingestion.xlsx_normalizer import normalize_xlsx_confirm
 from app.rules.engine import run_scrutiny
 from app.auth.security import get_current_user
 
@@ -65,6 +68,15 @@ class IngestionResponse(BaseModel):
     message: str
     entity_id: int
     entity_name: str
+
+
+class XlsxPreviewResponse(BaseModel):
+    header_row_number: Optional[int]
+    column_mapping: Dict[str, Any]
+    missing_fields: List[str]
+    sample_rows: List[Dict[str, Any]]
+    parse_errors: List[Dict[str, Any]]
+    total_data_rows: int
 
 
 class ScrutinyRunSummary(BaseModel):
@@ -222,6 +234,120 @@ async def upload_tally_export(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to normalize and save ledger data: {str(e)}"
+        )
+
+
+@router.post("/entities/{entity_id}/upload-xlsx/preview", response_model=XlsxPreviewResponse)
+async def upload_xlsx_preview(
+    entity_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Parses uploaded XLSX trial balance and returns header detection preview without writing to database.
+    """
+    fn_lower = file.filename.lower()
+    if not (fn_lower.endswith(".xlsx") or fn_lower.endswith(".xls")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only XLSX files are supported."
+        )
+
+    entity = db.execute(
+        select(Entity).where(
+            Entity.id == entity_id,
+            Entity.organization_id == current_user.organization_id
+        )
+    ).scalar_one_or_none()
+    if not entity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Entity with ID {entity_id} not found."
+        )
+
+    try:
+        contents = await file.read()
+        preview_data = detect_headers_and_parse(contents)
+        return XlsxPreviewResponse(**preview_data)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to preview XLSX file: {str(e)}"
+        )
+
+
+@router.post("/entities/{entity_id}/upload-xlsx/confirm", response_model=IngestionResponse)
+async def upload_xlsx_confirm(
+    entity_id: int,
+    column_mapping: str = Form(..., description="JSON string mapping field names to exact spreadsheet column headers"),
+    sign_convention: str = Form("negative_is_credit", description="Sign convention: 'negative_is_credit', 'positive_is_credit', or 'separate_dr_cr_columns'"),
+    target_period_start: date = Form(...),
+    target_period_end: date = Form(...),
+    clear_only_period: bool = Form(True),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Confirms XLSX upload using user-approved column_mapping and sign_convention, writing trial balance to DB.
+    """
+    fn_lower = file.filename.lower()
+    if not (fn_lower.endswith(".xlsx") or fn_lower.endswith(".xls")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only XLSX files are supported."
+        )
+
+    entity = db.execute(
+        select(Entity).where(
+            Entity.id == entity_id,
+            Entity.organization_id == current_user.organization_id
+        )
+    ).scalar_one_or_none()
+    if not entity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Entity with ID {entity_id} not found."
+        )
+
+    try:
+        mapping_dict = json.loads(column_mapping)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid JSON string provided for column_mapping: {str(e)}"
+        )
+
+    try:
+        contents = await file.read()
+        normalize_xlsx_confirm(
+            file_bytes=contents,
+            column_mapping=mapping_dict,
+            sign_convention=sign_convention,
+            target_period_start=str(target_period_start),
+            target_period_end=str(target_period_end),
+            entity_id=entity.id,
+            session=db,
+            clear_only_period=clear_only_period
+        )
+        db.commit()
+        return IngestionResponse(
+            message="XLSX ingestion successful",
+            entity_id=entity.id,
+            entity_name=entity.name
+        )
+    except ValueError as val_err:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(val_err)
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to ingest XLSX file: {str(e)}"
         )
 
 
