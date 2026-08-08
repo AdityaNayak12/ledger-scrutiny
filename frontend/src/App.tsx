@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { INITIAL_MOCK_ENTITIES, MOCK_EXCEPTIONS } from "./mockData";
 import type { Entity, Exception } from "./mockData";
+import XlsxUploadModal from "./components/XlsxUploadModal";
 
 declare global {
   interface Window {
@@ -534,6 +535,7 @@ export default function App() {
   const [periods, setPeriods] = useState<{ period_start: string; period_end: string }[]>([]);
   const [selectedPeriod, setSelectedPeriod] = useState<{ period_start: string; period_end: string } | null>(null);
   const [showAddPeriodModal, setShowAddPeriodModal] = useState<boolean>(false);
+  const [showXlsxModal, setShowXlsxModal] = useState<boolean>(false);
   const [newPeriodDates, setNewPeriodDates] = useState({
     start: "2026-04-01",
     end: "2027-03-31"
@@ -818,6 +820,15 @@ export default function App() {
     }
   };
 
+  const handleXlsxSuccess = async (periodStart: string, periodEnd: string) => {
+    if (selectedEntityId === null) return;
+    setErrorMsg(null);
+    await fetchPeriods(selectedEntityId);
+    const newP = { period_start: periodStart, period_end: periodEnd };
+    setSelectedPeriod(newP);
+    fetchExceptions(selectedEntityId, periodStart, periodEnd);
+  };
+
   const handleTriggerScrutiny = async () => {
     if (selectedEntityId === null || !selectedPeriod) return;
     setErrorMsg(null);
@@ -963,6 +974,7 @@ export default function App() {
   const selectedEntity = entities.find((e) => e.id === selectedEntityId);
 
   const severityWeight: Record<string, number> = { critical: 3, error: 3, warning: 2, info: 1 };
+  const formatSeverity = (sev: string) => (sev?.toLowerCase() === "error" ? "CRITICAL" : sev?.toUpperCase() || "");
 
   const processedExceptions = exceptions
     .filter((exc) => {
@@ -1226,7 +1238,7 @@ export default function App() {
                   
                   {periods.length === 0 ? (
                     <span className="text-xs text-amber-400 bg-amber-950/50 border border-amber-800/60 px-3 py-1 rounded-lg">
-                      No XML data uploaded yet
+                      No trial balance data uploaded yet
                     </span>
                   ) : (
                     <div className="flex items-center gap-2">
@@ -1261,6 +1273,16 @@ export default function App() {
                 </div>
 
                 <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setShowXlsxModal(true)}
+                    className="bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-800/80 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-md shadow-emerald-950/40"
+                  >
+                    <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                    <span>Import Excel (XLSX)</span>
+                  </button>
+
                   {selectedPeriod && (
                     <>
                       <label className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer border border-slate-700/60 flex items-center gap-1.5">
@@ -1416,7 +1438,7 @@ export default function App() {
                                     ? "bg-amber-950 text-amber-300 border border-amber-800/60"
                                     : "bg-blue-950 text-blue-300 border border-blue-800/60"
                                 }`}>
-                                  {exc.severity.toLowerCase() === "error" ? "CRITICAL" : exc.severity.toUpperCase()}
+                                  {formatSeverity(exc.severity)}
                                 </span>
                               </td>
 
@@ -1649,7 +1671,7 @@ export default function App() {
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-slate-400 font-semibold">Severity:</span>
                   <span className="font-bold uppercase text-rose-400">
-                    {selectedException.severity.toLowerCase() === "error" ? "CRITICAL" : selectedException.severity.toUpperCase()}
+                    {formatSeverity(selectedException.severity)}
                   </span>
                 </div>
               </div>
@@ -1729,6 +1751,18 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* XLSX UPLOAD MODAL */}
+      <XlsxUploadModal
+        isOpen={showXlsxModal}
+        onClose={() => setShowXlsxModal(false)}
+        entityId={selectedEntityId}
+        entityName={selectedEntity?.name || ""}
+        baseUrl={BASE_URL}
+        authFetch={authFetch}
+        onSuccess={handleXlsxSuccess}
+        isMock={isMock}
+      />
 
     </div>
   );

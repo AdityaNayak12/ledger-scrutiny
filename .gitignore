@@ -22,5 +22,6 @@ htmlcov/
 *.sln
 *.swp
 *.db
+.DS_Store
 
 
