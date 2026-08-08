@@ -967,7 +967,12 @@ export default function App() {
   const processedExceptions = exceptions
     .filter((exc) => {
       if (severityFilter === "all") return true;
-      return exc.severity.toLowerCase() === severityFilter.toLowerCase();
+      const s = exc.severity.toLowerCase();
+      const f = severityFilter.toLowerCase();
+      if (f === "error" || f === "critical") {
+        return s === "error" || s === "critical";
+      }
+      return s === f;
     })
     .filter((exc) => {
       if (statusFilter === "all") return true;
@@ -1411,7 +1416,7 @@ export default function App() {
                                     ? "bg-amber-950 text-amber-300 border border-amber-800/60"
                                     : "bg-blue-950 text-blue-300 border border-blue-800/60"
                                 }`}>
-                                  {exc.severity}
+                                  {exc.severity.toLowerCase() === "error" ? "CRITICAL" : exc.severity.toUpperCase()}
                                 </span>
                               </td>
 
@@ -1643,7 +1648,9 @@ export default function App() {
                 </div>
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-slate-400 font-semibold">Severity:</span>
-                  <span className="font-bold uppercase text-rose-400">{selectedException.severity}</span>
+                  <span className="font-bold uppercase text-rose-400">
+                    {selectedException.severity.toLowerCase() === "error" ? "CRITICAL" : selectedException.severity.toUpperCase()}
+                  </span>
                 </div>
               </div>
 
