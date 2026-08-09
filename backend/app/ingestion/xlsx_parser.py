@@ -155,21 +155,33 @@ def detect_headers_and_parse(file_bytes: bytes) -> Dict[str, Any]:
             val = row_vals[c_idx] if c_idx < len(row_vals) else None
             row_dict[field_name] = str(val).strip() if val is not None else ""
 
-        # Validate ledger_name
+        # Skip summary/subtotal rows
         ledger_val = row_dict.get("ledger_name", "").strip()
-        if not ledger_val:
-            parse_errors.append({
-                "row_number": actual_row_num,
-                "error": f"Row {actual_row_num}: Blank or missing ledger name."
-            })
+        group_val = row_dict.get("group_name", "").strip()
+        ledger_upper = ledger_val.upper()
+        group_upper = group_val.upper()
+        if (
+            not ledger_val
+            or ledger_upper.endswith("TOTAL")
+            or ledger_upper.endswith("SUBTOTAL")
+            or ledger_upper == "GRAND TOTAL"
+            or group_upper.endswith("TOTAL")
+            or group_upper.endswith("SUBTOTAL")
+            or group_upper == "GRAND TOTAL"
+        ):
+            continue
 
         data_rows.append({
             "row_number": actual_row_num,
             "raw_data": row_dict
         })
 
+    header_row_vals = rows_data[best_row_idx] if best_row_idx != -1 else []
+    detected_headers = [str(v).strip() for v in header_row_vals if v is not None and str(v).strip() != ""]
+
     return {
         "header_row_number": header_row_number,
+        "detected_headers": detected_headers,
         "column_mapping": best_column_mapping,
         "missing_fields": missing_fields,
         "sample_rows": data_rows[:5],

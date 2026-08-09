@@ -112,19 +112,32 @@ def normalize_xlsx_confirm(
         if not row_vals or all(v is None or str(v).strip() == "" for v in row_vals):
             break
 
-        # 1. Validate Ledger Name
+        # 1. Extract Ledger Name & Group Name
         l_idx = col_index_map["ledger_name"]
         raw_ledger = row_vals[l_idx] if l_idx < len(row_vals) else None
         ledger_name = str(raw_ledger).strip() if raw_ledger is not None else ""
-        if not ledger_name:
-            raise ValueError(f"Row {actual_row_num}: Ledger account name cannot be blank or empty.")
 
-        # 2. Validate Group Name & Normal Balance
-        g_idx = col_index_map["group_name"]
+        g_idx = col_index_map.get("group_name", l_idx)
         raw_group = row_vals[g_idx] if g_idx < len(row_vals) else None
-        group_name = str(raw_group).strip() if raw_group is not None else ""
-        if not group_name:
-            raise ValueError(f"Row {actual_row_num}: Account group cannot be blank or empty for ledger '{ledger_name}'.")
+        group_name = str(raw_group).strip() if raw_group is not None else ledger_name
+
+        # Skip summary / total rows
+        name_upper = ledger_name.upper()
+        group_upper = group_name.upper()
+        if (
+            name_upper.endswith("TOTAL")
+            or name_upper.endswith("SUBTOTAL")
+            or name_upper == "GRAND TOTAL"
+            or group_upper.endswith("TOTAL")
+            or group_upper.endswith("SUBTOTAL")
+            or group_upper == "GRAND TOTAL"
+        ):
+            continue
+
+        if not ledger_name:
+            if not raw_group or str(raw_group).strip() == "":
+                continue
+            raise ValueError(f"Row {actual_row_num}: Ledger account name cannot be blank or empty.")
 
         try:
             normal_bal = get_normal_balance(group_name)

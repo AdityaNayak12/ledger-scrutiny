@@ -151,15 +151,10 @@ export default function XlsxUploadModal({
       Object.values(data.column_mapping).forEach((m) => {
         if (m.column) headersSet.add(m.column);
       });
-      // Extract sample row keys if available
-      if (data.sample_rows.length > 0) {
-        Object.keys(data.sample_rows[0].raw_data).forEach((k) => {
-          const val = data.column_mapping[k]?.column;
-          if (val) headersSet.add(val);
-        });
-      }
 
-      const detectedList = Array.from(headersSet);
+      const detectedList = (data as any).detected_headers && (data as any).detected_headers.length > 0
+        ? (data as any).detected_headers
+        : Array.from(headersSet);
       setAllDetectedHeaders(detectedList);
 
       // Check if separate Dr/Cr columns were detected
