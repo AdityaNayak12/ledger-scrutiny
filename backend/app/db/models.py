@@ -96,6 +96,22 @@ class Entity(Base):
         self._transient_fy_end = value
 
 
+class FinancialPeriod(Base):
+    """
+    Represents a financial period for an entity and its data source.
+    """
+    __tablename__ = "financial_periods"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), nullable=False)
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    source: Mapped[str] = mapped_column(String(50), nullable=False) # e.g. "tally_xml", "xlsx_trial_balance", "sap_gl_dump"
+
+    # Relationships
+    entity: Mapped["Entity"] = relationship("Entity")
+
+
 class LedgerAccount(Base):
     """
     Represents an individual ledger account belonging to an entity.

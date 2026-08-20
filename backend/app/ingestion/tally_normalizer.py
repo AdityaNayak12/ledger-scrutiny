@@ -99,6 +99,24 @@ def normalize_tally_data(
             f"the currently selected period ({p_start} to {p_end}) for Re-upload."
         )
 
+    from app.db.models import FinancialPeriod
+    session.execute(
+        delete(FinancialPeriod).where(
+            FinancialPeriod.entity_id == entity.id,
+            FinancialPeriod.period_start == p_start,
+            FinancialPeriod.period_end == p_end
+        )
+    )
+    
+    # Insert new FinancialPeriod
+    fp = FinancialPeriod(
+        entity_id=entity.id,
+        period_start=p_start,
+        period_end=p_end,
+        source="tally_xml"
+    )
+    session.add(fp)
+
     session.execute(
         delete(TrialBalanceSnapshot).where(
             TrialBalanceSnapshot.entity_id == entity.id,

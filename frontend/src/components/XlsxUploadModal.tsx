@@ -9,6 +9,8 @@ interface XlsxUploadModalProps {
   authFetch: (url: string, init?: RequestInit) => Promise<Response>;
   onSuccess: (periodStart: string, periodEnd: string) => void;
   isMock: boolean;
+  initialPeriodStart?: string;
+  initialPeriodEnd?: string;
 }
 
 interface ColumnMatchInfo {
@@ -24,6 +26,7 @@ interface XlsxPreviewData {
   sample_rows: Array<{ row_number: number; raw_data: Record<string, string> }>;
   parse_errors: Array<{ row_number: number; error: string }>;
   total_data_rows: number;
+  detected_headers: string[];
 }
 
 export default function XlsxUploadModal({
@@ -35,6 +38,8 @@ export default function XlsxUploadModal({
   authFetch,
   onSuccess,
   isMock,
+  initialPeriodStart,
+  initialPeriodEnd,
 }: XlsxUploadModalProps) {
   const [step, setStep] = useState<"upload" | "confirm">("upload");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -60,11 +65,11 @@ export default function XlsxUploadModal({
   });
 
   const [signConvention, setSignConvention] = useState<string>("negative_is_credit");
-  const [periodStart, setPeriodStart] = useState<string>("2025-04-01");
-  const [periodEnd, setPeriodEnd] = useState<string>("2026-03-31");
+  const [periodStart, setPeriodStart] = useState<string>(initialPeriodStart || "2026-04-01");
+  const [periodEnd, setPeriodEnd] = useState<string>(initialPeriodEnd || "2027-03-31");
 
   useEffect(() => {
-    if (!isOpen) {
+    if (isOpen) {
       // Reset modal state
       setStep("upload");
       setSelectedFile(null);
@@ -73,8 +78,22 @@ export default function XlsxUploadModal({
       setErrorMessage(null);
       setPreviewData(null);
       setAllDetectedHeaders([]);
+      setUserMapping({
+        ledger_name: "",
+        group_name: "",
+        opening_balance: "",
+        closing_balance: "",
+        opening_debit: "",
+        opening_credit: "",
+        closing_debit: "",
+        closing_credit: "",
+      });
+      setSignConvention("negative_is_credit");
+      setBalanceMode("single_column");
+      setPeriodStart(initialPeriodStart || "2026-04-01");
+      setPeriodEnd(initialPeriodEnd || "2027-03-31");
     }
-  }, [isOpen]);
+  }, [isOpen, initialPeriodStart, initialPeriodEnd]);
 
   if (!isOpen) return null;
 
@@ -105,10 +124,11 @@ export default function XlsxUploadModal({
             { row_number: 5, raw_data: { ledger_name: "Furniture and Fixtures", group_name: "Fixed Assets", opening_balance: "120000.00", closing_balance: "108000.00" } },
             { row_number: 6, raw_data: { ledger_name: "Rahul Enterprises", group_name: "Sundry Debtors", opening_balance: "85000.00", closing_balance: "-12000.00" } },
             { row_number: 7, raw_data: { ledger_name: "Verma Traders", group_name: "Sundry Creditors", opening_balance: "-95000.00", closing_balance: "8000.00" } },
-            { row_number: 8, raw_data: { ledger_name: "HDFC Bank Current Account", group_name: "Bank Accounts", opening_balance: "250000.00", closing_balance: "410000.00" } },
+            { row_number: 6, raw_data: { Particulars: "Bank Loan", Grp: "Secured Loans", "Op Bal": "-500000.00", "Cl Bal": "-400000.00" } }
           ],
           parse_errors: [],
-          total_data_rows: 9,
+          total_data_rows: 3,
+          detected_headers: ["Particulars", "Grp", "Op Bal", "Cl Bal", "Debit", "Credit"]
         };
 
         setPreviewData(mockPreview);
@@ -672,7 +692,8 @@ export default function XlsxUploadModal({
                       value={periodStart}
                       onChange={(e) => setPeriodStart(e.target.value)}
                       required
-                      className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500"
+                      disabled={!!initialPeriodStart}
+                      className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                   </div>
                   <div>
@@ -684,7 +705,8 @@ export default function XlsxUploadModal({
                       value={periodEnd}
                       onChange={(e) => setPeriodEnd(e.target.value)}
                       required
-                      className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500"
+                      disabled={!!initialPeriodEnd}
+                      className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2 focus:outline-none focus:border-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed"
                     />
                   </div>
                 </div>

@@ -60,6 +60,7 @@ class ExceptionUpdate(BaseModel):
 class PeriodResponse(BaseModel):
     period_start: date
     period_end: date
+    source: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -157,15 +158,30 @@ def list_periods(
             detail=f"Entity with ID {entity_id} not found."
         )
 
-    results = db.execute(
+    # Fetch from FinancialPeriod
+    from app.db.models import FinancialPeriod
+    periods = db.execute(
+        select(FinancialPeriod).where(FinancialPeriod.entity_id == entity_id)
+    ).scalars().all()
+    
+    # If a period is missing from FinancialPeriod (legacy), fallback to distinct TrialBalanceSnapshots
+    legacy_results = db.execute(
         select(TrialBalanceSnapshot.period_start, TrialBalanceSnapshot.period_end)
         .where(TrialBalanceSnapshot.entity_id == entity_id)
         .distinct()
     ).all()
-    sorted_results = sorted(results, key=lambda x: x.period_start, reverse=True)
+    
+    period_dict = {}
+    for r in legacy_results:
+        period_dict[(r.period_start, r.period_end)] = None
+        
+    for p in periods:
+        period_dict[(p.period_start, p.period_end)] = p.source
+
+    sorted_results = sorted(period_dict.items(), key=lambda x: x[0][0], reverse=True)
     return [
-        PeriodResponse(period_start=r.period_start, period_end=r.period_end)
-        for r in sorted_results
+        PeriodResponse(period_start=k[0], period_end=k[1], source=v)
+        for k, v in sorted_results
     ]
 
 

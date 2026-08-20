@@ -87,6 +87,23 @@ def normalize_xlsx_confirm(
     p_start = date.fromisoformat(target_period_start) if isinstance(target_period_start, str) else target_period_start
     p_end = date.fromisoformat(target_period_end) if isinstance(target_period_end, str) else target_period_end
 
+    from app.db.models import FinancialPeriod
+    session.execute(
+        delete(FinancialPeriod).where(
+            FinancialPeriod.entity_id == entity.id,
+            FinancialPeriod.period_start == p_start,
+            FinancialPeriod.period_end == p_end
+        )
+    )
+    
+    fp = FinancialPeriod(
+        entity_id=entity.id,
+        period_start=p_start,
+        period_end=p_end,
+        source="xlsx_trial_balance"
+    )
+    session.add(fp)
+
     # Clear existing snapshots for entity in target period
     session.execute(
         delete(TrialBalanceSnapshot).where(

@@ -532,10 +532,12 @@ export default function App() {
   const [isLookingUpGstin, setIsLookingUpGstin] = useState<boolean>(false);
 
   // Period management states
-  const [periods, setPeriods] = useState<{ period_start: string; period_end: string }[]>([]);
-  const [selectedPeriod, setSelectedPeriod] = useState<{ period_start: string; period_end: string } | null>(null);
+  const [periods, setPeriods] = useState<{ period_start: string; period_end: string; source?: string }[]>([]);
+  const [selectedPeriod, setSelectedPeriod] = useState<{ period_start: string; period_end: string; source?: string } | null>(null);
   const [showAddPeriodModal, setShowAddPeriodModal] = useState<boolean>(false);
+  const [uploadSource, setUploadSource] = useState<"tally_xml" | "xlsx" | "sap" | null>(null);
   const [showXlsxModal, setShowXlsxModal] = useState<boolean>(false);
+  const [xlsxInitialPeriod, setXlsxInitialPeriod] = useState<{start: string, end: string} | null>(null);
   const [newPeriodDates, setNewPeriodDates] = useState({
     start: "2026-04-01",
     end: "2027-03-31"
@@ -811,6 +813,7 @@ export default function App() {
         }
         
         setShowAddPeriodModal(false);
+        setUploadSource(null);
         await fetchPeriods(selectedEntityId);
       } catch (err: any) {
         setErrorMsg(`Failed to add period: ${err.message}`);
@@ -1273,32 +1276,44 @@ export default function App() {
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => setShowXlsxModal(true)}
-                    className="bg-emerald-950/80 hover:bg-emerald-900 text-emerald-300 border border-emerald-800/80 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 shadow-md shadow-emerald-950/40"
-                  >
-                    <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    <span>Import Excel (XLSX)</span>
-                  </button>
-
                   {selectedPeriod && (
                     <>
-                      <label className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer border border-slate-700/60 flex items-center gap-1.5">
-                        <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                        </svg>
-                        {isUploading ? "Uploading..." : `Re-upload XML (${formatPeriodLabel(selectedPeriod)})`}
-                        <input
-                          type="file"
-                          accept=".xml"
-                          onChange={handleReuploadFile}
-                          ref={fileInputRef}
-                          disabled={isUploading}
-                          className="hidden"
-                        />
-                      </label>
+                      {selectedPeriod.source === "xlsx_trial_balance" ? (
+                        <button
+                          onClick={() => { setXlsxInitialPeriod({ start: selectedPeriod.period_start, end: selectedPeriod.period_end }); setShowXlsxModal(true); }}
+                          className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer border border-slate-700/60 flex items-center gap-1.5"
+                        >
+                          <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                          </svg>
+                          Re-upload Excel ({formatPeriodLabel(selectedPeriod)})
+                        </button>
+                      ) : selectedPeriod.source === "sap_gl_dump" ? (
+                        <button
+                          disabled
+                          className="bg-slate-800 text-slate-500 px-3.5 py-2 rounded-xl text-xs font-semibold border border-slate-700/60 flex items-center gap-1.5 cursor-not-allowed opacity-60"
+                        >
+                          <svg className="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                          </svg>
+                          Re-upload SAP ({formatPeriodLabel(selectedPeriod)})
+                        </button>
+                      ) : (
+                        <label className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer border border-slate-700/60 flex items-center gap-1.5">
+                          <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                          </svg>
+                          {isUploading ? "Uploading..." : `Re-upload XML (${formatPeriodLabel(selectedPeriod)})`}
+                          <input
+                            type="file"
+                            accept=".xml"
+                            onChange={handleReuploadFile}
+                            ref={fileInputRef}
+                            disabled={isUploading}
+                            className="hidden"
+                          />
+                        </label>
+                      )}
 
                       <button
                         onClick={handleTriggerScrutiny}
@@ -1583,56 +1598,123 @@ export default function App() {
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold text-white m-0">Add Financial Period for {selectedEntity.name}</h3>
-              <button onClick={() => setShowAddPeriodModal(false)} className="text-slate-400 hover:text-slate-200 font-bold text-xl cursor-pointer">
+              <button onClick={() => { setShowAddPeriodModal(false); setUploadSource(null); }} className="text-slate-400 hover:text-slate-200 font-bold text-xl cursor-pointer">
                 &times;
               </button>
             </div>
 
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">Period Start</label>
-                  <input
-                    type="date"
-                    value={newPeriodDates.start}
-                    onChange={(e) => setNewPeriodDates({ ...newPeriodDates, start: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1">Period End</label>
-                  <input
-                    type="date"
-                    value={newPeriodDates.end}
-                    onChange={(e) => setNewPeriodDates({ ...newPeriodDates, end: e.target.value })}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
-                  />
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">Tally XML Export File *</label>
-                <input
-                  type="file"
-                  accept=".xml"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) handleAddPeriodSubmit(f);
-                  }}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer"
-                />
-              </div>
-
-              <div className="flex justify-end gap-3 pt-2">
+            {uploadSource === null ? (
+              <div className="space-y-3">
+                <p className="text-xs text-slate-400 mb-3">Select the data source to import a trial balance:</p>
+                
                 <button
-                  type="button"
-                  onClick={() => setShowAddPeriodModal(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 bg-slate-800 rounded-xl transition-all cursor-pointer"
+                  onClick={() => setUploadSource("tally_xml")}
+                  className="w-full flex items-center gap-3 p-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors cursor-pointer text-left"
                 >
-                  Cancel
+                  <div className="p-2 bg-indigo-500/20 text-indigo-400 rounded-lg">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div className="font-bold text-slate-200 text-sm">Tally XML Export</div>
+                    <div className="text-xs text-slate-500">Import structured XML exported directly from Tally</div>
+                  </div>
+                </button>
+                
+                <button
+                  onClick={() => {
+                    setShowAddPeriodModal(false);
+                    setUploadSource(null);
+                    setXlsxInitialPeriod(null);
+                    setShowXlsxModal(true);
+                  }}
+                  className="w-full flex items-center gap-3 p-4 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors cursor-pointer text-left"
+                >
+                  <div className="p-2 bg-emerald-500/20 text-emerald-400 rounded-lg">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div className="font-bold text-slate-200 text-sm">Excel Trial Balance (XLSX)</div>
+                    <div className="text-xs text-slate-500">Import a generic trial balance spreadsheet</div>
+                  </div>
+                </button>
+                
+                <button
+                  disabled
+                  className="w-full flex items-center gap-3 p-4 rounded-xl bg-slate-900/50 border border-slate-800 opacity-60 cursor-not-allowed text-left relative overflow-hidden"
+                >
+                  <div className="p-2 bg-slate-700/50 text-slate-500 rounded-lg">
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div className="font-bold text-slate-400 text-sm">SAP GL Dump</div>
+                    <div className="text-xs text-slate-500">Import raw SAP general ledger extract</div>
+                  </div>
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-slate-800 px-2 py-1 rounded">Coming Soon</span>
                 </button>
               </div>
-            </div>
+            ) : uploadSource === "tally_xml" ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Period Start</label>
+                    <input
+                      type="date"
+                      value={newPeriodDates.start}
+                      onChange={(e) => setNewPeriodDates({ ...newPeriodDates, start: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">Period End</label>
+                    <input
+                      type="date"
+                      value={newPeriodDates.end}
+                      onChange={(e) => setNewPeriodDates({ ...newPeriodDates, end: e.target.value })}
+                      className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Tally XML Export File *</label>
+                  <input
+                    type="file"
+                    accept=".xml"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) {
+                        handleAddPeriodSubmit(f);
+                        setUploadSource(null);
+                      }
+                    }}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-2 text-xs text-slate-300 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-indigo-600 file:text-white hover:file:bg-indigo-500 cursor-pointer"
+                  />
+                </div>
+
+                <div className="flex justify-between items-center pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setUploadSource(null)}
+                    className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 transition-colors cursor-pointer"
+                  >
+                    &larr; Back
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setShowAddPeriodModal(false); setUploadSource(null); }}
+                    className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-slate-200 bg-slate-800 rounded-xl transition-all cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       )}
@@ -1762,6 +1844,8 @@ export default function App() {
         authFetch={authFetch}
         onSuccess={handleXlsxSuccess}
         isMock={isMock}
+        initialPeriodStart={xlsxInitialPeriod?.start}
+        initialPeriodEnd={xlsxInitialPeriod?.end}
       />
 
     </div>
