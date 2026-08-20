@@ -794,6 +794,7 @@ export default function App() {
       setTimeout(() => {
         setIsUploading(false);
         setShowAddPeriodModal(false);
+        setUploadSource(null);
         const newP = { period_start: newPeriodDates.start, period_end: newPeriodDates.end };
         const updatedPeriods = [...periods, newP];
         setPeriods(updatedPeriods);
@@ -817,6 +818,8 @@ export default function App() {
         await fetchPeriods(selectedEntityId);
       } catch (err: any) {
         setErrorMsg(`Failed to add period: ${err.message}`);
+        setShowAddPeriodModal(false);
+        setUploadSource(null);
       } finally {
         setIsUploading(false);
       }
