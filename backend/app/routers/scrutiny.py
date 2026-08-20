@@ -551,10 +551,10 @@ def update_exception(
             detail=f"Exception with ID {exception_id} not found for this entity."
         )
 
-    if exception_update.status not in ["PENDING", "CLEARED", "FLAGGED_FOR_FOLLOWUP"]:
+    if exception_update.status not in ["PENDING", "CLEARED", "REVIEWED"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid status. Must be one of: PENDING, CLEARED, FLAGGED_FOR_FOLLOWUP"
+            detail="Invalid status. Must be one of: PENDING, CLEARED, REVIEWED"
         )
 
     exc.status = exception_update.status
