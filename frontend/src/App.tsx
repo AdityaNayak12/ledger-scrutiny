@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { INITIAL_MOCK_ENTITIES, MOCK_EXCEPTIONS } from "./mockData";
 import type { Entity, Exception } from "./mockData";
 import XlsxUploadModal from "./components/XlsxUploadModal";
@@ -43,7 +43,7 @@ function AuthScreen({
 
   const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
 
-  const handleGoogleCredentialResponse = async (response: any) => {
+  const handleGoogleCredentialResponse = useCallback(async (response: any) => {
     if (!response?.credential) return;
     setAuthError(null);
     setIsSubmitting(true);
@@ -81,7 +81,7 @@ function AuthScreen({
     } finally {
       setIsSubmitting(false);
     }
-  };
+  }, [baseUrl, onSuccess]);
 
   const handleGoogleOrgSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -141,7 +141,7 @@ function AuthScreen({
         console.error("GIS initialization error:", e);
       }
     }
-  }, [googleClientId, mode, pendingGoogleToken]);
+  }, [googleClientId, mode, pendingGoogleToken, handleGoogleCredentialResponse]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -462,7 +462,7 @@ export default function App() {
 
   const isAuthenticated = Boolean(token);
 
-  const handleLogout = () => {
+  const handleLogout = useCallback(() => {
     localStorage.removeItem("ledger_scrutiny_token");
     localStorage.removeItem("ledger_scrutiny_user");
     setToken(null);
@@ -473,7 +473,7 @@ export default function App() {
     setSelectedPeriod(null);
     setExceptions([]);
     setSelectedException(null);
-  };
+  }, []);
 
   const handleAuthSuccess = (newToken: string, userInfo: { email: string; organization_name: string }) => {
     localStorage.setItem("ledger_scrutiny_token", newToken);
@@ -482,7 +482,7 @@ export default function App() {
     setUser(userInfo);
   };
 
-  const authFetch = async (url: string, options: RequestInit = {}) => {
+  const authFetch = useCallback(async (url: string, options: RequestInit = {}) => {
     const headers = new Headers(options.headers || {});
     if (token) {
       headers.set("Authorization", `Bearer ${token}`);
@@ -499,7 +499,7 @@ export default function App() {
     }
 
     return res;
-  };
+  }, [token, isMock, handleLogout]);
 
   const [entities, setEntities] = useState<Entity[]>([]);
   const [selectedEntityId, setSelectedEntityId] = useState<number | null>(null);
@@ -558,34 +558,9 @@ export default function App() {
     setErrorMsg(null);
   }, [isMock]);
 
-  // Fetch entities list
-  useEffect(() => {
-    if (isMock || token) {
-      fetchEntities();
-    }
-  }, [isMock, token]);
 
-  // Fetch periods when selected entity changes
-  useEffect(() => {
-    if (selectedEntityId !== null) {
-      fetchPeriods(selectedEntityId);
-    } else {
-      setPeriods([]);
-      setSelectedPeriod(null);
-      setExceptions([]);
-    }
-  }, [selectedEntityId, isMock]);
 
-  // Fetch exceptions when selected period changes
-  useEffect(() => {
-    if (selectedEntityId !== null && selectedPeriod !== null) {
-      fetchExceptions(selectedEntityId, selectedPeriod.period_start, selectedPeriod.period_end);
-    } else {
-      setExceptions([]);
-    }
-  }, [selectedEntityId, selectedPeriod, isMock]);
-
-  const fetchEntities = async () => {
+  const fetchEntities = useCallback(async () => {
     setErrorMsg(null);
     if (isMock) {
       const saved = localStorage.getItem("mock_entities");
@@ -614,7 +589,7 @@ export default function App() {
         setIsLoadingEntities(false);
       }
     }
-  };
+  }, [isMock, authFetch]);
 
   const handleGstinLookup = async () => {
     setErrorMsg(null);
@@ -718,7 +693,7 @@ export default function App() {
     }
   };
 
-  const fetchPeriods = async (entityId: number) => {
+  const fetchPeriods = useCallback(async (entityId: number) => {
     if (isMock) {
       if (entityId === 1) {
         const mockPeriods = [{ period_start: "2025-04-01", period_end: "2026-03-31" }];
@@ -749,7 +724,7 @@ export default function App() {
         setSelectedPeriod(null);
       }
     }
-  };
+  }, [isMock, authFetch]);
 
   const handleReuploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -902,7 +877,7 @@ export default function App() {
     }
   };
 
-  const fetchExceptions = async (entityId: number, start?: string, end?: string) => {
+  const fetchExceptions = useCallback(async (entityId: number, start?: string, end?: string) => {
     setIsLoadingExceptions(true);
     if (isMock) {
       const mockExcs = MOCK_EXCEPTIONS[entityId] || [];
@@ -930,7 +905,34 @@ export default function App() {
         setIsLoadingExceptions(false);
       }
     }
-  };
+  }, [isMock, authFetch]);
+
+  // Fetch entities list
+  useEffect(() => {
+    if (isMock || token) {
+      fetchEntities();
+    }
+  }, [isMock, token, fetchEntities]);
+
+  // Fetch periods when selected entity changes
+  useEffect(() => {
+    if (selectedEntityId !== null) {
+      fetchPeriods(selectedEntityId);
+    } else {
+      setPeriods([]);
+      setSelectedPeriod(null);
+      setExceptions([]);
+    }
+  }, [selectedEntityId, isMock, fetchPeriods]);
+
+  // Fetch exceptions when selected period changes
+  useEffect(() => {
+    if (selectedEntityId !== null && selectedPeriod !== null) {
+      fetchExceptions(selectedEntityId, selectedPeriod.period_start, selectedPeriod.period_end);
+    } else {
+      setExceptions([]);
+    }
+  }, [selectedEntityId, selectedPeriod, isMock, fetchExceptions]);
 
   const updateExceptionStatus = async (exceptionId: number, status: string, notes: string | null) => {
     if (selectedEntityId === null) return;
