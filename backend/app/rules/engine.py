@@ -162,7 +162,7 @@ def check_opening_balance_continuity(
     return exceptions
 
 
-@register_rule(materiality_scope="magnitude")
+@register_rule(materiality_scope="exempt")
 def trial_balance_balances(
     entity: Entity, 
     accounts: List[LedgerAccount], 
@@ -254,7 +254,7 @@ def negative_cash_balance(
     return exceptions
 
 
-@register_rule(materiality_scope="magnitude")
+@register_rule(materiality_scope="exempt")
 def suspense_account_nonzero(
     entity: Entity, 
     accounts: List[LedgerAccount], 
