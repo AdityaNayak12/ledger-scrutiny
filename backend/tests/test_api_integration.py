@@ -21,7 +21,7 @@ def get_auth_headers():
 
 def test_api_entities_lifecycle_flow():
     headers = get_auth_headers()
-    
+
     # 1. Create an Entity
     entity_payload = {
         "name": "Acme Audited Corp",
@@ -47,7 +47,7 @@ def test_api_entities_lifecycle_flow():
             files={"file": ("sample_tally_export.xml", f, "text/xml")},
             headers=headers
         )
-    
+
     assert upload_res.status_code == 200
     res_data = upload_res.json()
     assert res_data["message"] == "Ingestion successful"
@@ -70,7 +70,7 @@ def test_api_entities_lifecycle_flow():
 
 def test_api_scrutiny_with_violations():
     headers = get_auth_headers()
-    
+
     # 1. Create the entity
     entity_payload = {
         "name": "Violating Company Ltd",
@@ -127,7 +127,7 @@ def test_api_scrutiny_with_violations():
       </BODY>
     </ENVELOPE>
     """
-    
+
     # 3. Upload the violating XML
     upload_res = client.post(
         f"/entities/{entity_id}/upload",
@@ -148,14 +148,14 @@ def test_api_scrutiny_with_violations():
     assert list_res.status_code == 200
     exceptions = list_res.json()
     assert len(exceptions) == 4
-    
+
     exc_accounts = {e["ledger_account_name"]: e for e in exceptions if e["ledger_account_name"]}
     assert "Cash-in-hand" in exc_accounts
     assert "Owner Capital" in exc_accounts
 
     cash_excs = [e for e in exceptions if e["ledger_account_name"] == "Cash-in-hand"]
     assert len(cash_excs) == 2  # normal_balance_check and negative_cash_balance
-    
+
     cash_normal_exc = next(e for e in cash_excs if e["rule_name"] == "normal_balance_check")
     assert cash_normal_exc["severity"] == "error"
     assert "credit closing balance of 70000" in cash_normal_exc["message"]
@@ -176,7 +176,7 @@ def test_api_scrutiny_with_violations():
 
 def test_gstin_lookup():
     headers = get_auth_headers()
-    
+
     # 1. Valid registered GSTIN
     res = client.post("/gstin/lookup", json={"gstin": "27AAAAA1111A1Z1"}, headers=headers)
     assert res.status_code == 200
@@ -204,10 +204,10 @@ def test_gstin_lookup():
 def test_gstin_lookup_live_mocked():
     headers = get_auth_headers()
     from unittest.mock import patch, MagicMock
-    
+
     with patch("app.routers.scrutiny.APISETU_API_KEY", "test-key"), \
          patch("app.routers.scrutiny.APISETU_CLIENT_ID", "test-client"):
-             
+
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -215,7 +215,7 @@ def test_gstin_lookup_live_mocked():
             "tradeNam": "GTV",
             "gstin": "27GTVTV1111V1Z1"
         }
-        
+
         with patch("httpx.Client.get", return_value=mock_response):
             res = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"}, headers=headers)
             assert res.status_code == 200
@@ -227,7 +227,7 @@ def test_gstin_lookup_live_mocked():
 
         mock_response_404 = MagicMock()
         mock_response_404.status_code = 404
-        
+
         with patch("httpx.Client.get", return_value=mock_response_404):
             res404 = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"}, headers=headers)
             assert res404.status_code == 404
@@ -236,7 +236,7 @@ def test_gstin_lookup_live_mocked():
 
 def test_api_exception_review_workflow():
     headers = get_auth_headers()
-    
+
     # 1. Create Entity
     entity_payload = {
         "name": "Acme Workflow Corp",
@@ -310,11 +310,11 @@ def test_api_exception_review_workflow():
     assert list_res.status_code == 200
     exceptions = list_res.json()
     assert len(exceptions) == 4
-    
+
     cash_exc = next(e for e in exceptions if e["ledger_account_name"] == "Cash-in-hand" and e["rule_name"] == "normal_balance_check")
     assert cash_exc["status"] == "PENDING"
     assert cash_exc["auditor_notes"] is None
-    
+
     capital_exc = next(e for e in exceptions if e["ledger_account_name"] == "Owner Capital")
     assert capital_exc["status"] == "PENDING"
     assert capital_exc["auditor_notes"] is None
@@ -343,11 +343,11 @@ def test_api_exception_review_workflow():
     list_res_2 = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"}, headers=headers)
     assert list_res_2.status_code == 200
     exceptions_2 = list_res_2.json()
-    
+
     cash_exc_2 = next(e for e in exceptions_2 if e["ledger_account_name"] == "Cash-in-hand")
     assert cash_exc_2["status"] == "CLEARED"
     assert cash_exc_2["auditor_notes"] == "Verified drawing, approved by board of directors."
-    
+
     capital_exc_2 = next(e for e in exceptions_2 if e["ledger_account_name"] == "Owner Capital")
     assert capital_exc_2["status"] == "PENDING"
     assert capital_exc_2["auditor_notes"] is None
@@ -355,7 +355,7 @@ def test_api_exception_review_workflow():
 
 def test_api_entity_delete():
     headers = get_auth_headers()
-    
+
     # 1. Create an Entity
     res = client.post("/entities", json={"name": "Delete Me Inc", "materiality_threshold": "10000.00"}, headers=headers)
     assert res.status_code == 201
@@ -372,3 +372,101 @@ def test_api_entity_delete():
     # 4. Verify it is no longer listed
     list_res_after = client.get("/entities", headers=headers)
     assert not any(e["id"] == entity_id for e in list_res_after.json())
+
+
+def test_api_preserve_notes_multiple_exceptions_for_same_account(monkeypatch):
+    headers = get_auth_headers()
+
+    # Create entity
+    res = client.post("/entities", json={"name": "Preserve Test Inc", "materiality_threshold": "0.0"}, headers=headers)
+    assert res.status_code == 201
+    entity_id = res.json()["id"]
+
+    import io
+    import json
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Ledger Name", "Group Name", "Opening Balance", "Closing Balance"])
+    ws.append(["Cash", "Cash-in-hand", "1000.00", "1000.00"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    column_mapping = json.dumps({
+        "ledger_name": "Ledger Name",
+        "group_name": "Group Name",
+        "opening_balance": "Opening Balance",
+        "closing_balance": "Closing Balance"
+    })
+    upload_res = client.post(
+        f"/entities/{entity_id}/upload-xlsx/confirm",
+        data={
+            "column_mapping": column_mapping,
+            "sign_convention": "negative_is_credit",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31"
+        },
+        files={"file": ("dummy.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers
+    )
+    assert upload_res.status_code == 200
+
+    from app.db.models import AuditException
+
+    def mock_run_scrutiny(entity, accounts, snapshots):
+        cash_acc = next(a for a in accounts if a.name == "Cash")
+        return [
+            AuditException(
+                entity_id=entity.id,
+                rule_name="rule_a",
+                ledger_account_id=cash_acc.id,
+                severity="error",
+                message="First exception message"
+            ),
+            AuditException(
+                entity_id=entity.id,
+                rule_name="rule_a",
+                ledger_account_id=cash_acc.id,
+                severity="error",
+                message="Second exception message"
+            )
+        ]
+
+    monkeypatch.setattr("app.routers.scrutiny.run_scrutiny", mock_run_scrutiny)
+
+    # Trigger scrutiny run
+    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
+    assert run_res.status_code == 200
+    assert run_res.json()["exceptions_count"] == 2
+
+    # Get exceptions list
+    list_res = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"}, headers=headers)
+    exceptions = list_res.json()
+    assert len(exceptions) == 2
+
+    exc_1 = next(e for e in exceptions if e["message"] == "First exception message")
+
+    # Update exception 1 to CLEARED with notes
+    patch_res = client.patch(
+        f"/entities/{entity_id}/exceptions/{exc_1['id']}",
+        json={"status": "CLEARED", "auditor_notes": "Notes for first exception"},
+        headers=headers
+    )
+    assert patch_res.status_code == 200
+
+    # Re-run scrutiny run to verify status preservation
+    run_res_2 = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
+    assert run_res_2.status_code == 200
+
+    # List exceptions again and verify exception 1 is CLEARED (with notes), and exception 2 is still PENDING
+    list_res_2 = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"}, headers=headers)
+    exceptions_2 = list_res_2.json()
+
+    exc_1_after = next(e for e in exceptions_2 if e["message"] == "First exception message")
+    exc_2_after = next(e for e in exceptions_2 if e["message"] == "Second exception message")
+
+    assert exc_1_after["status"] == "CLEARED"
+    assert exc_1_after["auditor_notes"] == "Notes for first exception"
+    assert exc_2_after["status"] == "PENDING"
+    assert exc_2_after["auditor_notes"] is None

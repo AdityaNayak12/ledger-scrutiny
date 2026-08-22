@@ -426,7 +426,7 @@ def trigger_scrutiny_run(
     
     preserve_map = {}
     for old_exc in existing_exceptions:
-        key = (old_exc.rule_name, old_exc.ledger_account_id, old_exc.message if old_exc.ledger_account_id is None else None)
+        key = (old_exc.rule_name, old_exc.ledger_account_id, old_exc.message)
         if old_exc.status != "PENDING" or old_exc.auditor_notes:
             preserve_map[key] = (old_exc.status, old_exc.auditor_notes)
 
@@ -446,7 +446,7 @@ def trigger_scrutiny_run(
         exc.period_start = period_start
         exc.period_end = period_end
         
-        key = (exc.rule_name, exc.ledger_account_id, exc.message if exc.ledger_account_id is None else None)
+        key = (exc.rule_name, exc.ledger_account_id, exc.message)
         if key in preserve_map:
             old_status, old_notes = preserve_map[key]
             exc.status = old_status
