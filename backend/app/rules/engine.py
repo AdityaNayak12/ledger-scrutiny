@@ -6,6 +6,7 @@ from app.rules.account_groups import get_normal_balance
 
 # Rule function signature type
 RuleFunc = Callable[[Entity, List[LedgerAccount], List[TrialBalanceSnapshot]], List[AuditException]]
+RULE_SET_VERSION = "1"
 
 
 def register_rule(materiality_scope: str):

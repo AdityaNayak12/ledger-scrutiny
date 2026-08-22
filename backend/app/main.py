@@ -17,6 +17,12 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+@app.get("/health", tags=["operations"])
+def healthcheck():
+    """Lightweight liveness endpoint for container orchestration."""
+    return {"status": "ok", "service": "ledger-scrutiny"}
+
 # Enforce SECRET_KEY and GOOGLE_CLIENT_ID requirements, then create tables on startup event
 @app.on_event("startup")
 def on_startup():

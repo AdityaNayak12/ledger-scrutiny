@@ -8,6 +8,30 @@ Each arrow is a hard boundary. The normalizer is the only thing allowed to
 know about Tally's XML shape. Everything after it only ever sees the
 internal schema below.
 
+## Audit lifecycle
+
+The system treats every upload and scrutiny execution as durable audit
+evidence. A re-upload never deletes the prior import: it creates a new
+`import_batch`, marks the prior active batch for the period as `SUPERSEDED`,
+and uses the new batch for subsequent scrutiny runs.
+
+```
+Entity -> FinancialPeriod -> ImportBatch -> ScrutinyRun -> Finding -> ReviewAction
+```
+
+- `ImportBatch` records the source, content SHA-256, uploader, parser version,
+  validation report, and lifecycle status.
+- `ScrutinyRun` records the exact active import batch, rule-set version,
+  timestamps, status, and summary.
+- Findings retain a stable fingerprint so review state can survive a rerun
+  when only amounts in the explanation change.
+- `ReviewAction` is append-only. The finding's current status/notes are a
+  convenience projection of the latest decision, not the only audit record.
+
+Database changes are managed by Alembic. Apply production migrations with
+`PYTHONPATH=. alembic upgrade head` from `backend/`; do not rely on
+`create_all` as a migration mechanism.
+
 ## Internal schema (source-agnostic)
 
 entities
@@ -31,6 +55,17 @@ trial_balance_snapshots
 exceptions
   id, entity_id, rule_name, ledger_account_id (nullable), severity,
   message, created_at
+
+import_batches
+  id, entity_id, financial_period_id, source, original_filename,
+  content_sha256, parser_version, status, validation_report, created_at
+
+scrutiny_runs
+  id, entity_id, financial_period_id, import_batch_id, rule_set_version,
+  status, summary, started_at, completed_at
+
+review_actions
+  id, exception_id, user_id, status, auditor_notes, created_at
 
 ## Why this schema shape
 - ledger_accounts.normal_balance is precomputed at normalization time

@@ -13,3 +13,4 @@ google-auth
 requests
 python-dotenv
 openpyxl
+alembic

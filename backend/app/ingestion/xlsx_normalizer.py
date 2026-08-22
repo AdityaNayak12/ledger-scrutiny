@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select, delete
 import openpyxl
 
-from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot
+from app.db.models import Entity, FinancialPeriod, LedgerAccount, TrialBalanceSnapshot
 from app.rules.account_groups import get_normal_balance, UnrecognizedAccountGroupError
 
 
@@ -18,7 +18,8 @@ def normalize_xlsx_confirm(
     target_period_end: str,
     entity_id: int,
     session: Session,
-    clear_only_period: bool = True
+    clear_only_period: bool = True,
+    import_batch_id: Optional[int] = None,
 ) -> Entity:
     """
     Normalizes XLSX trial balance data using an explicit, user-approved column_mapping and sign_convention.
@@ -87,31 +88,25 @@ def normalize_xlsx_confirm(
     p_start = date.fromisoformat(target_period_start) if isinstance(target_period_start, str) else target_period_start
     p_end = date.fromisoformat(target_period_end) if isinstance(target_period_end, str) else target_period_end
 
-    from app.db.models import FinancialPeriod
-    session.execute(
-        delete(FinancialPeriod).where(
-            FinancialPeriod.entity_id == entity.id,
-            FinancialPeriod.period_start == p_start,
-            FinancialPeriod.period_end == p_end
-        )
-    )
-    
-    fp = FinancialPeriod(
-        entity_id=entity.id,
-        period_start=p_start,
-        period_end=p_end,
-        source="xlsx_trial_balance"
-    )
-    session.add(fp)
+    fp = session.execute(select(FinancialPeriod).where(
+        FinancialPeriod.entity_id == entity.id,
+        FinancialPeriod.period_start == p_start,
+        FinancialPeriod.period_end == p_end,
+    ).order_by(FinancialPeriod.id.desc())).scalars().first()
+    if fp is None:
+        session.add(FinancialPeriod(
+            entity_id=entity.id,
+            period_start=p_start,
+            period_end=p_end,
+            source="xlsx_trial_balance",
+        ))
 
-    # Clear existing snapshots for entity in target period
-    session.execute(
-        delete(TrialBalanceSnapshot).where(
+    if import_batch_id is None:
+        session.execute(delete(TrialBalanceSnapshot).where(
             TrialBalanceSnapshot.entity_id == entity.id,
             TrialBalanceSnapshot.period_start == p_start,
-            TrialBalanceSnapshot.period_end == p_end
-        )
-    )
+            TrialBalanceSnapshot.period_end == p_end,
+        ))
 
     ledger_map: Dict[str, LedgerAccount] = {}
     existing_ledgers = session.execute(
@@ -212,6 +207,7 @@ def normalize_xlsx_confirm(
 
         # Insert TrialBalanceSnapshot
         snapshot = TrialBalanceSnapshot(
+            import_batch_id=import_batch_id,
             entity_id=entity.id,
             ledger_account_id=l_account.id,
             period_start=p_start,

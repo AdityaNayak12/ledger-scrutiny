@@ -4,7 +4,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 from sqlalchemy import select, delete
 
-from app.db.models import Organization, Entity, LedgerAccount, Transaction, TrialBalanceSnapshot
+from app.db.models import FinancialPeriod, Organization, Entity, LedgerAccount, Transaction, TrialBalanceSnapshot
 from app.rules.account_groups import get_normal_balance
 
 
@@ -53,7 +53,8 @@ def normalize_tally_data(
     organization_id: Optional[int] = None,
     clear_only_period: bool = False,
     target_period_start: Optional[Any] = None,
-    target_period_end: Optional[Any] = None
+    target_period_end: Optional[Any] = None,
+    import_batch_id: Optional[int] = None,
 ) -> Entity:
     """
     Normalizes parsed Tally XML data and writes it to the database.
@@ -103,38 +104,28 @@ def normalize_tally_data(
             f"the currently selected period ({p_start} to {p_end}) for Re-upload."
         )
 
-    from app.db.models import FinancialPeriod
-    session.execute(
-        delete(FinancialPeriod).where(
-            FinancialPeriod.entity_id == entity.id,
-            FinancialPeriod.period_start == p_start,
-            FinancialPeriod.period_end == p_end
-        )
-    )
-    
-    # Insert new FinancialPeriod
-    fp = FinancialPeriod(
-        entity_id=entity.id,
-        period_start=p_start,
-        period_end=p_end,
-        source="tally_xml"
-    )
-    session.add(fp)
+    fp = session.execute(select(FinancialPeriod).where(
+        FinancialPeriod.entity_id == entity.id,
+        FinancialPeriod.period_start == p_start,
+        FinancialPeriod.period_end == p_end,
+    ).order_by(FinancialPeriod.id.desc())).scalars().first()
+    if fp is None:
+        fp = FinancialPeriod(entity_id=entity.id, period_start=p_start, period_end=p_end, source="tally_xml")
+        session.add(fp)
 
-    session.execute(
-        delete(TrialBalanceSnapshot).where(
+    # Legacy/direct callers retain replacement semantics. API uploads always
+    # provide a batch and therefore preserve historical normalized records.
+    if import_batch_id is None:
+        session.execute(delete(TrialBalanceSnapshot).where(
             TrialBalanceSnapshot.entity_id == entity.id,
             TrialBalanceSnapshot.period_start == p_start,
-            TrialBalanceSnapshot.period_end == p_end
-        )
-    )
-    session.execute(
-        delete(Transaction).where(
+            TrialBalanceSnapshot.period_end == p_end,
+        ))
+        session.execute(delete(Transaction).where(
             Transaction.entity_id == entity.id,
             Transaction.date >= p_start,
-            Transaction.date <= p_end
-        )
-    )
+            Transaction.date <= p_end,
+        ))
 
     ledger_map: Dict[str, LedgerAccount] = {}
     existing_ledgers = session.execute(
@@ -184,6 +175,7 @@ def normalize_tally_data(
             cl_bal = op_bal + v_debits - v_credits
 
         snapshot = TrialBalanceSnapshot(
+            import_batch_id=import_batch_id,
             entity_id=entity.id,
             ledger_account_id=l_account.id,
             period_start=p_start,
@@ -213,6 +205,7 @@ def normalize_tally_data(
                 )
 
             txn = Transaction(
+                import_batch_id=import_batch_id,
                 entity_id=entity.id,
                 date=v["date"],
                 debit_account_id=deb_acc.id,
