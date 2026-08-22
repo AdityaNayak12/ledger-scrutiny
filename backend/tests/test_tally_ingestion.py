@@ -27,7 +27,7 @@ def test_tally_ingestion_end_to_end():
     # 3. Create clean in-memory SQLite DB
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
-    
+
     Session = sessionmaker(bind=engine)
     session = Session()
 
@@ -45,29 +45,29 @@ def test_tally_ingestion_end_to_end():
         # 6. Assertions on Ledger Accounts and normal balances
         accounts = session.query(LedgerAccount).filter_by(entity_id=entity.id).all()
         assert len(accounts) == 5
-        
+
         acc_map = {acc.name: acc for acc in accounts}
         assert acc_map["Cash-in-hand"].normal_balance == "debit"
         assert acc_map["Cash-in-hand"].group_name == "Cash-in-hand"
-        
+
         assert acc_map["Owner Capital"].normal_balance == "credit"
         assert acc_map["Owner Capital"].group_name == "Capital Account"
-        
+
         assert acc_map["Machinery"].normal_balance == "debit"
         assert acc_map["Machinery"].group_name == "Fixed Assets"
-        
+
         assert acc_map["Sales Account"].normal_balance == "credit"
         assert acc_map["Sales Account"].group_name == "Sales Accounts"
-        
+
         assert acc_map["ACME Debtors"].normal_balance == "debit"
         assert acc_map["ACME Debtors"].group_name == "Sundry Debtors"
 
         # 7. Assertions on Transactions
         transactions = session.query(Transaction).filter_by(entity_id=entity.id).all()
         assert len(transactions) == 2
-        
+
         txn_map = {txn.source_voucher_id: txn for txn in transactions}
-        
+
         # Voucher 1: Receipt (debit Cash-in-hand, credit Owner Capital)
         vch1 = txn_map["VCH-0001"]
         assert vch1.voucher_type == "Receipt"
@@ -89,9 +89,9 @@ def test_tally_ingestion_end_to_end():
         # 8. Assertions on Trial Balance Snapshots
         snapshots = session.query(TrialBalanceSnapshot).filter_by(entity_id=entity.id).all()
         assert len(snapshots) == 5
-        
+
         snap_map = {snap.ledger_account.name: snap for snap in snapshots}
-        
+
         # Cash-in-hand: opening=10000 (Dr), debit=50000, credit=0, closing=60000 (Dr)
         cash_snap = snap_map["Cash-in-hand"]
         assert cash_snap.opening_balance == Decimal("10000.00")
@@ -152,12 +152,12 @@ def test_tally_ingestion_edge_cases():
         </EXPORTDATA>
       </BODY>
     </ENVELOPE>"""
-    
+
     import pytest
     with pytest.raises(ValueError) as excinfo:
         parse_tally_xml(xml_missing_closing)
     assert "missing CLOSINGBALANCE" in str(excinfo.value)
-    
+
     # 2. Test unbalanced voucher
     xml_unbalanced_voucher = b"""<ENVELOPE>
       <BODY>
@@ -196,14 +196,14 @@ def test_tally_ingestion_edge_cases():
         </EXPORTDATA>
       </BODY>
     </ENVELOPE>"""
-    
+
     with pytest.raises(ValueError) as excinfo:
         parse_tally_xml(xml_unbalanced_voucher)
     assert "is unbalanced" in str(excinfo.value)
     assert "ERR-999" in str(excinfo.value)
     assert "1000.00" in str(excinfo.value)
     assert "400.00" in str(excinfo.value)
-    
+
     # 3. Test unmapped custom group
     xml_unmapped_group = b"""<ENVELOPE>
       <BODY>
@@ -227,14 +227,14 @@ def test_tally_ingestion_edge_cases():
         </EXPORTDATA>
       </BODY>
     </ENVELOPE>"""
-    
+
     parsed = parse_tally_xml(xml_unmapped_group)
-    
+
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     session = Session()
-    
+
     try:
         with pytest.raises(ValueError) as excinfo:
             normalize_tally_data(parsed, session)
@@ -256,3 +256,97 @@ def test_malformed_xml_fixture():
         parse_tally_xml(xml_content)
     assert "missing CLOSINGBALANCE" in str(excinfo.value)
     assert "Account Missing Closing Balance" in str(excinfo.value)
+
+
+def test_tally_ingestion_voucher_date_filtering():
+    xml_content = b"""<ENVELOPE>
+      <BODY>
+        <IMPORTDATA>
+          <REQUESTDESC>
+            <REPORTNAME>All Ledger Entries</REPORTNAME>
+          </REQUESTDESC>
+          <REQUESTDATA>
+            <COMPANY>
+              <RENAME>Date Filter Corp</RENAME>
+              <BOOKSFROM>20250401</BOOKSFROM>
+              <BOOKSTO>20260331</BOOKSTO>
+            </COMPANY>
+            <TALLYMESSAGE>
+              <LEDGER NAME="Cash-in-hand">
+                <PARENT>Cash-in-hand</PARENT>
+                <OPENINGBALANCE>10000.00</OPENINGBALANCE>
+              </LEDGER>
+            </TALLYMESSAGE>
+            <TALLYMESSAGE>
+              <LEDGER NAME="Owner Capital">
+                <PARENT>Capital Account</PARENT>
+                <OPENINGBALANCE>0.00</OPENINGBALANCE>
+              </LEDGER>
+            </TALLYMESSAGE>
+            <TALLYMESSAGE>
+              <VOUCHER VCHTYPE="Receipt">
+                <DATE>20250501</DATE>
+                <VOUCHERNUMBER>VCH-IN</VOUCHERNUMBER>
+                <ALLLEDGERENTRIES.LIST>
+                  <LEDGERNAME>Cash-in-hand</LEDGERNAME>
+                  <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+                  <AMOUNT>-50000.00</AMOUNT>
+                </ALLLEDGERENTRIES.LIST>
+                <ALLLEDGERENTRIES.LIST>
+                  <LEDGERNAME>Owner Capital</LEDGERNAME>
+                  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                  <AMOUNT>50000.00</AMOUNT>
+                </ALLLEDGERENTRIES.LIST>
+              </VOUCHER>
+            </TALLYMESSAGE>
+            <TALLYMESSAGE>
+              <VOUCHER VCHTYPE="Receipt">
+                <DATE>20260501</DATE>
+                <VOUCHERNUMBER>VCH-OUT</VOUCHERNUMBER>
+                <ALLLEDGERENTRIES.LIST>
+                  <LEDGERNAME>Cash-in-hand</LEDGERNAME>
+                  <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+                  <AMOUNT>-20000.00</AMOUNT>
+                </ALLLEDGERENTRIES.LIST>
+                <ALLLEDGERENTRIES.LIST>
+                  <LEDGERNAME>Owner Capital</LEDGERNAME>
+                  <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+                  <AMOUNT>20000.00</AMOUNT>
+                </ALLLEDGERENTRIES.LIST>
+              </VOUCHER>
+            </TALLYMESSAGE>
+          </REQUESTDATA>
+        </IMPORTDATA>
+      </BODY>
+    </ENVELOPE>"""
+
+    parsed_data = parse_tally_xml(xml_content)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    try:
+        normalize_tally_data(
+            parsed_data,
+            session,
+            clear_only_period=True,
+            target_period_start=date(2025, 4, 1),
+            target_period_end=date(2026, 3, 31)
+        )
+        session.commit()
+
+        txns = session.query(Transaction).all()
+        assert len(txns) == 1
+        assert txns[0].source_voucher_id == "VCH-IN"
+
+        snaps = session.query(TrialBalanceSnapshot).all()
+        snap_map = {s.ledger_account.name: s for s in snaps}
+        assert snap_map["Cash-in-hand"].total_debits == Decimal("50000.00")
+        assert snap_map["Cash-in-hand"].closing_balance == Decimal("60000.00")
+        assert snap_map["Owner Capital"].total_credits == Decimal("50000.00")
+        assert snap_map["Owner Capital"].closing_balance == Decimal("-50000.00")
+
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)

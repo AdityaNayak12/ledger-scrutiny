@@ -1,5 +1,6 @@
 from decimal import Decimal
 from typing import Dict, Any, List, Optional
+from datetime import date
 from sqlalchemy.orm import Session
 from sqlalchemy import select, delete
 
@@ -90,8 +91,11 @@ def normalize_tally_data(
             entity.materiality_threshold = materiality_threshold
             session.flush()
         
-    p_start = target_period_start if clear_only_period and target_period_start else fy_start
-    p_end = target_period_end if clear_only_period and target_period_end else fy_end
+    t_start = date.fromisoformat(target_period_start) if isinstance(target_period_start, str) else target_period_start
+    t_end = date.fromisoformat(target_period_end) if isinstance(target_period_end, str) else target_period_end
+
+    p_start = t_start if clear_only_period and t_start else fy_start
+    p_end = t_end if clear_only_period and t_end else fy_end
     
     if clear_only_period and (fy_start != p_start or fy_end != p_end):
         raise ValueError(
@@ -165,6 +169,8 @@ def normalize_tally_data(
         v_credits = Decimal("0.00")
 
         for v in parsed_data["vouchers"]:
+            if not (p_start <= v["date"] <= p_end):
+                continue
             for entry in v.get("entries", []):
                 if entry["ledger_name"] == lname:
                     if entry["type"] == "debit":
@@ -180,8 +186,8 @@ def normalize_tally_data(
         snapshot = TrialBalanceSnapshot(
             entity_id=entity.id,
             ledger_account_id=l_account.id,
-            period_start=fy_start,
-            period_end=fy_end,
+            period_start=p_start,
+            period_end=p_end,
             opening_balance=op_bal,
             total_debits=v_debits,
             total_credits=v_credits,
@@ -190,6 +196,8 @@ def normalize_tally_data(
         session.add(snapshot)
 
     for v in parsed_data["vouchers"]:
+        if not (p_start <= v["date"] <= p_end):
+            continue
         debits = [e for e in v.get("entries", []) if e["type"] == "debit"]
         credits = [e for e in v.get("entries", []) if e["type"] == "credit"]
         pairs = decompose_entries(debits, credits)

@@ -120,7 +120,7 @@ def test_xlsx_confirm_produces_identical_exceptions_to_xml_fixture(auth_headers,
     )
     assert exc_res.status_code == 200, f"Fetch exceptions failed: {exc_res.text}"
     exceptions = exc_res.json()
-    
+
     account_names = [e["ledger_account_name"] for e in exceptions if e.get("ledger_account_name")]
     assert "Rahul Enterprises" in account_names
     assert "Verma Traders" in account_names
@@ -271,3 +271,54 @@ def test_xlsx_sign_conventions(auth_headers, test_entity):
         headers=auth_headers
     )
     assert res2.status_code == 200, f"Separate dr/cr test failed: {res2.status_code} {res2.text}"
+
+def test_xlsx_skips_blank_lines(auth_headers, test_entity):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Ledger Name", "Group Name", "Opening Balance", "Closing Balance"])
+    ws.append(["Ledger A", "Fixed Assets", "1000.00", "1000.00"])
+    ws.append(["", "", "", ""])  # blank row
+    ws.append(["Ledger B", "Capital Account", "2000.00", "2000.00"])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    column_mapping = json.dumps({
+        "ledger_name": "Ledger Name",
+        "group_name": "Group Name",
+        "opening_balance": "Opening Balance",
+        "closing_balance": "Closing Balance"
+    })
+
+    res = client.post(
+        f"/entities/{test_entity}/upload-xlsx/confirm",
+        data={
+            "column_mapping": column_mapping,
+            "sign_convention": "negative_is_credit",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31"
+        },
+        files={"file": ("blank_lines.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=auth_headers
+    )
+    assert res.status_code == 200, f"Failed to ingest: {res.text}"
+
+    # Trigger scrutiny run
+    run_res = client.post(
+        f"/entities/{test_entity}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31",
+        headers=auth_headers
+    )
+    assert run_res.status_code == 200, f"Scrutiny run failed: {run_res.text}"
+
+    # Fetch exceptions
+    exc_res = client.get(
+        f"/entities/{test_entity}/exceptions?period_start=2025-04-01&period_end=2026-03-31",
+        headers=auth_headers
+    )
+    assert exc_res.status_code == 200, f"Fetch exceptions failed: {exc_res.text}"
+    exceptions = exc_res.json()
+
+    # Assert Ledger B triggers normal balance check exception (proving it was ingested)
+    account_names = [e["ledger_account_name"] for e in exceptions if e.get("ledger_account_name")]
+    assert "Ledger B" in account_names

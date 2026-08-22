@@ -127,7 +127,7 @@ def normalize_xlsx_confirm(
         actual_row_num = r_idx + 1
 
         if not row_vals or all(v is None or str(v).strip() == "" for v in row_vals):
-            break
+            continue
 
         # 1. Extract Ledger Name & Group Name
         l_idx = col_index_map["ledger_name"]

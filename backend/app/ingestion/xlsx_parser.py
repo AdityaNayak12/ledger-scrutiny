@@ -146,7 +146,7 @@ def detect_headers_and_parse(file_bytes: bytes) -> Dict[str, Any]:
         actual_row_num = r_idx + 1
 
         if not row_vals or all(v is None or str(v).strip() == "" for v in row_vals):
-            break
+            continue
 
         row_dict: Dict[str, Any] = {}
 
