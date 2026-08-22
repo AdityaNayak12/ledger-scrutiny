@@ -68,34 +68,6 @@ class Entity(Base):
         "AuditException", back_populates="entity", cascade="all, delete-orphan"
     )
 
-    # Transient attributes fallback mapping
-    @property
-    def financial_year_start(self) -> date:
-        if hasattr(self, "_transient_fy_start") and self._transient_fy_start is not None:
-            return self._transient_fy_start
-        raise RuntimeError(
-            "Entity.financial_year_start accessed before being set for this scrutiny run. "
-            "This indicates a code path that skipped explicit period attachment."
-        )
-
-    @financial_year_start.setter
-    def financial_year_start(self, value: date):
-        self._transient_fy_start = value
-
-    @property
-    def financial_year_end(self) -> date:
-        if hasattr(self, "_transient_fy_end") and self._transient_fy_end is not None:
-            return self._transient_fy_end
-        raise RuntimeError(
-            "Entity.financial_year_end accessed before being set for this scrutiny run. "
-            "This indicates a code path that skipped explicit period attachment."
-        )
-
-    @financial_year_end.setter
-    def financial_year_end(self, value: date):
-        self._transient_fy_end = value
-
-
 class FinancialPeriod(Base):
     """
     Represents a financial period for an entity and its data source.

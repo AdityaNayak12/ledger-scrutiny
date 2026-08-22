@@ -153,20 +153,8 @@ def test_entity_transient_properties_fail_loud():
         loaded_entity = session.query(Entity).filter_by(id=entity_id).first()
         assert loaded_entity is not None
 
-        # Verify accessing before setting raises RuntimeError
-        with pytest.raises(RuntimeError) as exc_info:
-            _ = loaded_entity.financial_year_start
-        assert "financial_year_start accessed before being set" in str(exc_info.value)
-
-        with pytest.raises(RuntimeError) as exc_info_end:
-            _ = loaded_entity.financial_year_end
-        assert "financial_year_end accessed before being set" in str(exc_info_end.value)
-
-        # Verify setting works
-        loaded_entity.financial_year_start = date(2025, 4, 1)
-        loaded_entity.financial_year_end = date(2026, 3, 31)
-        assert loaded_entity.financial_year_start == date(2025, 4, 1)
-        assert loaded_entity.financial_year_end == date(2026, 3, 31)
+        assert not hasattr(loaded_entity, "financial_year_start")
+        assert not hasattr(loaded_entity, "financial_year_end")
 
     finally:
         session.close()

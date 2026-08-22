@@ -528,9 +528,6 @@ export default function App() {
     name: "",
     materiality_threshold: "15000",
   });
-  const [gstinLookup, setGstinLookup] = useState<string>("");
-  const [isLookingUpGstin, setIsLookingUpGstin] = useState<boolean>(false);
-
   // Period management states
   const [periods, setPeriods] = useState<{ period_start: string; period_end: string; source?: string }[]>([]);
   const [selectedPeriod, setSelectedPeriod] = useState<{ period_start: string; period_end: string; source?: string } | null>(null);
@@ -590,56 +587,6 @@ export default function App() {
       }
     }
   }, [isMock, authFetch]);
-
-  const handleGstinLookup = async () => {
-    setErrorMsg(null);
-    const cleaned = gstinLookup.trim().toUpperCase();
-    if (!cleaned) return;
-
-    setIsLookingUpGstin(true);
-    try {
-      if (isMock) {
-        const gstinRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
-        if (!gstinRegex.test(cleaned)) {
-          throw new Error("Invalid GSTIN format. E.g. 27AAAAA1111A1Z1");
-        }
-
-        const pan = cleaned.substring(2, 12);
-        
-        const mockMap: Record<string, string> = {
-          "27AAAAA1111A1Z1": "Acme Industrial Solutions Pvt Ltd",
-          "07BBBBB2222B2Z2": "Capital Trading Corporation",
-          "29CCCCC3333C3Z3": "Bangalore Tech Ventures LLC",
-        };
-        
-        const companyName = mockMap[cleaned] || `${pan.substring(0, 5)} Enterprises Pvt Ltd`;
-        
-        setNewEntity((prev) => ({
-          ...prev,
-          name: companyName,
-        }));
-      } else {
-        const res = await authFetch(`${BASE_URL}/gstin/lookup`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ gstin: cleaned }),
-        });
-        if (!res.ok) {
-          const errData = await res.json();
-          throw new Error(errData.detail || "GSTIN lookup failed");
-        }
-        const data = await res.json();
-        setNewEntity((prev) => ({
-          ...prev,
-          name: data.company_name,
-        }));
-      }
-    } catch (err: any) {
-      setErrorMsg(err.message);
-    } finally {
-      setIsLookingUpGstin(false);
-    }
-  };
 
   const handleCreateEntity = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1143,7 +1090,6 @@ export default function App() {
             <h2 className="text-sm font-semibold tracking-wider uppercase text-slate-400 m-0">Client Entities</h2>
             <button
               onClick={() => {
-                setGstinLookup("");
                 setNewEntity({
                   name: "",
                   materiality_threshold: "15000",
@@ -1527,30 +1473,6 @@ export default function App() {
               <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-slate-200 font-bold text-xl cursor-pointer">
                 &times;
               </button>
-            </div>
-
-            {/* GSTIN LOOKUP INTEGRATION */}
-            <div className="mb-5 p-4 bg-slate-950/60 rounded-xl border border-slate-800">
-              <label className="block text-xs font-semibold text-slate-400 mb-1.5 uppercase tracking-wider">
-                GSTIN Lookup (Auto-fill Details)
-              </label>
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={gstinLookup}
-                  onChange={(e) => setGstinLookup(e.target.value)}
-                  placeholder="e.g. 27AAAAA1111A1Z1"
-                  className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-indigo-500"
-                />
-                <button
-                  type="button"
-                  onClick={handleGstinLookup}
-                  disabled={isLookingUpGstin}
-                  className="bg-indigo-600 hover:bg-indigo-500 disabled:bg-indigo-900 text-white px-3 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer"
-                >
-                  {isLookingUpGstin ? "Looking up..." : "Fetch Company"}
-                </button>
-              </div>
             </div>
 
             <form onSubmit={handleCreateEntity} className="space-y-4">

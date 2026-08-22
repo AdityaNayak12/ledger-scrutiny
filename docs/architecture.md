@@ -35,7 +35,7 @@ Database changes are managed by Alembic. Apply production migrations with
 ## Internal schema (source-agnostic)
 
 entities
-  id, name, financial_year_start, financial_year_end, materiality_threshold
+  id, name, materiality_threshold
 
 ledger_accounts
   id, entity_id, name, group_name, normal_balance ('debit'|'credit')
@@ -85,12 +85,11 @@ review_actions
 Every rule is a function with this signature:
 
     def rule_fn(entity: Entity, accounts: list[LedgerAccount],
-                snapshots: list[TrialBalanceSnapshot]) -> list[Exception]
+                snapshots: list[TrialBalanceSnapshot], period_start: date,
+                period_end: date) -> list[Exception]
 
-The engine (rules/engine.py) collects all registered rule functions and
-runs each independently, catching exceptions per-rule so one broken rule
-can't take down the whole scrutiny run. This is the plugin architecture
-referenced in PROJECT_SPEC.md.
+The engine calls its fixed rule set directly. Period dates are passed to every
+rule rather than being attached transiently to an entity.
 
 ## Adding a new ingestion source later (SAP, Zoho)
 1. Write `ingestion/<source>_parser.py` that reads the source's native

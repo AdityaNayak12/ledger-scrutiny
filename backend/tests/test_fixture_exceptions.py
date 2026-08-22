@@ -31,14 +31,12 @@ def test_fixture_exceptions_matching_requirements():
         # 4. Ingest and normalize current period
         # Case A: Materiality threshold at 5000.00
         entity = normalize_tally_data(parsed_data, session, materiality_threshold=Decimal("5000.00"))
-        entity.financial_year_start = parsed_data["entity"]["financial_year_start"]
-        entity.financial_year_end = parsed_data["entity"]["financial_year_end"]
         session.commit()
 
         accounts = session.query(LedgerAccount).filter_by(entity_id=entity.id).all()
         snapshots = session.query(TrialBalanceSnapshot).filter_by(entity_id=entity.id).all()
 
-        exceptions = run_scrutiny(entity, accounts, snapshots)
+        exceptions = run_scrutiny(entity, accounts, snapshots, parsed_data["entity"]["financial_year_start"], parsed_data["entity"]["financial_year_end"])
         
         # Create a map of account_id -> name for quick lookup without requiring session relationship loads
         acc_name_map = {acc.id: acc.name for acc in accounts}
@@ -62,7 +60,7 @@ def test_fixture_exceptions_matching_requirements():
         entity.materiality_threshold = Decimal("0.00")
         session.commit()
         
-        exceptions_low_materiality = run_scrutiny(entity, accounts, snapshots)
+        exceptions_low_materiality = run_scrutiny(entity, accounts, snapshots, parsed_data["entity"]["financial_year_start"], parsed_data["entity"]["financial_year_end"])
         exc_names_low = {acc_name_map[e.ledger_account_id] for e in exceptions_low_materiality if e.ledger_account_id in acc_name_map}
         assert "Rahul Enterprises" in exc_names_low
         assert "Verma Traders" in exc_names_low
@@ -91,14 +89,12 @@ def test_normal_balance_check_materiality_exempt():
 
         try:
             entity = normalize_tally_data(parsed_data, session, materiality_threshold=threshold)
-            entity.financial_year_start = parsed_data["entity"]["financial_year_start"]
-            entity.financial_year_end = parsed_data["entity"]["financial_year_end"]
             session.commit()
 
             accounts = session.query(LedgerAccount).filter_by(entity_id=entity.id).all()
             snapshots = session.query(TrialBalanceSnapshot).filter_by(entity_id=entity.id).all()
 
-            exceptions = run_scrutiny(entity, accounts, snapshots)
+            exceptions = run_scrutiny(entity, accounts, snapshots, parsed_data["entity"]["financial_year_start"], parsed_data["entity"]["financial_year_end"])
             normal_balance_exceptions = [e for e in exceptions if e.rule_name == "normal_balance_check"]
             acc_name_map = {acc.id: acc.name for acc in accounts}
 
@@ -140,14 +136,12 @@ def test_opening_balance_continuity_regression():
         
         # Ingest Period 2
         entity2 = normalize_tally_data(parsed_p2, session, materiality_threshold=Decimal("15000.00"))
-        entity2.financial_year_start = parsed_p2["entity"]["financial_year_start"]
-        entity2.financial_year_end = parsed_p2["entity"]["financial_year_end"]
         session.commit()
         
         accounts = session.query(LedgerAccount).filter_by(entity_id=entity2.id).all()
         snapshots = session.query(TrialBalanceSnapshot).all()
         
-        exceptions = run_scrutiny(entity2, accounts, snapshots)
+        exceptions = run_scrutiny(entity2, accounts, snapshots, parsed_p2["entity"]["financial_year_start"], parsed_p2["entity"]["financial_year_end"])
         acc_name_map = {acc.id: acc.name for acc in accounts}
         
         continuity_exceptions = [e for e in exceptions if e.rule_name == "opening_balance_continuity"]
@@ -177,14 +171,12 @@ def test_opening_balance_continuity_regression():
         
         # Ingest Period 2
         entity2 = normalize_tally_data(parsed_p2, session, materiality_threshold=Decimal("0.00"))
-        entity2.financial_year_start = parsed_p2["entity"]["financial_year_start"]
-        entity2.financial_year_end = parsed_p2["entity"]["financial_year_end"]
         session.commit()
         
         accounts = session.query(LedgerAccount).filter_by(entity_id=entity2.id).all()
         snapshots = session.query(TrialBalanceSnapshot).all()
         
-        exceptions = run_scrutiny(entity2, accounts, snapshots)
+        exceptions = run_scrutiny(entity2, accounts, snapshots, parsed_p2["entity"]["financial_year_start"], parsed_p2["entity"]["financial_year_end"])
         acc_name_map = {acc.id: acc.name for acc in accounts}
         
         continuity_exceptions = [e for e in exceptions if e.rule_name == "opening_balance_continuity"]

@@ -34,51 +34,6 @@ def test_entity(auth_headers):
     return res.json()["id"]
 
 
-def test_xlsx_header_detection_and_preview_fixture_1(auth_headers, test_entity):
-    file_path = os.path.join(SAMPLE_DATA_DIR, "test_fixture_1.xlsx")
-    assert os.path.exists(file_path), f"File not found: {file_path}"
-    with open(file_path, "rb") as f:
-        res = client.post(
-            f"/entities/{test_entity}/upload-xlsx/preview",
-            files={"file": ("test_fixture_1.xlsx", f, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-            headers=auth_headers
-        )
-
-    assert res.status_code == 200, f"Preview failed: {res.text}"
-    data = res.json()
-    assert data["header_row_number"] == 3
-    mapping = data["column_mapping"]
-    assert mapping["ledger_name"]["column"] == "Particulars"
-    assert mapping["group_name"]["column"] == "Grp"
-    assert mapping["opening_balance"]["column"] == "Op Bal"
-    assert mapping["closing_balance"]["column"] == "Cl Bal"
-    assert data["missing_fields"] == []
-    assert len(data["sample_rows"]) == 5
-    assert data["parse_errors"] == []
-
-
-def test_xlsx_header_detection_and_preview_fixture_2(auth_headers, test_entity):
-    file_path = os.path.join(SAMPLE_DATA_DIR, "test_fixture_2.xlsx")
-    assert os.path.exists(file_path), f"File not found: {file_path}"
-    with open(file_path, "rb") as f:
-        res = client.post(
-            f"/entities/{test_entity}/upload-xlsx/preview",
-            files={"file": ("test_fixture_2.xlsx", f, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-            headers=auth_headers
-        )
-
-    assert res.status_code == 200, f"Preview failed: {res.text}"
-    data = res.json()
-    assert data["header_row_number"] == 5
-    mapping = data["column_mapping"]
-    assert mapping["ledger_name"]["column"] == "Account Name"
-    assert mapping["group_name"]["column"] == "Category"
-    assert mapping["opening_balance"]["column"] == "Opening"
-    assert mapping["closing_balance"]["column"] == "Closing"
-    assert data["missing_fields"] == []
-    assert len(data["sample_rows"]) == 5
-
-
 def test_xlsx_confirm_produces_identical_exceptions_to_xml_fixture(auth_headers, test_entity):
     file_path = os.path.join(SAMPLE_DATA_DIR, "test_fixture_1.xlsx")
     column_mapping = json.dumps({
@@ -125,22 +80,6 @@ def test_xlsx_confirm_produces_identical_exceptions_to_xml_fixture(auth_headers,
     assert "Rahul Enterprises" in account_names
     assert "Verma Traders" in account_names
     assert "Petty Cash Variance" in account_names
-
-
-def test_xlsx_ambiguous_file_preview_reports_missing_fields(auth_headers, test_entity):
-    file_path = os.path.join(SAMPLE_DATA_DIR, "test_fixture_ambiguous.xlsx")
-    assert os.path.exists(file_path), f"File not found: {file_path}"
-    with open(file_path, "rb") as f:
-        res = client.post(
-            f"/entities/{test_entity}/upload-xlsx/preview",
-            files={"file": ("test_fixture_ambiguous.xlsx", f, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
-            headers=auth_headers
-        )
-
-    assert res.status_code == 200, f"Ambiguous preview failed: {res.text}"
-    data = res.json()
-    assert len(data["missing_fields"]) > 0
-    assert "ledger_name" in data["missing_fields"]
 
 
 def test_xlsx_fail_loud_validations_blank_ledger(auth_headers, test_entity):

@@ -174,66 +174,6 @@ def test_api_scrutiny_with_violations():
     assert len(list_res_warn.json()) == 0
 
 
-def test_gstin_lookup():
-    headers = get_auth_headers()
-
-    # 1. Valid registered GSTIN
-    res = client.post("/gstin/lookup", json={"gstin": "27AAAAA1111A1Z1"}, headers=headers)
-    assert res.status_code == 200
-    data = res.json()
-    assert data["gstin"] == "27AAAAA1111A1Z1"
-    assert data["company_name"] == "Acme Industrial Solutions Pvt Ltd"
-    assert data["state"] == "Maharashtra"
-    assert data["pan"] == "AAAAA1111A"
-
-    # 2. Valid dynamically generated GSTIN
-    res2 = client.post("/gstin/lookup", json={"gstin": "29TSTNG9999P9Z9"}, headers=headers)
-    assert res2.status_code == 200
-    data2 = res2.json()
-    assert data2["gstin"] == "29TSTNG9999P9Z9"
-    assert data2["company_name"] == "Tstng Enterprises Pvt Ltd"
-    assert data2["state"] == "Karnataka"
-    assert data2["pan"] == "TSTNG9999P"
-
-    # 3. Invalid GSTIN format
-    res3 = client.post("/gstin/lookup", json={"gstin": "invalid-gstin"}, headers=headers)
-    assert res3.status_code == 400
-    assert "Invalid GSTIN format" in res3.json()["detail"]
-
-
-def test_gstin_lookup_live_mocked():
-    headers = get_auth_headers()
-    from unittest.mock import patch, MagicMock
-
-    with patch("app.routers.scrutiny.APISETU_API_KEY", "test-key"), \
-         patch("app.routers.scrutiny.APISETU_CLIENT_ID", "test-client"):
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "lgnm": "Global Trade Ventures Pvt Ltd",
-            "tradeNam": "GTV",
-            "gstin": "27GTVTV1111V1Z1"
-        }
-
-        with patch("httpx.Client.get", return_value=mock_response):
-            res = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"}, headers=headers)
-            assert res.status_code == 200
-            data = res.json()
-            assert data["gstin"] == "27GTVTV1111V1Z1"
-            assert data["company_name"] == "Global Trade Ventures Pvt Ltd"
-            assert data["state"] == "Maharashtra"
-            assert data["pan"] == "GTVTV1111V"
-
-        mock_response_404 = MagicMock()
-        mock_response_404.status_code = 404
-
-        with patch("httpx.Client.get", return_value=mock_response_404):
-            res404 = client.post("/gstin/lookup", json={"gstin": "27GTVTV1111V1Z1"}, headers=headers)
-            assert res404.status_code == 404
-            assert "not found on API Setu" in res404.json()["detail"]
-
-
 def test_api_exception_review_workflow():
     headers = get_auth_headers()
 
@@ -414,7 +354,7 @@ def test_api_preserve_notes_multiple_exceptions_for_same_account(monkeypatch):
 
     from app.db.models import AuditException
 
-    def mock_run_scrutiny(entity, accounts, snapshots):
+    def mock_run_scrutiny(entity, accounts, snapshots, period_start, period_end):
         cash_acc = next(a for a in accounts if a.name == "Cash")
         return [
             AuditException(

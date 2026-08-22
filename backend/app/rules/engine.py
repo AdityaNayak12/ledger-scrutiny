@@ -1,387 +1,102 @@
-from decimal import Decimal
-from typing import List, Callable, Optional
 from datetime import date
-from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException
-from app.rules.account_groups import get_normal_balance
+from decimal import Decimal
+from typing import List
 
-# Rule function signature type
-RuleFunc = Callable[[Entity, List[LedgerAccount], List[TrialBalanceSnapshot]], List[AuditException]]
+from app.db.models import AuditException, Entity, LedgerAccount, TrialBalanceSnapshot
+
 RULE_SET_VERSION = "1"
 
 
-def register_rule(materiality_scope: str):
-    """
-    Decorator to register a rule function and explicitly set its materiality_scope.
-    materiality_scope must be either 'exempt' or 'magnitude'.
-    """
-    if materiality_scope not in ("exempt", "magnitude"):
-        raise ValueError(
-            f"Invalid materiality_scope '{materiality_scope}'. "
-            f"Must be 'exempt' or 'magnitude'."
-        )
-    def decorator(func: RuleFunc) -> RuleFunc:
-        func.materiality_scope = materiality_scope
-        return func
-    return decorator
-
-
-@register_rule(materiality_scope="exempt")
-def check_normal_balance(
-    entity: Entity, 
-    accounts: List[LedgerAccount], 
-    snapshots: List[TrialBalanceSnapshot]
-) -> List[AuditException]:
-    """
-    Rule: Normal Balance Check
-    Checks if the closing balance of an account group matches its expected normal balance side.
-    """
+def check_normal_balance(entity: Entity, accounts: List[LedgerAccount], snapshots: List[TrialBalanceSnapshot], period_start: date, period_end: date) -> List[AuditException]:
+    snapshots_by_account = {s.ledger_account_id: s for s in snapshots if s.entity_id == entity.id and s.period_start == period_start}
     exceptions = []
-    
-    # Filter snapshots for the current entity's financial year
-    current_snapshots = [
-        s for s in snapshots 
-        if s.entity_id == entity.id and s.period_start == entity.financial_year_start
-    ]
-    
-    # Create a map of ledger_account_id -> snapshot for quick lookup
-    snap_map = {s.ledger_account_id: s for s in current_snapshots}
-    
-    for acc in accounts:
-        if acc.id not in snap_map:
+    for account in accounts:
+        snapshot = snapshots_by_account.get(account.id)
+        if not snapshot or account.normal_balance.lower() == "any":
             continue
-            
-        snap = snap_map[acc.id]
-        normal_bal = acc.normal_balance.lower()
-        cl_bal = snap.closing_balance
-        
-        # We store: Debit as positive, Credit as negative
-        if normal_bal == "debit" and cl_bal < Decimal("0.00"):
-            variance = abs(cl_bal)
-            exc = AuditException(
-                entity_id=entity.id,
-                period_start=entity.financial_year_start,
-                period_end=entity.financial_year_end,
-                rule_name="normal_balance_check",
-                ledger_account_id=acc.id,
-                severity="error",
-                message=(
-                    f"Account '{acc.name}' has normal balance 'debit' "
-                    f"but has a credit closing balance of {variance}."
-                )
-            )
-            exc.variance = variance
-            exceptions.append(exc)
-            
-        elif normal_bal == "credit" and cl_bal > Decimal("0.00"):
-            variance = cl_bal
-            exc = AuditException(
-                entity_id=entity.id,
-                period_start=entity.financial_year_start,
-                period_end=entity.financial_year_end,
-                rule_name="normal_balance_check",
-                ledger_account_id=acc.id,
-                severity="error",
-                message=(
-                    f"Account '{acc.name}' has normal balance 'credit' "
-                    f"but has a debit closing balance of {variance}."
-                )
-            )
-            exc.variance = variance
-            exceptions.append(exc)
-            
+        if (account.normal_balance.lower() == "debit" and snapshot.closing_balance < 0) or (account.normal_balance.lower() == "credit" and snapshot.closing_balance > 0):
+            variance = abs(snapshot.closing_balance)
+            side = "credit" if snapshot.closing_balance < 0 else "debit"
+            exception = AuditException(entity_id=entity.id, period_start=period_start, period_end=period_end, rule_name="normal_balance_check", ledger_account_id=account.id, severity="error", message=f"Account '{account.name}' has normal balance '{account.normal_balance.lower()}' but has a {side} closing balance of {variance}.")
+            exception.variance = variance
+            exceptions.append(exception)
     return exceptions
 
 
-@register_rule(materiality_scope="magnitude")
-def check_opening_balance_continuity(
-    entity: Entity, 
-    accounts: List[LedgerAccount], 
-    snapshots: List[TrialBalanceSnapshot]
-) -> List[AuditException]:
-    """
-    Rule: Opening Balance Continuity Check
-    Checks if the opening balance of an account matches the prior period's closing balance.
-    Applies ONLY to balance sheet groups.
-    """
+def check_opening_balance_continuity(entity: Entity, accounts: List[LedgerAccount], snapshots: List[TrialBalanceSnapshot], period_start: date, period_end: date) -> List[AuditException]:
+    balance_sheet_groups = {"Capital Account", "Fixed Assets", "Investments", "Current Assets", "Sundry Debtors", "Cash-in-hand", "Bank Accounts", "Stock-in-hand", "Loans & Advances (Asset)", "Current Liabilities", "Sundry Creditors", "Duties & Taxes", "Provisions", "Secured Loans", "Unsecured Loans", "Loans (Liability)", "Reserves & Surplus"}
+    account_names = {account.id: account.name for account in accounts}
+    current, prior = {}, {}
+    for snapshot in snapshots:
+        name = snapshot.ledger_account.name if snapshot.ledger_account else account_names.get(snapshot.ledger_account_id)
+        if not name:
+            continue
+        if snapshot.period_start == period_start:
+            current[name] = snapshot
+        elif snapshot.period_end <= period_start and (name not in prior or snapshot.period_end > prior[name].period_end):
+            prior[name] = snapshot
     exceptions = []
-    
-    BALANCE_SHEET_GROUPS = {
-        "Capital Account", "Fixed Assets", "Investments", "Current Assets", 
-        "Sundry Debtors", "Cash-in-hand", "Bank Accounts", "Stock-in-hand", 
-        "Loans & Advances (Asset)", "Current Liabilities", "Sundry Creditors", 
-        "Duties & Taxes", "Provisions", "Secured Loans", "Unsecured Loans", 
-        "Loans (Liability)", "Reserves & Surplus"
-    }
-    
-    acc_id_map = {acc.id: acc.name for acc in accounts}
-    
-    current_snaps = {}
-    prior_snaps = {}
-    
-    for s in snapshots:
-        acc_name = s.ledger_account.name if s.ledger_account else acc_id_map.get(s.ledger_account_id)
-        if not acc_name:
+    for account in accounts:
+        if account.group_name not in balance_sheet_groups or account.name not in current or account.name not in prior:
             continue
-            
-        if s.period_start == entity.financial_year_start:
-            current_snaps[acc_name] = s
-        elif s.period_end <= entity.financial_year_start:
-            if acc_name not in prior_snaps or s.period_end > prior_snaps[acc_name].period_end:
-                prior_snaps[acc_name] = s
-            
-    for acc in accounts:
-        if acc.group_name not in BALANCE_SHEET_GROUPS:
-            continue
-            
-        if acc.name not in current_snaps or acc.name not in prior_snaps:
-            continue
-            
-        curr_snap = current_snaps[acc.name]
-        prior_snap = prior_snaps[acc.name]
-        
-        curr_opening = curr_snap.opening_balance
-        prior_closing = prior_snap.closing_balance
-        
-        if curr_opening != prior_closing:
-            variance = abs(curr_opening - prior_closing)
-            exc = AuditException(
-                entity_id=entity.id,
-                period_start=entity.financial_year_start,
-                period_end=entity.financial_year_end,
-                rule_name="opening_balance_continuity",
-                ledger_account_id=acc.id,
-                severity="error",
-                message=(
-                    f"Account '{acc.name}' opening balance ({curr_opening}) does not match "
-                    f"prior period closing balance ({prior_closing}). Variance: {variance}."
-                )
-            )
-            exc.variance = variance
-            exc.apply_materiality = True
-            exceptions.append(exc)
-            
+        opening, closing = current[account.name].opening_balance, prior[account.name].closing_balance
+        if opening != closing:
+            variance = abs(opening - closing)
+            exception = AuditException(entity_id=entity.id, period_start=period_start, period_end=period_end, rule_name="opening_balance_continuity", ledger_account_id=account.id, severity="error", message=f"Account '{account.name}' opening balance ({opening}) does not match prior period closing balance ({closing}). Variance: {variance}.")
+            exception.variance = variance
+            exception.apply_materiality = True
+            exceptions.append(exception)
     return exceptions
 
 
-@register_rule(materiality_scope="exempt")
-def trial_balance_balances(
-    entity: Entity, 
-    accounts: List[LedgerAccount], 
-    snapshots: List[TrialBalanceSnapshot]
-) -> List[AuditException]:
-    """
-    RULE 1: trial_balance_balances
-    Sums all TrialBalanceSnapshot closing_balance values across every account.
-    The sum across ALL accounts should be zero (total debits = total credits).
-    """
+def trial_balance_balances(entity: Entity, accounts: List[LedgerAccount], snapshots: List[TrialBalanceSnapshot], period_start: date, period_end: date) -> List[AuditException]:
+    current = [s for s in snapshots if s.entity_id == entity.id and s.period_start == period_start]
+    variance = abs(sum((s.closing_balance for s in current), Decimal("0.00")))
+    if not current or not variance:
+        return []
+    exception = AuditException(entity_id=entity.id, period_start=period_start, period_end=period_end, rule_name="trial_balance_balances", severity="error", message=f"Trial balance does not balance: net variance of {variance:.2f} across {len(current)} accounts.")
+    exception.variance = variance
+    exception.apply_materiality = True
+    return [exception]
+
+
+def negative_cash_balance(entity: Entity, accounts: List[LedgerAccount], snapshots: List[TrialBalanceSnapshot], period_start: date, period_end: date) -> List[AuditException]:
+    snapshots_by_account = {s.ledger_account_id: s for s in snapshots if s.entity_id == entity.id and s.period_start == period_start}
     exceptions = []
-    
-    current_snapshots = [
-        s for s in snapshots 
-        if s.entity_id == entity.id and s.period_start == entity.financial_year_start
-    ]
-    
-    if not current_snapshots:
-        return exceptions
-        
-    net_sum = sum(s.closing_balance for s in current_snapshots)
-    variance = abs(net_sum)
-    
-    if variance > Decimal("0.00"):
-        exc = AuditException(
-            entity_id=entity.id,
-            period_start=entity.financial_year_start,
-            period_end=entity.financial_year_end,
-            rule_name="trial_balance_balances",
-            ledger_account_id=None,
-            severity="error",
-            message=(
-                f"Trial balance does not balance: net variance of {variance:.2f} "
-                f"across {len(current_snapshots)} accounts."
-            )
-        )
-        exc.variance = variance
-        exc.apply_materiality = True
-        exceptions.append(exc)
-        
+    for account in accounts:
+        snapshot = snapshots_by_account.get(account.id)
+        if account.group_name == "Cash-in-hand" and snapshot and snapshot.closing_balance < 0:
+            variance = abs(snapshot.closing_balance)
+            exception = AuditException(entity_id=entity.id, period_start=period_start, period_end=period_end, rule_name="negative_cash_balance", ledger_account_id=account.id, severity="error", message=f"Account '{account.name}' has negative cash balance ({variance:.2f} credit). Cash balance cannot be negative.")
+            exception.variance = variance
+            exceptions.append(exception)
     return exceptions
 
 
-@register_rule(materiality_scope="exempt")
-def negative_cash_balance(
-    entity: Entity, 
-    accounts: List[LedgerAccount], 
-    snapshots: List[TrialBalanceSnapshot]
-) -> List[AuditException]:
-    """
-    RULE 2: negative_cash_balance
-    Checks for credit (negative) closing balances on accounts in the 'Cash-in-hand' group.
-    """
+def suspense_account_nonzero(entity: Entity, accounts: List[LedgerAccount], snapshots: List[TrialBalanceSnapshot], period_start: date, period_end: date) -> List[AuditException]:
+    snapshots_by_account = {s.ledger_account_id: s for s in snapshots if s.entity_id == entity.id and s.period_start == period_start}
     exceptions = []
-    
-    current_snapshots = [
-        s for s in snapshots 
-        if s.entity_id == entity.id and s.period_start == entity.financial_year_start
-    ]
-    
-    snap_map = {s.ledger_account_id: s for s in current_snapshots}
-    
-    for acc in accounts:
-        if acc.group_name != "Cash-in-hand":
-            continue
-            
-        if acc.id not in snap_map:
-            continue
-            
-        snap = snap_map[acc.id]
-        if snap.closing_balance < Decimal("0.00"):
-            variance = abs(snap.closing_balance)
-            exc = AuditException(
-                entity_id=entity.id,
-                period_start=entity.financial_year_start,
-                period_end=entity.financial_year_end,
-                rule_name="negative_cash_balance",
-                ledger_account_id=acc.id,
-                severity="error",
-                message=(
-                    f"Account '{acc.name}' has negative cash balance ({variance:.2f} credit). "
-                    f"Cash balance cannot be negative."
-                )
-            )
-            exc.variance = variance
-            exc.apply_materiality = False
-            exceptions.append(exc)
-            
-    return exceptions
-
-
-@register_rule(materiality_scope="exempt")
-def suspense_account_nonzero(
-    entity: Entity, 
-    accounts: List[LedgerAccount], 
-    snapshots: List[TrialBalanceSnapshot]
-) -> List[AuditException]:
-    """
-    RULE 3: suspense_account_nonzero
-    Checks for non-zero closing balances on any account with 'Suspense' in name or group 'Suspense Account'.
-    """
-    exceptions = []
-    
-    current_snapshots = [
-        s for s in snapshots 
-        if s.entity_id == entity.id and s.period_start == entity.financial_year_start
-    ]
-    
-    snap_map = {s.ledger_account_id: s for s in current_snapshots}
-    
-    for acc in accounts:
-        is_suspense = (
-            "suspense" in acc.name.lower() or 
-            acc.group_name == "Suspense Account"
-        )
-        if not is_suspense:
-            continue
-            
-        if acc.id not in snap_map:
-            continue
-            
-        snap = snap_map[acc.id]
-        if snap.closing_balance != Decimal("0.00"):
-            variance = abs(snap.closing_balance)
-            exc = AuditException(
-                entity_id=entity.id,
-                period_start=entity.financial_year_start,
-                period_end=entity.financial_year_end,
-                rule_name="suspense_account_nonzero",
-                ledger_account_id=acc.id,
-                severity="error",
-                message=(
-                    f"Suspense account '{acc.name}' has non-zero closing balance "
-                    f"({snap.closing_balance:.2f})."
-                )
-            )
-            exc.variance = variance
-            exc.apply_materiality = True
-            exceptions.append(exc)
-            
+    for account in accounts:
+        snapshot = snapshots_by_account.get(account.id)
+        if snapshot and ("suspense" in account.name.lower() or account.group_name == "Suspense Account") and snapshot.closing_balance:
+            variance = abs(snapshot.closing_balance)
+            exception = AuditException(entity_id=entity.id, period_start=period_start, period_end=period_end, rule_name="suspense_account_nonzero", ledger_account_id=account.id, severity="error", message=f"Suspense account '{account.name}' has non-zero closing balance ({snapshot.closing_balance:.2f}).")
+            exception.variance = variance
+            exception.apply_materiality = True
+            exceptions.append(exception)
     return exceptions
 
 
 def filter_by_materiality(entity: Entity, exceptions: List[AuditException]) -> List[AuditException]:
-    """
-    Materiality Threshold Filter
-    Suppresses exceptions where the variance is below the entity's materiality threshold,
-    but only for rules that opted in (apply_materiality = True).
-    """
-    threshold = entity.materiality_threshold
-    filtered = []
-    
-    for exc in exceptions:
-        if exc.severity == "critical":
-            filtered.append(exc)
-            continue
-            
-        if not getattr(exc, "apply_materiality", False):
-            filtered.append(exc)
-            continue
-            
-        variance = getattr(exc, "variance", Decimal("0.00"))
-        if variance >= threshold:
-            filtered.append(exc)
-            
-    return filtered
+    return [exception for exception in exceptions if exception.severity == "critical" or not getattr(exception, "apply_materiality", False) or getattr(exception, "variance", Decimal("0.00")) >= entity.materiality_threshold]
 
 
-# Static list of registered scrutiny rules
-RULES: List[RuleFunc] = [
-    check_normal_balance,
-    check_opening_balance_continuity,
-    trial_balance_balances,
-    negative_cash_balance,
-    suspense_account_nonzero,
-]
-
-
-def run_scrutiny(
-    entity: Entity, 
-    accounts: List[LedgerAccount], 
-    snapshots: List[TrialBalanceSnapshot],
-    rules: Optional[List[RuleFunc]] = None
-) -> List[AuditException]:
-    """
-    Runs scrutiny rules in isolation, catching exceptions 
-    per-rule, and applies the materiality filter at the end.
-    """
-    if rules is None:
-        rules = RULES
-        
-    all_exceptions: List[AuditException] = []
-    
-    for rule in rules:
-        scope = getattr(rule, "materiality_scope", None)
-        if scope not in ("exempt", "magnitude"):
-            raise ValueError(
-                f"Rule '{rule.__name__}' missing explicit materiality_scope declaration. "
-                f"Must declare 'exempt' or 'magnitude' via @register_rule."
-            )
-
-        try:
-            exceptions = rule(entity, accounts, snapshots)
-            for exc in exceptions:
-                if scope == "magnitude":
-                    exc.apply_materiality = True
-                elif scope == "exempt":
-                    exc.apply_materiality = False
-            all_exceptions.extend(exceptions)
-        except Exception as e:
-            system_exc = AuditException(
-                entity_id=entity.id,
-                period_start=entity.financial_year_start,
-                period_end=entity.financial_year_end,
-                rule_name=rule.__name__,
-                severity="critical",
-                message=f"Rule '{rule.__name__}' failed with unexpected error: {str(e)}"
-            )
-            all_exceptions.append(system_exc)
-            
-    return filter_by_materiality(entity, all_exceptions)
+def run_scrutiny(entity: Entity, accounts: List[LedgerAccount], snapshots: List[TrialBalanceSnapshot], period_start: date, period_end: date) -> List[AuditException]:
+    exceptions = (
+        check_normal_balance(entity, accounts, snapshots, period_start, period_end)
+        + check_opening_balance_continuity(entity, accounts, snapshots, period_start, period_end)
+        + trial_balance_balances(entity, accounts, snapshots, period_start, period_end)
+        + negative_cash_balance(entity, accounts, snapshots, period_start, period_end)
+        + suspense_account_nonzero(entity, accounts, snapshots, period_start, period_end)
+    )
+    return filter_by_materiality(entity, exceptions)

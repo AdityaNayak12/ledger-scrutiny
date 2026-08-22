@@ -88,7 +88,6 @@ def test_protected_routes_unauthenticated():
     assert client.get("/entities/1/periods").status_code == 401
     assert client.post("/entities/1/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31").status_code == 401
     assert client.get("/entities/1/exceptions").status_code == 401
-    assert client.post("/gstin/lookup", json={"gstin": "27AAAAA1111A1Z1"}).status_code == 401
 
 
 def test_cross_organization_entity_access_returns_404():
@@ -226,4 +225,3 @@ def test_auth_google_account_linking_and_new_org_flow():
         assert res_relogin.status_code == 200
         assert res_relogin.json()["email"] == "new_google_auditor@gmail.com"
         assert res_relogin.json()["organization_name"] == "New Google Firm Ltd"
-

@@ -1,9 +1,7 @@
 import re
-import os
 import json
 import hashlib
-import httpx
-from typing import Optional, List, Dict, Any
+from typing import Optional, List
 from decimal import Decimal
 from datetime import datetime, date, timezone
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, Form, status
@@ -17,7 +15,6 @@ from app.ingestion.batches import create_import_batch
 from app.ingestion.tally_parser import parse_tally_xml
 from app.ingestion.tally_http import TallyConnectorError, fetch_trial_balance
 from app.ingestion.tally_normalizer import normalize_tally_data
-from app.ingestion.xlsx_parser import detect_headers_and_parse
 from app.ingestion.xlsx_normalizer import normalize_xlsx_confirm
 from app.rules.engine import RULE_SET_VERSION, run_scrutiny
 from app.auth.security import get_current_user
@@ -73,15 +70,6 @@ class IngestionResponse(BaseModel):
     entity_id: int
     entity_name: str
     import_batch_id: Optional[int] = None
-
-
-class XlsxPreviewResponse(BaseModel):
-    header_row_number: Optional[int]
-    column_mapping: Dict[str, Any]
-    missing_fields: List[str]
-    sample_rows: List[Dict[str, Any]]
-    parse_errors: List[Dict[str, Any]]
-    total_data_rows: int
 
 
 class TallyConnectorImportRequest(BaseModel):
@@ -353,46 +341,6 @@ async def upload_tally_export(
         )
 
 
-@router.post("/entities/{entity_id}/upload-xlsx/preview", response_model=XlsxPreviewResponse)
-async def upload_xlsx_preview(
-    entity_id: int,
-    file: UploadFile = File(...),
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """
-    Parses uploaded XLSX trial balance and returns header detection preview without writing to database.
-    """
-    fn_lower = file.filename.lower()
-    if not (fn_lower.endswith(".xlsx") or fn_lower.endswith(".xls")):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only XLSX files are supported."
-        )
-
-    entity = db.execute(
-        select(Entity).where(
-            Entity.id == entity_id,
-            Entity.organization_id == current_user.organization_id
-        )
-    ).scalar_one_or_none()
-    if not entity:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Entity with ID {entity_id} not found."
-        )
-
-    try:
-        contents = await file.read()
-        preview_data = detect_headers_and_parse(contents)
-        return XlsxPreviewResponse(**preview_data)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to preview XLSX file: {str(e)}"
-        )
-
-
 @router.post("/entities/{entity_id}/upload-xlsx/confirm", response_model=IngestionResponse)
 async def upload_xlsx_confirm(
     entity_id: int,
@@ -503,9 +451,6 @@ def trigger_scrutiny_run(
             detail=f"Entity with ID {entity_id} not found."
         )
 
-    entity.financial_year_start = period_start
-    entity.financial_year_end = period_end
-
     accounts = db.execute(
         select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)
     ).scalars().all()
@@ -580,7 +525,7 @@ def trigger_scrutiny_run(
     db.add(scrutiny_run)
     db.flush()
 
-    exceptions = run_scrutiny(entity, accounts, snapshots)
+    exceptions = run_scrutiny(entity, accounts, snapshots, period_start, period_end)
 
     for exc in exceptions:
         exc.period_start = period_start
@@ -609,7 +554,6 @@ def trigger_scrutiny_run(
         exceptions_count=len(exceptions),
         scrutiny_run_id=scrutiny_run.id,
     )
-
 
 @router.get("/entities/{entity_id}/exceptions", response_model=List[ExceptionResponse])
 def list_exceptions(
@@ -733,119 +677,4 @@ def update_exception(
         status=exc.status,
         auditor_notes=exc.auditor_notes,
         created_at=exc.created_at
-    )
-
-
-# --- GSTIN Lookup schemas and endpoint ---
-
-class GstinLookupRequest(BaseModel):
-    gstin: str
-
-
-class GstinLookupResponse(BaseModel):
-    gstin: str
-    company_name: str
-    state: str
-    pan: str
-
-
-STATE_CODES = {
-    "01": "Jammu and Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
-    "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan",
-    "09": "Uttar Pradesh", "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh",
-    "13": "Nagaland", "14": "Manipur", "15": "Mizoram", "16": "Tripura",
-    "17": "Meghalaya", "18": "Assam", "19": "West Bengal", "20": "Jharkhand",
-    "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
-    "25": "Daman and Diu", "26": "Dadra and Nagar Haveli", "27": "Maharashtra",
-    "28": "Andhra Pradesh (Before division)", "29": "Karnataka", "30": "Goa",
-    "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu", "34": "Puducherry",
-    "35": "Andaman and Nicobar Islands", "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh"
-}
-
-MOCK_GSTIN_REGISTRY = {
-    "27AAAAA1111A1Z1": {"company_name": "Acme Industrial Solutions Pvt Ltd", "state": "Maharashtra", "pan": "AAAAA1111A"},
-    "07BBBBB2222B2Z2": {"company_name": "Capital Trading Corporation", "state": "Delhi", "pan": "BBBBB2222B"},
-    "29CCCCC3333C3Z3": {"company_name": "Bangalore Tech Ventures LLC", "state": "Karnataka", "pan": "CCCCC3333C"}
-}
-
-APISETU_BASE_URL = os.getenv("APISETU_BASE_URL", "https://apisetu.gov.in/gstn")
-APISETU_API_KEY = os.getenv("APISETU_API_KEY")
-APISETU_CLIENT_ID = os.getenv("APISETU_CLIENT_ID")
-
-
-@router.post("/gstin/lookup", response_model=GstinLookupResponse)
-def lookup_gstin(
-    request: GstinLookupRequest,
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Look up company details using a GSTIN. Protected endpoint.
-    """
-    gstin_cleaned = request.gstin.strip().upper()
-    
-    gstin_regex = r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$"
-    if not re.match(gstin_regex, gstin_cleaned):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid GSTIN format. Expected format: 15-character alphanumeric (e.g. 27AAAAA1111A1Z1)."
-        )
-        
-    state_code = gstin_cleaned[0:2]
-    pan = gstin_cleaned[2:12]
-    state_name = STATE_CODES.get(state_code, "Unknown State")
-    
-    if APISETU_API_KEY and APISETU_CLIENT_ID:
-        url = f"{APISETU_BASE_URL.rstrip('/')}/v1/taxpayers/{gstin_cleaned}"
-        headers = {
-            "X-APISETU-APIKEY": APISETU_API_KEY,
-            "X-APISETU-CLIENTID": APISETU_CLIENT_ID,
-            "Accept": "application/json"
-        }
-        try:
-            with httpx.Client(timeout=10.0) as client:
-                response = client.get(url, headers=headers)
-                
-            if response.status_code == 200:
-                data = response.json()
-                company_name = data.get("lgnm") or data.get("tradeNam") or "Unknown Company"
-                return GstinLookupResponse(
-                    gstin=gstin_cleaned,
-                    company_name=company_name,
-                    state=state_name,
-                    pan=pan
-                )
-            elif response.status_code == 404:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Taxpayer with GSTIN {gstin_cleaned} not found on API Setu."
-                )
-            else:
-                print(f"[ERROR] API Setu error status {response.status_code}: {response.text}")
-                raise HTTPException(
-                    status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail=f"API Setu gateway returned error code {response.status_code}."
-                )
-        except httpx.RequestError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"API Setu request failed: {str(exc)}"
-            )
-
-    if gstin_cleaned in MOCK_GSTIN_REGISTRY:
-        company_info = MOCK_GSTIN_REGISTRY[gstin_cleaned]
-        return GstinLookupResponse(
-            gstin=gstin_cleaned,
-            company_name=company_info["company_name"],
-            state=company_info["state"],
-            pan=company_info["pan"]
-        )
-        
-    company_prefix = pan[0:5]
-    company_name = f"{company_prefix.title()} Enterprises Pvt Ltd"
-    
-    return GstinLookupResponse(
-        gstin=gstin_cleaned,
-        company_name=company_name,
-        state=state_name,
-        pan=pan
     )
