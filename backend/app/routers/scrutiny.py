@@ -1,22 +1,25 @@
 import re
 import os
 import json
+import hashlib
 import httpx
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, Form, status
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import select, delete
 from pydantic import BaseModel, ConfigDict
 
 from app.db.session import get_db
-from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot, AuditException, User
+from app.db.models import AuditException, Entity, FinancialPeriod, ImportBatch, LedgerAccount, ReviewAction, ScrutinyRun, TrialBalanceSnapshot, User
+from app.ingestion.batches import create_import_batch
 from app.ingestion.tally_parser import parse_tally_xml
+from app.ingestion.tally_http import TallyConnectorError, fetch_trial_balance
 from app.ingestion.tally_normalizer import normalize_tally_data
 from app.ingestion.xlsx_parser import detect_headers_and_parse
 from app.ingestion.xlsx_normalizer import normalize_xlsx_confirm
-from app.rules.engine import run_scrutiny
+from app.rules.engine import RULE_SET_VERSION, run_scrutiny
 from app.auth.security import get_current_user
 
 # Router without prefix to match the exact URL layout
@@ -69,6 +72,7 @@ class IngestionResponse(BaseModel):
     message: str
     entity_id: int
     entity_name: str
+    import_batch_id: Optional[int] = None
 
 
 class XlsxPreviewResponse(BaseModel):
@@ -80,9 +84,24 @@ class XlsxPreviewResponse(BaseModel):
     total_data_rows: int
 
 
+class TallyConnectorImportRequest(BaseModel):
+    endpoint: str = "http://localhost:9000"
+    company_name: str
+    period_start: date
+    period_end: date
+
+
 class ScrutinyRunSummary(BaseModel):
     status: str
     exceptions_count: int
+    scrutiny_run_id: Optional[int] = None
+
+
+def finding_fingerprint(exception: AuditException) -> str:
+    """Stable identity across reruns while allowing amounts in messages to change."""
+    canonical_message = re.sub(r"[-+]?\d[\d,]*(?:\.\d+)?", "#", exception.message.lower())
+    material = f"{exception.rule_name}|{exception.ledger_account_id or 'entity'}|{canonical_message}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 # --- Entity management endpoints ---
@@ -187,6 +206,66 @@ def list_periods(
 
 # --- Scrutiny and Ingestion endpoints ---
 
+@router.post("/entities/{entity_id}/import-from-tally", response_model=IngestionResponse)
+def import_from_tally_connector(
+    entity_id: int,
+    request: TallyConnectorImportRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Read a trial balance from a running TallyPrime HTTP server (default port 9000)."""
+    entity = db.execute(select(Entity).where(
+        Entity.id == entity_id,
+        Entity.organization_id == current_user.organization_id,
+    )).scalar_one_or_none()
+    if not entity:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Entity with ID {entity_id} not found.")
+
+    try:
+        parsed_data, response_xml = fetch_trial_balance(
+            endpoint=request.endpoint,
+            company_name=request.company_name,
+            period_start=request.period_start,
+            period_end=request.period_end,
+        )
+        batch = create_import_batch(
+            db,
+            entity_id=entity.id,
+            period_start=request.period_start,
+            period_end=request.period_end,
+            source="tally_http",
+            original_filename=f"tally-http-{request.period_end.isoformat()}.xml",
+            contents=response_xml,
+            uploaded_by_user_id=current_user.id,
+            validation_report={"connector": "tally_http", "endpoint": request.endpoint, "ledger_count": len(parsed_data["ledgers"])},
+        )
+        normalize_tally_data(
+            parsed_data,
+            db,
+            entity_id=entity.id,
+            materiality_threshold=entity.materiality_threshold,
+            clear_only_period=True,
+            target_period_start=request.period_start,
+            target_period_end=request.period_end,
+            import_batch_id=batch.id,
+        )
+        db.commit()
+        return IngestionResponse(
+            message="TallyPrime import successful",
+            entity_id=entity.id,
+            entity_name=entity.name,
+            import_batch_id=batch.id,
+        )
+    except TallyConnectorError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Failed to import from TallyPrime: {exc}")
+
 @router.post("/entities/{entity_id}/upload", response_model=IngestionResponse)
 async def upload_tally_export(
     entity_id: int,
@@ -229,6 +308,19 @@ async def upload_tally_export(
         )
 
     try:
+        period_start = target_period_start if clear_only_period and target_period_start else parsed_data["entity"]["financial_year_start"]
+        period_end = target_period_end if clear_only_period and target_period_end else parsed_data["entity"]["financial_year_end"]
+        batch = create_import_batch(
+            db,
+            entity_id=entity.id,
+            period_start=period_start,
+            period_end=period_end,
+            source="tally_xml",
+            original_filename=file.filename,
+            contents=contents,
+            uploaded_by_user_id=current_user.id,
+            validation_report={"parser": "tally_xml", "voucher_count": len(parsed_data["vouchers"])},
+        )
         normalize_tally_data(
             parsed_data, 
             db, 
@@ -237,13 +329,21 @@ async def upload_tally_export(
             organization_id=current_user.organization_id,
             clear_only_period=clear_only_period,
             target_period_start=target_period_start,
-            target_period_end=target_period_end
+            target_period_end=target_period_end,
+            import_batch_id=batch.id,
         )
         db.commit()
         return IngestionResponse(
             message="Ingestion successful",
             entity_id=entity.id,
-            entity_name=entity.name
+            entity_name=entity.name,
+            import_batch_id=batch.id,
+        )
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
         )
     except Exception as e:
         db.rollback()
@@ -337,6 +437,17 @@ async def upload_xlsx_confirm(
 
     try:
         contents = await file.read()
+        batch = create_import_batch(
+            db,
+            entity_id=entity.id,
+            period_start=target_period_start,
+            period_end=target_period_end,
+            source="xlsx_trial_balance",
+            original_filename=file.filename,
+            contents=contents,
+            uploaded_by_user_id=current_user.id,
+            validation_report={"parser": "xlsx_trial_balance", "sign_convention": sign_convention},
+        )
         normalize_xlsx_confirm(
             file_bytes=contents,
             column_mapping=mapping_dict,
@@ -345,13 +456,15 @@ async def upload_xlsx_confirm(
             target_period_end=str(target_period_end),
             entity_id=entity.id,
             session=db,
-            clear_only_period=clear_only_period
+            clear_only_period=clear_only_period,
+            import_batch_id=batch.id,
         )
         db.commit()
         return IngestionResponse(
             message="XLSX ingestion successful",
             entity_id=entity.id,
-            entity_name=entity.name
+            entity_name=entity.name,
+            import_batch_id=batch.id,
         )
     except ValueError as val_err:
         db.rollback()
@@ -397,6 +510,21 @@ def trigger_scrutiny_run(
         select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)
     ).scalars().all()
     
+    financial_period = db.execute(select(FinancialPeriod).where(
+        FinancialPeriod.entity_id == entity_id,
+        FinancialPeriod.period_start == period_start,
+        FinancialPeriod.period_end == period_end,
+    ).order_by(FinancialPeriod.id.desc())).scalars().first()
+    if not financial_period:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="No uploaded import exists for this period.")
+
+    active_batch = db.execute(select(ImportBatch).where(
+        ImportBatch.financial_period_id == financial_period.id,
+        ImportBatch.status == "ACTIVE",
+    ).order_by(ImportBatch.id.desc())).scalar_one_or_none()
+    if not active_batch:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This period has no active import batch.")
+
     prior_period = db.execute(
         select(TrialBalanceSnapshot.period_start, TrialBalanceSnapshot.period_end)
         .where(
@@ -407,37 +535,49 @@ def trigger_scrutiny_run(
         .limit(1)
     ).first()
     
+    prior_batch = None
+    if prior_period:
+        previous = db.execute(select(FinancialPeriod).where(
+            FinancialPeriod.entity_id == entity_id,
+            FinancialPeriod.period_start == prior_period.period_start,
+            FinancialPeriod.period_end == prior_period.period_end,
+        ).order_by(FinancialPeriod.id.desc())).scalars().first()
+        if previous:
+            prior_batch = db.execute(select(ImportBatch).where(
+                ImportBatch.financial_period_id == previous.id,
+                ImportBatch.status == "ACTIVE",
+            ).order_by(ImportBatch.id.desc())).scalar_one_or_none()
+
     snapshot_query = select(TrialBalanceSnapshot).options(
         joinedload(TrialBalanceSnapshot.ledger_account)
-    ).where(
-        TrialBalanceSnapshot.entity_id == entity_id
-    ).where(
-        ((TrialBalanceSnapshot.period_start == period_start) & (TrialBalanceSnapshot.period_end == period_end)) |
-        ((TrialBalanceSnapshot.period_start == prior_period.period_start) & (TrialBalanceSnapshot.period_end == prior_period.period_end) if prior_period else False)
-    )
+    ).where(TrialBalanceSnapshot.import_batch_id.in_([active_batch.id] + ([prior_batch.id] if prior_batch else [])))
     snapshots = db.execute(snapshot_query).scalars().all()
 
-    existing_exceptions_query = select(AuditException).where(
-        AuditException.entity_id == entity_id,
-        AuditException.period_start == period_start,
-        AuditException.period_end == period_end
-    )
-    existing_exceptions = db.execute(existing_exceptions_query).scalars().all()
+    previous_run = db.execute(select(ScrutinyRun).where(
+        ScrutinyRun.financial_period_id == financial_period.id,
+        ScrutinyRun.status == "COMPLETED",
+    ).order_by(ScrutinyRun.id.desc())).scalars().first()
+    existing_exceptions = []
+    if previous_run:
+        existing_exceptions = db.execute(select(AuditException).where(
+            AuditException.scrutiny_run_id == previous_run.id
+        )).scalars().all()
     
     preserve_map = {}
     for old_exc in existing_exceptions:
-        key = (old_exc.rule_name, old_exc.ledger_account_id, old_exc.message)
+        key = old_exc.fingerprint or finding_fingerprint(old_exc)
         if old_exc.status != "PENDING" or old_exc.auditor_notes:
             preserve_map[key] = (old_exc.status, old_exc.auditor_notes)
 
-    db.execute(
-        delete(AuditException)
-        .where(
-            AuditException.entity_id == entity_id,
-            AuditException.period_start == period_start,
-            AuditException.period_end == period_end
-        )
+    scrutiny_run = ScrutinyRun(
+        entity_id=entity_id,
+        financial_period_id=financial_period.id,
+        import_batch_id=active_batch.id,
+        triggered_by_user_id=current_user.id,
+        rule_set_version=RULE_SET_VERSION,
+        status="RUNNING",
     )
+    db.add(scrutiny_run)
     db.flush()
 
     exceptions = run_scrutiny(entity, accounts, snapshots)
@@ -445,8 +585,11 @@ def trigger_scrutiny_run(
     for exc in exceptions:
         exc.period_start = period_start
         exc.period_end = period_end
+        exc.scrutiny_run_id = scrutiny_run.id
+        exc.rule_version = scrutiny_run.rule_set_version
+        exc.fingerprint = finding_fingerprint(exc)
         
-        key = (exc.rule_name, exc.ledger_account_id, exc.message)
+        key = exc.fingerprint
         if key in preserve_map:
             old_status, old_notes = preserve_map[key]
             exc.status = old_status
@@ -456,11 +599,15 @@ def trigger_scrutiny_run(
             exc.auditor_notes = None
 
         db.add(exc)
+    scrutiny_run.status = "COMPLETED"
+    scrutiny_run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    scrutiny_run.summary = {"exceptions_count": len(exceptions), "rule_set_version": scrutiny_run.rule_set_version}
     db.commit()
 
     return ScrutinyRunSummary(
         status="success",
-        exceptions_count=len(exceptions)
+        exceptions_count=len(exceptions),
+        scrutiny_run_id=scrutiny_run.id,
     )
 
 
@@ -494,6 +641,15 @@ def list_exceptions(
         query = query.where(AuditException.period_start == period_start)
     if period_end:
         query = query.where(AuditException.period_end == period_end)
+    if period_start and period_end:
+        latest_run = db.execute(select(ScrutinyRun).join(FinancialPeriod).where(
+            FinancialPeriod.entity_id == entity_id,
+            FinancialPeriod.period_start == period_start,
+            FinancialPeriod.period_end == period_end,
+            ScrutinyRun.status == "COMPLETED",
+        ).order_by(ScrutinyRun.id.desc())).scalars().first()
+        if latest_run:
+            query = query.where(AuditException.scrutiny_run_id == latest_run.id)
     if severity:
         query = query.where(AuditException.severity == severity)
 
@@ -559,6 +715,12 @@ def update_exception(
 
     exc.status = exception_update.status
     exc.auditor_notes = exception_update.auditor_notes
+    db.add(ReviewAction(
+        exception_id=exc.id,
+        user_id=current_user.id,
+        status=exception_update.status,
+        auditor_notes=exception_update.auditor_notes,
+    ))
     db.commit()
     db.refresh(exc)
 
