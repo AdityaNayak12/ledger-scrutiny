@@ -23,5 +23,5 @@ COPY . .
 # Expose port 8000 for FastAPI
 EXPOSE 8000
 
-# Start FastAPI application using uvicorn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+# Apply schema migrations before serving requests.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"]

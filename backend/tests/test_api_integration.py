@@ -19,6 +19,16 @@ def get_auth_headers():
     return {"Authorization": f"Bearer {token}"}
 
 
+def test_error_responses_include_local_cors_headers():
+    response = client.get(
+        "/entities",
+        headers={"Origin": "http://localhost:5173"},
+    )
+
+    assert response.status_code == 401
+    assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
 def test_api_entities_lifecycle_flow():
     headers = get_auth_headers()
 
