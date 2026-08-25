@@ -75,8 +75,12 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
       if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail || "XLSX trial balance ingestion failed.");
       onSuccess(periodStart, periodEnd);
       onClose();
-    } catch (err: any) {
-      setError(err.message || "XLSX trial balance ingestion failed.");
+    } catch (err: unknown) {
+      setError(
+        err instanceof TypeError && err.message === "Failed to fetch"
+          ? `Cannot reach the LedgerScrutiny API at ${baseUrl}. Verify that the backend is running.`
+          : err instanceof Error ? err.message : "XLSX trial balance ingestion failed."
+      );
     } finally {
       setSubmitting(false);
     }

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { INITIAL_MOCK_ENTITIES, MOCK_EXCEPTIONS } from "./mockData";
+import { DEMO_DATA_VERSION, INITIAL_MOCK_ENTITIES, MOCK_PERIODS, getMockExceptions } from "./mockData";
 import type { Entity, Exception } from "./mockData";
 import XlsxUploadModal from "./components/XlsxUploadModal";
 
@@ -9,7 +9,37 @@ declare global {
   }
 }
 
-const BASE_URL = "http://localhost:8000";
+const BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
+
+const RULE_LABELS: Record<string, string> = {
+  normal_balance_check: "Abnormal balance",
+  opening_balance_continuity: "Opening balance continuity",
+  trial_balance_balances: "Trial balance integrity",
+  negative_cash_balance: "Negative cash",
+  suspense_account_nonzero: "Unresolved suspense balance",
+};
+
+const ruleLabel = (ruleName: string) => RULE_LABELS[ruleName] || ruleName.replaceAll("_", " ");
+
+const responseError = async (response: Response, fallback: string) => {
+  const body = await response.json().catch(() => null);
+  return new Error(body?.detail || `${fallback} (HTTP ${response.status})`);
+};
+
+const requestErrorMessage = (error: unknown) => {
+  if (error instanceof TypeError && error.message === "Failed to fetch") {
+    return `Cannot reach the LedgerScrutiny API at ${BASE_URL}. Verify that the backend is running and allows this browser origin.`;
+  }
+  return error instanceof Error ? error.message : "Unexpected request failure";
+};
+
+const demoFindingsKey = (entityId: number, periodStart?: string) =>
+  `demo_findings:${DEMO_DATA_VERSION}:${entityId}:${periodStart || "none"}`;
+
+const loadDemoFindings = (entityId: number, periodStart?: string) => {
+  const saved = localStorage.getItem(demoFindingsKey(entityId, periodStart));
+  return saved ? JSON.parse(saved) as Exception[] : getMockExceptions(entityId, periodStart);
+};
 
 const formatPeriodLabel = (p: { period_start: string; period_end: string }) => {
   const startYear = p.period_start.split("-")[0];
@@ -67,8 +97,7 @@ function AuthScreen({
       }
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Google authentication failed");
+        throw await responseError(res, "Google authentication failed");
       }
 
       const data = await res.json();
@@ -76,8 +105,8 @@ function AuthScreen({
         email: data.email,
         organization_name: data.organization_name,
       });
-    } catch (err: any) {
-      setAuthError(err.message);
+    } catch (err: unknown) {
+      setAuthError(requestErrorMessage(err));
     } finally {
       setIsSubmitting(false);
     }
@@ -101,8 +130,7 @@ function AuthScreen({
       });
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Google registration failed");
+        throw await responseError(res, "Google registration failed");
       }
 
       const data = await res.json();
@@ -111,8 +139,8 @@ function AuthScreen({
         email: data.email,
         organization_name: data.organization_name,
       });
-    } catch (err: any) {
-      setAuthError(err.message);
+    } catch (err: unknown) {
+      setAuthError(requestErrorMessage(err));
     } finally {
       setIsSubmitting(false);
     }
@@ -156,13 +184,11 @@ function AuthScreen({
       });
 
       if (res.status === 401) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Invalid credentials");
+        throw await responseError(res, "Invalid credentials");
       }
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Login failed");
+        throw await responseError(res, "Login failed");
       }
 
       const data = await res.json();
@@ -170,8 +196,8 @@ function AuthScreen({
         email: data.email,
         organization_name: data.organization_name,
       });
-    } catch (err: any) {
-      setAuthError(err.message);
+    } catch (err: unknown) {
+      setAuthError(requestErrorMessage(err));
     } finally {
       setIsSubmitting(false);
     }
@@ -200,8 +226,7 @@ function AuthScreen({
       });
 
       if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.detail || "Registration failed");
+        throw await responseError(res, "Registration failed");
       }
 
       const data = await res.json();
@@ -209,8 +234,8 @@ function AuthScreen({
         email: data.email,
         organization_name: data.organization_name,
       });
-    } catch (err: any) {
-      setAuthError(err.message);
+    } catch (err: unknown) {
+      setAuthError(requestErrorMessage(err));
     } finally {
       setIsSubmitting(false);
     }
@@ -532,7 +557,7 @@ export default function App() {
   const [periods, setPeriods] = useState<{ period_start: string; period_end: string; source?: string }[]>([]);
   const [selectedPeriod, setSelectedPeriod] = useState<{ period_start: string; period_end: string; source?: string } | null>(null);
   const [showAddPeriodModal, setShowAddPeriodModal] = useState<boolean>(false);
-  const [uploadSource, setUploadSource] = useState<"tally_xml" | "xlsx" | "sap" | null>(null);
+  const [uploadSource, setUploadSource] = useState<"tally_xml" | "xlsx" | null>(null);
   const [showXlsxModal, setShowXlsxModal] = useState<boolean>(false);
   const [xlsxInitialPeriod, setXlsxInitialPeriod] = useState<{start: string, end: string} | null>(null);
   const [newPeriodDates, setNewPeriodDates] = useState({
@@ -560,18 +585,21 @@ export default function App() {
   const fetchEntities = useCallback(async () => {
     setErrorMsg(null);
     if (isMock) {
-      const saved = localStorage.getItem("mock_entities");
+      const isCurrentDemo = localStorage.getItem("demo_data_version") === DEMO_DATA_VERSION;
+      const saved = isCurrentDemo ? localStorage.getItem("mock_entities") : null;
       if (saved) {
         setEntities(JSON.parse(saved));
       } else {
         setEntities(INITIAL_MOCK_ENTITIES);
         localStorage.setItem("mock_entities", JSON.stringify(INITIAL_MOCK_ENTITIES));
+        localStorage.setItem("demo_data_version", DEMO_DATA_VERSION);
       }
+      setSelectedEntityId((current) => current ?? INITIAL_MOCK_ENTITIES[0].id);
     } else {
       setIsLoadingEntities(true);
       try {
         const res = await authFetch(`${BASE_URL}/entities`);
-        if (!res.ok) throw new Error("Failed to fetch entities from server");
+        if (!res.ok) throw await responseError(res, "Failed to fetch entities");
         const data = await res.json();
         const enriched = data.map((e: any) => ({
           ...e,
@@ -579,8 +607,8 @@ export default function App() {
           scrutinized: true,
         }));
         setEntities(enriched);
-      } catch (err: any) {
-        setErrorMsg(`API Error: ${err.message}. Fallback to Mock Mode for testing.`);
+      } catch (err: unknown) {
+        setErrorMsg(requestErrorMessage(err));
         setEntities([]);
       } finally {
         setIsLoadingEntities(false);
@@ -629,35 +657,26 @@ export default function App() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        if (!res.ok) throw new Error("Failed to create entity");
+        if (!res.ok) throw await responseError(res, "Failed to create entity");
         const created = await res.json();
         await fetchEntities();
         setSelectedEntityId(created.id);
         setShowAddModal(false);
-      } catch (err: any) {
-        setErrorMsg(err.message);
+      } catch (err: unknown) {
+        setErrorMsg(requestErrorMessage(err));
       }
     }
   };
 
   const fetchPeriods = useCallback(async (entityId: number) => {
     if (isMock) {
-      if (entityId === 1) {
-        const mockPeriods = [{ period_start: "2025-04-01", period_end: "2026-03-31" }];
-        setPeriods(mockPeriods);
-        setSelectedPeriod(mockPeriods[0]);
-      } else if (entityId === 3) {
-        const mockPeriods = [{ period_start: "2024-04-01", period_end: "2025-03-31" }];
-        setPeriods(mockPeriods);
-        setSelectedPeriod(mockPeriods[0]);
-      } else {
-        setPeriods([]);
-        setSelectedPeriod(null);
-      }
+      const mockPeriods = MOCK_PERIODS[entityId] || [];
+      setPeriods(mockPeriods);
+      setSelectedPeriod(mockPeriods[0] || null);
     } else {
       try {
         const res = await authFetch(`${BASE_URL}/entities/${entityId}/periods`);
-        if (!res.ok) throw new Error("Failed to fetch periods");
+        if (!res.ok) throw await responseError(res, "Failed to fetch periods");
         const data = await res.json();
         setPeriods(data);
         if (data.length > 0) {
@@ -665,8 +684,8 @@ export default function App() {
         } else {
           setSelectedPeriod(null);
         }
-      } catch (err: any) {
-        setErrorMsg(`Failed to load periods: ${err.message}`);
+      } catch (err: unknown) {
+        setErrorMsg(`Failed to load periods: ${requestErrorMessage(err)}`);
         setPeriods([]);
         setSelectedPeriod(null);
       }
@@ -693,14 +712,13 @@ export default function App() {
           body: formData,
         });
         if (!res.ok) {
-          const errData = await res.json();
-          throw new Error(errData.detail || "Failed to upload XML file");
+          throw await responseError(res, "Failed to upload XML file");
         }
         
         await fetchPeriods(selectedEntityId);
         if (fileInputRef.current) fileInputRef.current.value = "";
-      } catch (err: any) {
-        setErrorMsg(`Re-upload failed: ${err.message}`);
+      } catch (err: unknown) {
+        setErrorMsg(`Re-upload failed: ${requestErrorMessage(err)}`);
       } finally {
         setIsUploading(false);
       }
@@ -731,15 +749,14 @@ export default function App() {
           body: formData,
         });
         if (!res.ok) {
-          const errData = await res.json();
-          throw new Error(errData.detail || "Failed to upload XML file");
+          throw await responseError(res, "Failed to upload XML file");
         }
         
         setShowAddPeriodModal(false);
         setUploadSource(null);
         await fetchPeriods(selectedEntityId);
-      } catch (err: any) {
-        setErrorMsg(`Failed to add period: ${err.message}`);
+      } catch (err: unknown) {
+        setErrorMsg(`Failed to add period: ${requestErrorMessage(err)}`);
         setShowAddPeriodModal(false);
         setUploadSource(null);
       } finally {
@@ -765,7 +782,7 @@ export default function App() {
     if (isMock) {
       setTimeout(() => {
         setIsScrutinizing(false);
-        const mockExcs = MOCK_EXCEPTIONS[selectedEntityId] || [];
+        const mockExcs = loadDemoFindings(selectedEntityId, selectedPeriod.period_start);
         setExceptions(mockExcs);
         setHasRunScrutiny(true);
       }, 1500);
@@ -774,12 +791,12 @@ export default function App() {
         const res = await authFetch(`${BASE_URL}/entities/${selectedEntityId}/scrutiny-run?period_start=${selectedPeriod.period_start}&period_end=${selectedPeriod.period_end}`, {
           method: "POST",
         });
-        if (!res.ok) throw new Error("Scrutiny run failed");
+        if (!res.ok) throw await responseError(res, "Scrutiny run failed");
         
         await fetchExceptions(selectedEntityId, selectedPeriod.period_start, selectedPeriod.period_end);
         setHasRunScrutiny(true);
-      } catch (err: any) {
-        setErrorMsg(`Scrutiny run failed: ${err.message}`);
+      } catch (err: unknown) {
+        setErrorMsg(`Scrutiny run failed: ${requestErrorMessage(err)}`);
       } finally {
         setIsScrutinizing(false);
       }
@@ -811,15 +828,15 @@ export default function App() {
         const res = await authFetch(`${BASE_URL}/entities/${selectedEntityId}`, {
           method: "DELETE",
         });
-        if (!res.ok) throw new Error("Failed to delete client");
+        if (!res.ok) throw await responseError(res, "Failed to delete client");
         setEntities((prev) => prev.filter((e) => e.id !== selectedEntityId));
         setSelectedEntityId(null);
         setPeriods([]);
         setSelectedPeriod(null);
         setExceptions([]);
         setSelectedException(null);
-      } catch (err: any) {
-        setErrorMsg(`Failed to delete client: ${err.message}`);
+      } catch (err: unknown) {
+        setErrorMsg(`Failed to delete client: ${requestErrorMessage(err)}`);
       }
     }
   };
@@ -827,7 +844,7 @@ export default function App() {
   const fetchExceptions = useCallback(async (entityId: number, start?: string, end?: string) => {
     setIsLoadingExceptions(true);
     if (isMock) {
-      const mockExcs = MOCK_EXCEPTIONS[entityId] || [];
+      const mockExcs = loadDemoFindings(entityId, start);
       setExceptions(mockExcs);
       if (mockExcs.length > 0) {
         setHasRunScrutiny(true);
@@ -840,14 +857,14 @@ export default function App() {
           url += `?period_start=${start}&period_end=${end}`;
         }
         const res = await authFetch(url);
-        if (!res.ok) throw new Error("Failed to load exceptions");
+        if (!res.ok) throw await responseError(res, "Failed to load exceptions");
         const data = await res.json();
         setExceptions(data);
         if (data.length > 0) {
           setHasRunScrutiny(true);
         }
-      } catch (err: any) {
-        setErrorMsg(`Failed to load exceptions: ${err.message}`);
+      } catch (err: unknown) {
+        setErrorMsg(`Failed to load exceptions: ${requestErrorMessage(err)}`);
       } finally {
         setIsLoadingExceptions(false);
       }
@@ -885,13 +902,15 @@ export default function App() {
     if (selectedEntityId === null) return;
     setUpdatingExcId(exceptionId);
     if (isMock) {
-      setExceptions((prev) =>
-        prev.map((exc) =>
+      setExceptions((prev) => {
+        const updated = prev.map((exc) =>
           exc.id === exceptionId
             ? { ...exc, status: status as any, auditor_notes: notes }
             : exc
-        )
-      );
+        );
+        localStorage.setItem(demoFindingsKey(selectedEntityId, selectedPeriod?.period_start), JSON.stringify(updated));
+        return updated;
+      });
       setSelectedException((prev) =>
         prev && prev.id === exceptionId
           ? { ...prev, status: status as any, auditor_notes: notes }
@@ -910,7 +929,7 @@ export default function App() {
             auditor_notes: notes,
           }),
         });
-        if (!res.ok) throw new Error("Failed to update exception review state");
+        if (!res.ok) throw await responseError(res, "Failed to update exception review state");
         const updated = await res.json();
         setExceptions((prev) =>
           prev.map((exc) => (exc.id === exceptionId ? updated : exc))
@@ -918,8 +937,8 @@ export default function App() {
         setSelectedException((prev) =>
           prev && prev.id === exceptionId ? updated : prev
         );
-      } catch (err: any) {
-        setErrorMsg(`Failed to save review: ${err.message}`);
+      } catch (err: unknown) {
+        setErrorMsg(`Failed to save review: ${requestErrorMessage(err)}`);
       } finally {
         setUpdatingExcId(null);
       }
@@ -927,6 +946,22 @@ export default function App() {
   };
 
   const selectedEntity = entities.find((e) => e.id === selectedEntityId);
+
+  const resetDemoWorkspace = () => {
+    Object.keys(localStorage)
+      .filter((key) => key.startsWith(`demo_findings:${DEMO_DATA_VERSION}:`))
+      .forEach((key) => localStorage.removeItem(key));
+    localStorage.setItem("mock_entities", JSON.stringify(INITIAL_MOCK_ENTITIES));
+    setEntities(INITIAL_MOCK_ENTITIES);
+    setSelectedEntityId(INITIAL_MOCK_ENTITIES[0].id);
+    const currentPeriod = MOCK_PERIODS[INITIAL_MOCK_ENTITIES[0].id][0];
+    setPeriods(MOCK_PERIODS[INITIAL_MOCK_ENTITIES[0].id]);
+    setSelectedPeriod(currentPeriod);
+    setExceptions(getMockExceptions(INITIAL_MOCK_ENTITIES[0].id, currentPeriod.period_start));
+    setSelectedException(null);
+    setHasRunScrutiny(true);
+    setErrorMsg(null);
+  };
 
   const severityWeight: Record<string, number> = { critical: 3, error: 3, warning: 2, info: 1 };
   const formatSeverity = (sev: string) => (sev?.toLowerCase() === "error" ? "CRITICAL" : sev?.toUpperCase() || "");
@@ -962,6 +997,10 @@ export default function App() {
       return 0;
     });
 
+  const criticalFindings = exceptions.filter((finding) => ["critical", "error"].includes(finding.severity.toLowerCase())).length;
+  const reviewedFindings = exceptions.filter((finding) => finding.status !== "PENDING").length;
+  const reviewProgress = exceptions.length ? Math.round((reviewedFindings / exceptions.length) * 100) : 0;
+
   if (!isMock && !isAuthenticated) {
     return (
       <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
@@ -977,26 +1016,12 @@ export default function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-4 bg-slate-900 px-4 py-2 rounded-xl border border-slate-800 shadow-inner">
-            <div className="flex flex-col text-right">
-              <span className="text-xs text-slate-400 font-medium">Environment Mode</span>
-              <span className={`text-sm font-bold ${isMock ? "text-indigo-400" : "text-emerald-400"}`}>
-                {isMock ? "Mock Demonstration Mode" : "Live API (Postgres)"}
-              </span>
-            </div>
-            <button
-              onClick={() => setIsMock(!isMock)}
-              className={`w-14 h-7 flex items-center rounded-full p-1 cursor-pointer transition-colors duration-300 focus:outline-none ${
-                isMock ? "bg-indigo-600" : "bg-emerald-600"
-              }`}
-            >
-              <div
-                className={`bg-white w-5 h-5 rounded-full shadow-md transform transition-transform duration-300 ${
-                  isMock ? "translate-x-7" : "translate-x-0"
-                }`}
-              />
-            </button>
-          </div>
+          <button
+            onClick={() => setIsMock(true)}
+            className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-950/50 cursor-pointer"
+          >
+            Explore Fictional Demo
+          </button>
         </header>
 
         {/* AUTH SCREEN WITH GOOGLE GIS INTEGRATION */}
@@ -1020,28 +1045,36 @@ export default function App() {
           </div>
         </div>
 
-        {/* RIGHT CONTROLS: Mock Mode + User Badge & Logout */}
+        {/* RIGHT CONTROLS: Demo actions or live user session */}
         <div className="flex items-center gap-4">
-          <div className="flex items-center gap-4 bg-slate-900 px-4 py-2 rounded-xl border border-slate-800 shadow-inner">
-            <div className="flex flex-col text-right">
-              <span className="text-xs text-slate-400 font-medium">Environment Mode</span>
-              <span className={`text-sm font-bold ${isMock ? "text-indigo-400" : "text-emerald-400"}`}>
-                {isMock ? "Mock Demonstration Mode" : "Live API (Postgres)"}
+          {isMock && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold uppercase tracking-wider text-amber-300 bg-amber-950/60 border border-amber-800/60 px-3 py-2 rounded-xl">
+                Fictional demo data
               </span>
+              <button
+                onClick={resetDemoWorkspace}
+                className="text-xs font-semibold text-slate-300 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 px-3 py-2 rounded-xl cursor-pointer"
+              >
+                Reset Demo
+              </button>
+              <button
+                onClick={() => setIsMock(false)}
+                className="text-xs font-semibold text-indigo-300 hover:text-white bg-indigo-950/50 hover:bg-indigo-900 border border-indigo-800/60 px-3 py-2 rounded-xl cursor-pointer"
+              >
+                Live Workspace
+              </button>
             </div>
+          )}
+
+          {!isMock && isAuthenticated && (
             <button
-              onClick={() => setIsMock(!isMock)}
-              className={`w-14 h-7 flex items-center rounded-full p-1 cursor-pointer transition-colors duration-300 focus:outline-none ${
-                isMock ? "bg-indigo-600" : "bg-emerald-600"
-              }`}
+              onClick={() => setIsMock(true)}
+              className="text-xs font-semibold text-indigo-300 hover:text-white bg-indigo-950/50 border border-indigo-800/60 px-3 py-2 rounded-xl cursor-pointer"
             >
-              <div
-                className={`bg-white w-5 h-5 rounded-full shadow-md transform transition-transform duration-300 ${
-                  isMock ? "translate-x-7" : "translate-x-0"
-                }`}
-              />
+              View Demo
             </button>
-          </div>
+          )}
 
           {!isMock && isAuthenticated && (
             <div className="flex items-center gap-3 pl-4 border-l border-slate-800">
@@ -1167,6 +1200,11 @@ export default function App() {
                     <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-950 border border-indigo-800/60 text-indigo-300">
                       Materiality: ₹{selectedEntity.materiality_threshold.toLocaleString()}
                     </span>
+                    {isMock && (
+                      <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-950 border border-amber-800/60 text-amber-300">
+                        Fictional company
+                      </span>
+                    )}
                   </div>
                   <p className="text-xs text-slate-400 mt-1 m-0">Client Workspace ID: #{selectedEntity.id}</p>
                 </div>
@@ -1239,16 +1277,6 @@ export default function App() {
                           </svg>
                           Re-upload Excel ({formatPeriodLabel(selectedPeriod)})
                         </button>
-                      ) : selectedPeriod.source === "sap_gl_dump" ? (
-                        <button
-                          disabled
-                          className="bg-slate-800 text-slate-500 px-3.5 py-2 rounded-xl text-xs font-semibold border border-slate-700/60 flex items-center gap-1.5 cursor-not-allowed opacity-60"
-                        >
-                          <svg className="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                          </svg>
-                          Re-upload SAP ({formatPeriodLabel(selectedPeriod)})
-                        </button>
                       ) : (
                         <label className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer border border-slate-700/60 flex items-center gap-1.5">
                           <svg className="w-3.5 h-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1290,6 +1318,55 @@ export default function App() {
                   )}
                 </div>
               </div>
+
+              {/* SCRUTINY SUMMARY */}
+              {selectedPeriod && (
+                <div className="grid grid-cols-1 xl:grid-cols-[1fr_1.4fr] gap-4">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                    <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-4">
+                      <div className="text-2xl font-bold text-white">5</div>
+                      <div className="text-xxs font-bold uppercase tracking-wider text-slate-500 mt-1">Deterministic checks</div>
+                    </div>
+                    <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-4">
+                      <div className="text-2xl font-bold text-white">{exceptions.length}</div>
+                      <div className="text-xxs font-bold uppercase tracking-wider text-slate-500 mt-1">Material findings</div>
+                    </div>
+                    <div className="bg-slate-950/60 border border-rose-900/60 rounded-2xl p-4">
+                      <div className="text-2xl font-bold text-rose-300">{criticalFindings}</div>
+                      <div className="text-xxs font-bold uppercase tracking-wider text-slate-500 mt-1">Critical findings</div>
+                    </div>
+                    <div className="bg-slate-950/60 border border-emerald-900/60 rounded-2xl p-4">
+                      <div className="text-2xl font-bold text-emerald-300">{reviewProgress}%</div>
+                      <div className="text-xxs font-bold uppercase tracking-wider text-slate-500 mt-1">Review complete</div>
+                    </div>
+                  </div>
+
+                  <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-4 flex flex-col justify-center">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      {[
+                        ["1", "Data imported", true],
+                        ["2", "Scrutiny complete", hasRunScrutiny],
+                        ["3", "Auditor review", reviewedFindings > 0],
+                        ["4", "Ready to finalise", exceptions.length > 0 && reviewedFindings === exceptions.length],
+                      ].map(([number, label, complete], index) => (
+                        <React.Fragment key={String(label)}>
+                          <div className={`flex flex-col items-center gap-2 text-center ${complete ? "text-emerald-300" : "text-slate-500"}`}>
+                            <span className={`w-7 h-7 rounded-full border flex items-center justify-center font-bold ${complete ? "bg-emerald-950 border-emerald-700" : "bg-slate-900 border-slate-700"}`}>
+                              {complete ? "✓" : number}
+                            </span>
+                            <span className="font-semibold whitespace-nowrap">{label}</span>
+                          </div>
+                          {index < 3 && <div className={`h-px flex-1 ${complete ? "bg-emerald-800" : "bg-slate-800"}`} />}
+                        </React.Fragment>
+                      ))}
+                    </div>
+                    <div className="mt-3 pt-3 border-t border-slate-800 flex justify-between text-xxs uppercase tracking-wider text-slate-500">
+                      <span>Source: {selectedPeriod.source === "tally_xml" ? "Tally XML" : selectedPeriod.source || "Imported data"}</span>
+                      <span>Materiality-aware · Rule set v1</span>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               {/* AUDIT EXCEPTIONS SECTION */}
               <div className="flex-1 flex flex-col bg-slate-950/60 rounded-2xl border border-slate-800 p-5 shadow-xl overflow-hidden">
@@ -1417,7 +1494,8 @@ export default function App() {
 
                               {/* Rule Name */}
                               <td className="py-3 px-4 font-semibold text-indigo-300 whitespace-nowrap">
-                                {exc.rule_name}
+                                <div>{ruleLabel(exc.rule_name)}</div>
+                                <div className="text-xxs font-normal text-slate-600 mt-0.5">{exc.rule_name}</div>
                               </td>
 
                               {/* Message */}
@@ -1569,21 +1647,6 @@ export default function App() {
                   </div>
                 </button>
                 
-                <button
-                  disabled
-                  className="w-full flex items-center gap-3 p-4 rounded-xl bg-slate-900/50 border border-slate-800 opacity-60 cursor-not-allowed text-left relative overflow-hidden"
-                >
-                  <div className="p-2 bg-slate-700/50 text-slate-500 rounded-lg">
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
-                    </svg>
-                  </div>
-                  <div>
-                    <div className="font-bold text-slate-400 text-sm">SAP GL Dump</div>
-                    <div className="text-xs text-slate-500">Import raw SAP general ledger extract</div>
-                  </div>
-                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-bold uppercase tracking-wider text-slate-500 bg-slate-800 px-2 py-1 rounded">Coming Soon</span>
-                </button>
               </div>
             ) : uploadSource === "tally_xml" ? (
               <div className="space-y-4">
@@ -1675,7 +1738,10 @@ export default function App() {
                 </div>
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-slate-400 font-semibold">Rule Triggered:</span>
-                  <span className="font-bold text-indigo-300">{selectedException.rule_name}</span>
+                  <span className="font-bold text-indigo-300 text-right">
+                    {ruleLabel(selectedException.rule_name)}
+                    <span className="block text-xxs font-normal text-slate-500">{selectedException.rule_name}</span>
+                  </span>
                 </div>
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-slate-400 font-semibold">Severity:</span>

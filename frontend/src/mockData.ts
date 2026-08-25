@@ -20,90 +20,91 @@ export interface Exception {
   created_at: string;
 }
 
+export interface DemoPeriod {
+  period_start: string;
+  period_end: string;
+  source: string;
+}
+
+export const DEMO_DATA_VERSION = "pitch-demo-v1";
+
 export const INITIAL_MOCK_ENTITIES: Entity[] = [
   {
     id: 1,
-    name: "Acme Audited Corp",
+    name: "Meridian Components Private Limited — Demo",
     financial_year_start: "2025-04-01",
     financial_year_end: "2026-03-31",
-    materiality_threshold: 15000,
+    materiality_threshold: 100000,
     has_uploaded: true,
     scrutinized: true,
   },
-  {
-    id: 2,
-    name: "Rahul Enterprises",
-    financial_year_start: "2025-04-01",
-    financial_year_end: "2026-03-31",
-    materiality_threshold: 5000,
-    has_uploaded: false,
-    scrutinized: false,
-  },
-  {
-    id: 3,
-    name: "Verma Traders",
-    financial_year_start: "2024-04-01",
-    financial_year_end: "2025-03-31",
-    materiality_threshold: 20000,
-    has_uploaded: true,
-    scrutinized: false,
-  }
 ];
 
-export const MOCK_EXCEPTIONS: Record<number, Exception[]> = {
+export const MOCK_PERIODS: Record<number, DemoPeriod[]> = {
   1: [
+    { period_start: "2025-04-01", period_end: "2026-03-31", source: "tally_xml" },
+    { period_start: "2024-04-01", period_end: "2025-03-31", source: "tally_xml" },
+  ],
+};
+
+const MOCK_EXCEPTIONS: Record<string, Exception[]> = {
+  "1:2025-04-01": [
     {
       id: 101,
-      rule_name: "normal_balance_check",
-      severity: "critical",
-      message: "Account 'HDFC Bank' has normal balance 'debit' but has a credit closing balance of 45,000.00 (Unapproved Overdraft).",
-      ledger_account_name: "HDFC Bank",
+      rule_name: "opening_balance_continuity",
+      severity: "error",
+      message: "Plant & Machinery opens at ₹48,25,000, while the audited FY 2024-25 closing balance was ₹44,00,000. The unexplained continuity difference is ₹4,25,000.",
+      ledger_account_name: "Plant & Machinery",
       status: "PENDING",
       auditor_notes: null,
-      created_at: new Date().toISOString(),
+      created_at: "2026-04-02T09:15:00.000Z",
     },
     {
       id: 102,
-      rule_name: "opening_balance_continuity",
-      severity: "warning",
-      message: "Account 'Furniture and Fixtures' opening balance (1,50,000.00) does not match prior period closing balance (1,80,000.00). Continuity variance: 30,000.00.",
-      ledger_account_name: "Furniture and Fixtures",
+      rule_name: "negative_cash_balance",
+      severity: "error",
+      message: "Cash-in-hand has a ₹1,18,400 credit closing balance. Physical cash cannot ordinarily be negative and requires ledger correction or supporting evidence.",
+      ledger_account_name: "Cash-in-hand — Head Office",
       status: "PENDING",
       auditor_notes: null,
-      created_at: new Date().toISOString(),
+      created_at: "2026-04-02T09:15:01.000Z",
     },
     {
       id: 103,
-      rule_name: "normal_balance_check",
-      severity: "warning",
-      message: "Account 'Office Rent' has normal balance 'debit' but has a credit closing balance of 18,000.00 (Possible wrong accounting entry or prepayment code).",
-      ledger_account_name: "Office Rent",
-      status: "PENDING",
-      auditor_notes: null,
-      created_at: new Date().toISOString(),
+      rule_name: "suspense_account_nonzero",
+      severity: "error",
+      message: "Suspense Account retains a material ₹2,75,000 closing balance. Unallocated entries should be identified and resolved before finalisation.",
+      ledger_account_name: "Suspense Account",
+      status: "REVIEWED",
+      auditor_notes: "Management schedule requested; three journal entries are awaiting supporting invoices.",
+      created_at: "2026-04-02T09:15:02.000Z",
     },
     {
       id: 104,
       rule_name: "normal_balance_check",
-      severity: "info",
-      message: "Account 'Share Capital' has normal balance 'credit' but has a debit closing balance of 2,000.00 (Pending allotment call money).",
-      ledger_account_name: "Share Capital",
-      status: "PENDING",
-      auditor_notes: null,
-      created_at: new Date().toISOString(),
-    }
+      severity: "error",
+      message: "HDFC Current Account has a ₹6,80,000 credit closing balance although it is classified as a bank asset. Confirm whether this is an overdraft and reclassify if required.",
+      ledger_account_name: "HDFC Current Account",
+      status: "CLEARED",
+      auditor_notes: "Sanction letter inspected. Balance relates to a secured overdraft and is included in borrowings for finalisation.",
+      created_at: "2026-04-02T09:15:03.000Z",
+    },
   ],
-  2: [],
-  3: [
+  "1:2024-04-01": [
     {
-      id: 301,
-      rule_name: "normal_balance_check",
-      severity: "critical",
-      message: "Account 'Verma Traders' has normal balance 'credit' but has a debit closing balance of 25,000.00 (Debit variance).",
-      ledger_account_name: "Verma Traders",
-      status: "PENDING",
-      auditor_notes: null,
-      created_at: new Date().toISOString(),
-    }
-  ]
+      id: 201,
+      rule_name: "suspense_account_nonzero",
+      severity: "error",
+      message: "Suspense Account had a ₹1,40,000 closing balance at FY 2024-25 year end and required management allocation.",
+      ledger_account_name: "Suspense Account",
+      status: "CLEARED",
+      auditor_notes: "Adjusted through journal voucher JV-948 after invoice verification.",
+      created_at: "2025-04-03T11:30:00.000Z",
+    },
+  ],
 };
+
+export function getMockExceptions(entityId: number, periodStart?: string): Exception[] {
+  const findings = MOCK_EXCEPTIONS[`${entityId}:${periodStart || ""}`] || [];
+  return findings.map((finding) => ({ ...finding }));
+}
