@@ -23,7 +23,7 @@ app = FastAPI(
 @app.get("/health", tags=["operations"])
 def healthcheck():
     """Lightweight liveness endpoint for container orchestration."""
-    return {"status": "ok", "service": "ledger-scrutiny"}
+    return {"status": "ok", "service": "capex"}
 
 # Enforce authentication configuration, then create tables on startup for fresh local databases.
 @app.on_event("startup")

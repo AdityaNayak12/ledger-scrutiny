@@ -1,6 +1,6 @@
 # TallyPrime HTTP connector
 
-LedgerScrutiny reads a running TallyPrime instance through its supported
+CApex reads a running TallyPrime instance through its supported
 XML-over-HTTP interface. It does **not** read native `*.1800` company-data
 files.
 

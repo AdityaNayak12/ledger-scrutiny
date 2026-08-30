@@ -21,5 +21,5 @@ def test_static_rules_use_explicit_period_dates():
 
     exceptions = run_scrutiny(entity, accounts, snapshots, period_start, period_end)
 
-    assert {exception.rule_name for exception in exceptions} == {"normal_balance_check", "trial_balance_balances", "negative_cash_balance", "suspense_account_nonzero"}
+    assert {exception.rule_name for exception in exceptions} == {"normal_balance_check", "trial_balance_balances", "negative_cash_balance", "suspense_account_nonzero", "tds_liability_check"}
     assert all(exception.period_start == period_start and exception.period_end == period_end for exception in exceptions)

@@ -1,8 +1,8 @@
-# LedgerScrutiny pitch demo
+# CApex pitch demo
 
 ## Product promise
 
-LedgerScrutiny turns accounting data into a materiality-aware, review-ready
+CApex turns accounting data into a materiality-aware, review-ready
 exception register using deterministic and explainable checks.
 
 The built-in Meridian Components workspace is fictional demonstration data.
@@ -29,9 +29,26 @@ docker compose up --build
 ```
 
 The backend container applies Alembic migrations before FastAPI starts. Verify
-`http://localhost:8000/health` returns `{"status":"ok","service":"ledger-scrutiny"}`.
+`http://localhost:8000/health` returns `{"status":"ok","service":"capex"}`.
 
-## Three-minute walkthrough
+## Live manufacturing walkthrough
+
+1. Sign in to the live workspace and add a client.
+2. Enter fictional GSTIN `27DEMOX0000D1Z0`, run the simulated lookup, and
+   confirm the suggested Manufacturing v1 scrutiny pack.
+3. Set materiality to ₹1,00,000.
+4. Upload `sample_data/pitch_manufacturing_demo/meridian_fy2024_25.xml`, then
+   `meridian_fy2025_26.xml`.
+5. Select FY 2025-26 and run seven deterministic checks.
+6. Open the gross-margin finding and explain the disclosed 10 percentage-point
+   firm-policy threshold.
+7. Add an auditor note and mark the finding Reviewed.
+
+The GST response is deliberately simulated and labelled as such. The XML
+ingestion, normalization, persistence, rule execution, and review workflow all
+use the real application path.
+
+## Three-minute fallback walkthrough
 
 1. State that Meridian Components and every displayed amount are fictional.
 2. Point out the FY 2024-25 and FY 2025-26 periods and ₹1,00,000 materiality.

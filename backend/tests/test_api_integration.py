@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from decimal import Decimal
 from datetime import date
 import pytest
@@ -27,6 +28,80 @@ def test_error_responses_include_local_cors_headers():
 
     assert response.status_code == 401
     assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+
+def test_demo_gst_profile_selects_manufacturing_pack(monkeypatch):
+    headers = get_auth_headers()
+    monkeypatch.setenv("GST_LOOKUP_MODE", "demo")
+
+    lookup = client.post("/gst-profile/lookup", json={"gstin": "27DEMOX0000D1Z0"}, headers=headers)
+    assert lookup.status_code == 200
+    profile = lookup.json()
+    assert profile["simulated"] is True
+    assert profile["core_business_activity"] == "Manufacturer"
+    assert profile["suggested_rule_pack"] == "manufacturing_v1"
+
+    created = client.post("/entities", json={
+        "name": profile["legal_name"],
+        "materiality_threshold": "100000.00",
+        "gstin": profile["gstin"],
+        "sector": profile["suggested_sector"],
+        "rule_pack": profile["suggested_rule_pack"],
+    }, headers=headers)
+    assert created.status_code == 201
+    assert created.json()["rule_pack"] == "manufacturing_v1"
+
+
+def test_manufacturing_pitch_files_produce_five_expected_findings(monkeypatch):
+    headers = get_auth_headers()
+    monkeypatch.setenv("GST_LOOKUP_MODE", "demo")
+    entity = client.post("/entities", json={
+        "name": "Meridian Components Private Limited — Fictional Demo",
+        "materiality_threshold": "100000.00",
+        "gstin": "27DEMOX0000D1Z0",
+        "sector": "manufacturing",
+        "rule_pack": "manufacturing_v1",
+    }, headers=headers).json()
+    fixture_dir = Path(__file__).parents[2] / "sample_data" / "pitch_manufacturing_demo"
+
+    for filename, start, end in (
+        ("meridian_fy2024_25.xml", "2024-04-01", "2025-03-31"),
+        ("meridian_fy2025_26.xml", "2025-04-01", "2026-03-31"),
+    ):
+        with (fixture_dir / filename).open("rb") as file_handle:
+            response = client.post(
+                f"/entities/{entity['id']}/upload",
+                params={"clear_only_period": "true", "target_period_start": start, "target_period_end": end},
+                files={"file": (filename, file_handle, "text/xml")},
+                headers=headers,
+            )
+        assert response.status_code == 200, response.text
+
+    run = client.post(
+        f"/entities/{entity['id']}/scrutiny-run",
+        params={"period_start": "2025-04-01", "period_end": "2026-03-31"},
+        headers=headers,
+    )
+    assert run.status_code == 200, run.text
+    assert run.json()["exceptions_count"] == 8
+
+    findings = client.get(
+        f"/entities/{entity['id']}/exceptions",
+        params={"period_start": "2025-04-01", "period_end": "2026-03-31"},
+        headers=headers,
+    ).json()
+    assert {finding["rule_name"] for finding in findings} == {
+        "current_account_credit_balance",
+        "opening_balance_continuity",
+        "suspense_account_nonzero",
+        "manufacturing_low_inventory_movement",
+        "manufacturing_gross_margin_shift", "tds_liability_check", "creditor_debit_balance", "debtor_credit_balance",
+    }
+    margin = next(finding for finding in findings if finding["rule_name"] == "manufacturing_gross_margin_shift")
+    assert "27.5%" in margin["message"]
+    assert "10.2%" in margin["message"]
+    inventory = next(finding for finding in findings if finding["rule_name"] == "manufacturing_low_inventory_movement")
+    assert "1% of COGS" in inventory["message"]
 
 
 def test_api_entities_lifecycle_flow():
@@ -364,7 +439,8 @@ def test_api_preserve_notes_multiple_exceptions_for_same_account(monkeypatch):
 
     from app.db.models import AuditException
 
-    def mock_run_scrutiny(entity, accounts, snapshots, period_start, period_end):
+    def mock_run_scrutiny(entity, accounts, snapshots, period_start, period_end, rule_pack=None):
+        del snapshots, period_start, period_end, rule_pack
         cash_acc = next(a for a in accounts if a.name == "Cash")
         return [
             AuditException(

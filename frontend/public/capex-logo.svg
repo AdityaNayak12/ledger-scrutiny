@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 72" role="img" aria-labelledby="title desc">
+  <title id="title">CApex</title>
+  <desc id="desc">CApex radial mark and wordmark</desc>
+  <g fill="none" stroke="#f4f6fb" stroke-linecap="round" stroke-width="1.7">
+    <path d="M48 8v11M48 8l3.4 10.5M48 8l-3.4 10.5M39.6 10.1l6.1 9M56.4 10.1l-6.1 9M33.8 15.5l10.8 5.3M62.2 15.5l-10.8 5.3M31 22.5l13.8 1.2M65 22.5l-13.8 1.2M32.2 29.6l12.6-3.7M63.8 29.6l-12.6-3.7" />
+    <circle cx="48" cy="23" r="2.1" fill="#f4f6fb" stroke="none" />
+  </g>
+  <text x="48" y="48" fill="#f4f6fb" font-family="Georgia, 'Times New Roman', serif" font-size="16" font-weight="700" text-anchor="middle">CApex</text>
+</svg>

@@ -5,6 +5,9 @@ export interface Entity {
   financial_year_start: string;
   financial_year_end: string;
   materiality_threshold: number;
+  gstin?: string | null;
+  sector?: string | null;
+  rule_pack?: string | null;
   has_uploaded: boolean;
   scrutinized: boolean;
 }
@@ -26,7 +29,7 @@ export interface DemoPeriod {
   source: string;
 }
 
-export const DEMO_DATA_VERSION = "pitch-demo-v1";
+export const DEMO_DATA_VERSION = "pitch-demo-v2";
 
 export const INITIAL_MOCK_ENTITIES: Entity[] = [
   {
@@ -35,6 +38,9 @@ export const INITIAL_MOCK_ENTITIES: Entity[] = [
     financial_year_start: "2025-04-01",
     financial_year_end: "2026-03-31",
     materiality_threshold: 100000,
+    gstin: "27DEMOX0000D1Z0",
+    sector: "manufacturing",
+    rule_pack: "manufacturing_v1",
     has_uploaded: true,
     scrutinized: true,
   },
@@ -61,10 +67,10 @@ const MOCK_EXCEPTIONS: Record<string, Exception[]> = {
     },
     {
       id: 102,
-      rule_name: "negative_cash_balance",
-      severity: "error",
-      message: "Cash-in-hand has a ₹1,18,400 credit closing balance. Physical cash cannot ordinarily be negative and requires ledger correction or supporting evidence.",
-      ledger_account_name: "Cash-in-hand — Head Office",
+      rule_name: "manufacturing_low_inventory_movement",
+      severity: "warning",
+      message: "Material inventory moved by only ₹30,000 against COGS of ₹1,34,70,000. This is within the Manufacturing v1 firm-policy tolerance of 1% of COGS (₹1,34,700). Review inventory valuation and cut-off.",
+      ledger_account_name: null,
       status: "PENDING",
       auditor_notes: null,
       created_at: "2026-04-02T09:15:01.000Z",
@@ -88,6 +94,16 @@ const MOCK_EXCEPTIONS: Record<string, Exception[]> = {
       status: "CLEARED",
       auditor_notes: "Sanction letter inspected. Balance relates to a secured overdraft and is included in borrowings for finalisation.",
       created_at: "2026-04-02T09:15:03.000Z",
+    },
+    {
+      id: 105,
+      rule_name: "manufacturing_gross_margin_shift",
+      severity: "warning",
+      message: "Gross margin moved from 27.5% in the prior period to 10.2% in the current period (17.3 percentage points). This exceeds the Manufacturing v1 firm-policy threshold of 10 percentage points.",
+      ledger_account_name: null,
+      status: "PENDING",
+      auditor_notes: null,
+      created_at: "2026-04-02T09:15:04.000Z",
     },
   ],
   "1:2024-04-01": [

@@ -1,6 +1,7 @@
 import re
 import json
 import hashlib
+import os
 from typing import Optional, List
 from decimal import Decimal
 from datetime import datetime, date, timezone
@@ -16,7 +17,7 @@ from app.ingestion.tally_parser import parse_tally_xml
 from app.ingestion.tally_http import TallyConnectorError, fetch_trial_balance
 from app.ingestion.tally_normalizer import normalize_tally_data
 from app.ingestion.xlsx_normalizer import normalize_xlsx_confirm
-from app.rules.engine import RULE_SET_VERSION, run_scrutiny
+from app.rules.engine import rule_set_version, run_scrutiny
 from app.auth.security import get_current_user
 
 # Router without prefix to match the exact URL layout
@@ -29,12 +30,18 @@ router = APIRouter(
 class EntityCreate(BaseModel):
     name: str
     materiality_threshold: Decimal
+    gstin: Optional[str] = None
+    sector: Optional[str] = None
+    rule_pack: Optional[str] = None
 
 
 class EntityResponse(BaseModel):
     id: int
     name: str
     materiality_threshold: Decimal
+    gstin: Optional[str] = None
+    sector: Optional[str] = None
+    rule_pack: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -85,6 +92,24 @@ class ScrutinyRunSummary(BaseModel):
     scrutiny_run_id: Optional[int] = None
 
 
+class GSTProfileLookupRequest(BaseModel):
+    gstin: str
+
+
+class GSTProfileResponse(BaseModel):
+    gstin: str
+    legal_name: str
+    trade_name: str
+    registration_status: str
+    constitution: str
+    nature_of_business: List[str]
+    core_business_activity: str
+    suggested_sector: str
+    suggested_rule_pack: str
+    source: str
+    simulated: bool
+
+
 def finding_fingerprint(exception: AuditException) -> str:
     """Stable identity across reruns while allowing amounts in messages to change."""
     canonical_message = re.sub(r"[-+]?\d[\d,]*(?:\.\d+)?", "#", exception.message.lower())
@@ -93,6 +118,40 @@ def finding_fingerprint(exception: AuditException) -> str:
 
 
 # --- Entity management endpoints ---
+
+DEMO_GSTIN = "27DEMOX0000D1Z0"
+
+
+@router.post("/gst-profile/lookup", response_model=GSTProfileResponse)
+def lookup_gst_profile(
+    request: GSTProfileLookupRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Return the explicit fictional GST profile used by the pitch environment."""
+    del current_user
+    if os.getenv("GST_LOOKUP_MODE", "").lower() != "demo":
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GST lookup provider is not configured. Set GST_LOOKUP_MODE=demo only for the fictional pitch profile.",
+        )
+    if request.gstin.strip().upper() != DEMO_GSTIN:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Demo GST lookup only supports the fictional identifier {DEMO_GSTIN}.",
+        )
+    return GSTProfileResponse(
+        gstin=DEMO_GSTIN,
+        legal_name="Meridian Components Private Limited — Fictional Demo",
+        trade_name="Meridian Components",
+        registration_status="ACTIVE (SIMULATED)",
+        constitution="Private Limited Company",
+        nature_of_business=["Factory / Manufacturing", "Wholesale Business"],
+        core_business_activity="Manufacturer",
+        suggested_sector="manufacturing",
+        suggested_rule_pack="manufacturing_v1",
+        source="FICTIONAL_DEMO_REGISTRY",
+        simulated=True,
+    )
 
 @router.get("/entities", response_model=List[EntityResponse])
 def list_entities(
@@ -112,10 +171,17 @@ def create_entity(
     db: Session = Depends(get_db)
 ):
     """Create a new business entity associated with the user's organization."""
+    if entity_in.rule_pack not in (None, "manufacturing_v1"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unsupported scrutiny rule pack.")
+    if entity_in.rule_pack == "manufacturing_v1" and entity_in.sector != "manufacturing":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Manufacturing v1 requires the manufacturing sector.")
     entity = Entity(
         organization_id=current_user.organization_id,
         name=entity_in.name,
-        materiality_threshold=entity_in.materiality_threshold
+        materiality_threshold=entity_in.materiality_threshold,
+        gstin=entity_in.gstin.strip().upper() if entity_in.gstin else None,
+        sector=entity_in.sector,
+        rule_pack=entity_in.rule_pack,
     )
     db.add(entity)
     db.commit()
@@ -519,13 +585,13 @@ def trigger_scrutiny_run(
         financial_period_id=financial_period.id,
         import_batch_id=active_batch.id,
         triggered_by_user_id=current_user.id,
-        rule_set_version=RULE_SET_VERSION,
+        rule_set_version=rule_set_version(entity.rule_pack),
         status="RUNNING",
     )
     db.add(scrutiny_run)
     db.flush()
 
-    exceptions = run_scrutiny(entity, accounts, snapshots, period_start, period_end)
+    exceptions = run_scrutiny(entity, accounts, snapshots, period_start, period_end, entity.rule_pack)
 
     for exc in exceptions:
         exc.period_start = period_start
@@ -546,7 +612,11 @@ def trigger_scrutiny_run(
         db.add(exc)
     scrutiny_run.status = "COMPLETED"
     scrutiny_run.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
-    scrutiny_run.summary = {"exceptions_count": len(exceptions), "rule_set_version": scrutiny_run.rule_set_version}
+    scrutiny_run.summary = {
+        "exceptions_count": len(exceptions),
+        "rule_set_version": scrutiny_run.rule_set_version,
+        "rule_pack": entity.rule_pack,
+    }
     db.commit()
 
     return ScrutinyRunSummary(
