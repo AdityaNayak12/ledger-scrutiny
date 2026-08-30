@@ -66,7 +66,7 @@ def test_xlsx_confirm_produces_identical_exceptions_to_xml_fixture(auth_headers,
         headers=auth_headers
     )
     assert run_res.status_code == 200, f"Scrutiny run failed: {run_res.text}"
-    assert run_res.json()["exceptions_count"] == 4
+    assert run_res.json()["exceptions_count"] == 5
 
     # Fetch exceptions
     exc_res = client.get(

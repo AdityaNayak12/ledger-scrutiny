@@ -1,3 +1,165 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  font-family: Georgia, "Times New Roman", serif;
+  color: #dce5f5;
+  background: #070d1c;
+  font-synthesis: none;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  background: #070d1c;
+}
+
+html,
+#root {
+  min-height: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+.app-shell {
+  width: 100%;
+  min-height: 100vh;
+  margin: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: #0b1428;
+  box-shadow: none;
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+.app-shell header {
+  padding: 14px 18px;
+  background: #0d1830 !important;
+  border-bottom-color: #27466f !important;
+  box-shadow: none !important;
+}
+
+.app-shell main {
+  min-height: 0;
+  background: #0b1428;
+}
+
+.app-shell aside {
+  width: 220px;
+  flex-shrink: 0;
+  padding: 18px;
+  background: #0d1830 !important;
+  border-right-color: #27466f !important;
+}
+
+.app-shell section {
+  padding: 28px;
+  background: #0b1428 !important;
+}
+
+.app-shell h1,
+.app-shell h2,
+.app-shell h3,
+.app-shell h4 {
+  font-family: Georgia, "Times New Roman", serif;
+  letter-spacing: -0.025em;
+}
+
+.app-shell [class*="bg-slate-950"],
+.app-shell [class*="bg-slate-900"] {
+  background-color: #111f3a !important;
+}
+
+.app-shell [class*="border-slate-8"],
+.app-shell [class*="border-slate-7"] {
+  border-color: #29496f !important;
+}
+
+.app-shell .rounded-xl,
+.app-shell .rounded-2xl,
+.app-shell .rounded-3xl {
+  border-radius: 2px;
+}
+
+.app-shell .bg-indigo-600 {
+  background-color: #193c6c !important;
+}
+
+.app-shell .hover\:bg-indigo-500:hover {
+  background-color: #24568f !important;
+}
+
+.app-shell .text-indigo-300,
+.app-shell .text-indigo-400 {
+  color: #83b9e8 !important;
+}
+
+.app-shell .text-slate-400,
+.app-shell .text-slate-500 {
+  color: #9aabc3 !important;
+}
+
+.app-shell .text-white,
+.app-shell .text-slate-100,
+.app-shell .text-slate-200 {
+  color: #e7edf8 !important;
+}
+
+.workpaper-backdrop {
+  background-color: rgba(7, 13, 28, 0.44) !important;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+.app-shell .font-bold {
+  font-weight: 700;
+}
+
+.app-shell .text-xxs,
+.app-shell .uppercase,
+.app-shell [class*="tracking-wider"] {
+  font-family: "DM Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    width: 100%;
+    min-height: 100vh;
+    margin: 0;
+    border-width: 0;
+    border-radius: 0;
+  }
+
+  .app-shell main {
+    flex-direction: column;
+  }
+
+  .app-shell aside {
+    width: auto;
+    max-height: 230px;
+    border-right: 0;
+    border-bottom: 1px solid #27466f;
+  }
+
+  .app-shell section {
+    padding: 18px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell *,
+  .app-shell *::before,
+  .app-shell *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

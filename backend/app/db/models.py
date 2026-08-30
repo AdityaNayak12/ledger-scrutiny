@@ -52,6 +52,9 @@ class Entity(Base):
     organization_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     materiality_threshold: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
+    gstin: Mapped[Optional[str]] = mapped_column(String(15), nullable=True)
+    sector: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    rule_pack: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
     # Relationships
     organization: Mapped["Organization"] = relationship("Organization", back_populates="entities")

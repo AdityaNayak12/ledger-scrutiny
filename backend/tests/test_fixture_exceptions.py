@@ -65,7 +65,7 @@ def test_fixture_exceptions_matching_requirements():
         assert "Rahul Enterprises" in exc_names_low
         assert "Verma Traders" in exc_names_low
         assert "Petty Cash Variance" in exc_names_low
-        assert len(exceptions_low_materiality) == 4
+        assert len(exceptions_low_materiality) == 5
 
     finally:
         session.close()
@@ -95,7 +95,7 @@ def test_normal_balance_check_materiality_exempt():
             snapshots = session.query(TrialBalanceSnapshot).filter_by(entity_id=entity.id).all()
 
             exceptions = run_scrutiny(entity, accounts, snapshots, parsed_data["entity"]["financial_year_start"], parsed_data["entity"]["financial_year_end"])
-            normal_balance_exceptions = [e for e in exceptions if e.rule_name == "normal_balance_check"]
+            normal_balance_exceptions = [e for e in exceptions if e.rule_name in {"normal_balance_check", "creditor_debit_balance", "debtor_credit_balance", "current_account_credit_balance"}]
             acc_name_map = {acc.id: acc.name for acc in accounts}
 
             # Gather all account names with exceptions

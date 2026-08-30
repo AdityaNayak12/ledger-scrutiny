@@ -10,6 +10,7 @@ declare global {
 }
 
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/$/, "");
+const DEMO_GSTIN = "27DEMOX0000D1Z0";
 
 const RULE_LABELS: Record<string, string> = {
   normal_balance_check: "Abnormal balance",
@@ -17,7 +18,23 @@ const RULE_LABELS: Record<string, string> = {
   trial_balance_balances: "Trial balance integrity",
   negative_cash_balance: "Negative cash",
   suspense_account_nonzero: "Unresolved suspense balance",
+  manufacturing_low_inventory_movement: "Low inventory movement",
+  manufacturing_gross_margin_shift: "Gross-margin movement",
 };
+
+interface GSTProfile {
+  gstin: string;
+  legal_name: string;
+  trade_name: string;
+  registration_status: string;
+  constitution: string;
+  nature_of_business: string[];
+  core_business_activity: string;
+  suggested_sector: string;
+  suggested_rule_pack: string;
+  source: string;
+  simulated: boolean;
+}
 
 const ruleLabel = (ruleName: string) => RULE_LABELS[ruleName] || ruleName.replaceAll("_", " ");
 
@@ -28,7 +45,7 @@ const responseError = async (response: Response, fallback: string) => {
 
 const requestErrorMessage = (error: unknown) => {
   if (error instanceof TypeError && error.message === "Failed to fetch") {
-    return `Cannot reach the LedgerScrutiny API at ${BASE_URL}. Verify that the backend is running and allows this browser origin.`;
+    return `Cannot reach the CApex API at ${BASE_URL}. Verify that the backend is running and allows this browser origin.`;
   }
   return error instanceof Error ? error.message : "Unexpected request failure";
 };
@@ -552,7 +569,13 @@ export default function App() {
   const [newEntity, setNewEntity] = useState({
     name: "",
     materiality_threshold: "15000",
+    gstin: "",
+    sector: "",
+    rule_pack: "",
   });
+  const [gstProfile, setGstProfile] = useState<GSTProfile | null>(null);
+  const [isLookingUpGst, setIsLookingUpGst] = useState(false);
+  const [isGstPackConfirmed, setIsGstPackConfirmed] = useState(false);
   // Period management states
   const [periods, setPeriods] = useState<{ period_start: string; period_end: string; source?: string }[]>([]);
   const [selectedPeriod, setSelectedPeriod] = useState<{ period_start: string; period_end: string; source?: string } | null>(null);
@@ -565,6 +588,15 @@ export default function App() {
     end: "2027-03-31"
   });
   const [hasRunScrutiny, setHasRunScrutiny] = useState<boolean>(false);
+
+  const switchWorkspace = (mock: boolean) => {
+    setSelectedEntityId(null);
+    setPeriods([]);
+    setSelectedPeriod(null);
+    setExceptions([]);
+    setErrorMsg(null);
+    setIsMock(mock);
+  };
 
   useEffect(() => {
     setHasRunScrutiny(false);
@@ -607,6 +639,7 @@ export default function App() {
           scrutinized: true,
         }));
         setEntities(enriched);
+        setSelectedEntityId((current) => current && enriched.some((entity: Entity) => entity.id === current) ? current : enriched[0]?.id ?? null);
       } catch (err: unknown) {
         setErrorMsg(requestErrorMessage(err));
         setEntities([]);
@@ -616,6 +649,42 @@ export default function App() {
     }
   }, [isMock, authFetch]);
 
+  const resetNewEntityForm = () => {
+    setNewEntity({ name: "", materiality_threshold: "15000", gstin: "", sector: "", rule_pack: "" });
+    setGstProfile(null);
+    setIsGstPackConfirmed(false);
+  };
+
+  const handleGstLookup = async () => {
+    if (!newEntity.gstin.trim() || isMock) return;
+    setErrorMsg(null);
+    setIsLookingUpGst(true);
+    setGstProfile(null);
+    setIsGstPackConfirmed(false);
+    try {
+      const response = await authFetch(`${BASE_URL}/gst-profile/lookup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ gstin: newEntity.gstin.trim() }),
+      });
+      if (!response.ok) throw await responseError(response, "GST profile lookup failed");
+      const profile: GSTProfile = await response.json();
+      setGstProfile(profile);
+      setNewEntity((current) => ({
+        ...current,
+        name: profile.legal_name,
+        materiality_threshold: "100000",
+        gstin: profile.gstin,
+        sector: profile.suggested_sector,
+        rule_pack: profile.suggested_rule_pack,
+      }));
+    } catch (error: unknown) {
+      setErrorMsg(`GST lookup failed: ${requestErrorMessage(error)}`);
+    } finally {
+      setIsLookingUpGst(false);
+    }
+  };
+
   const handleCreateEntity = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -623,10 +692,17 @@ export default function App() {
     const payload = {
       name: newEntity.name.trim(),
       materiality_threshold: parseFloat(newEntity.materiality_threshold) || 0,
+      gstin: isGstPackConfirmed ? newEntity.gstin : null,
+      sector: isGstPackConfirmed ? newEntity.sector : null,
+      rule_pack: isGstPackConfirmed ? newEntity.rule_pack : null,
     };
 
     if (!payload.name) {
       setErrorMsg("Entity name is required");
+      return;
+    }
+    if (gstProfile && !isGstPackConfirmed) {
+      setErrorMsg("Confirm the GST-suggested Manufacturing v1 pack before creating this client.");
       return;
     }
 
@@ -638,6 +714,9 @@ export default function App() {
         financial_year_start: "2025-04-01",
         financial_year_end: "2026-03-31",
         materiality_threshold: payload.materiality_threshold,
+        gstin: payload.gstin,
+        sector: payload.sector,
+        rule_pack: payload.rule_pack,
         has_uploaded: false,
         scrutinized: false,
       };
@@ -646,10 +725,7 @@ export default function App() {
       localStorage.setItem("mock_entities", JSON.stringify(updated));
       setSelectedEntityId(created.id);
       setShowAddModal(false);
-      setNewEntity({
-        name: "",
-        materiality_threshold: "15000",
-      });
+      resetNewEntityForm();
     } else {
       try {
         const res = await authFetch(`${BASE_URL}/entities`, {
@@ -662,6 +738,7 @@ export default function App() {
         await fetchEntities();
         setSelectedEntityId(created.id);
         setShowAddModal(false);
+        resetNewEntityForm();
       } catch (err: unknown) {
         setErrorMsg(requestErrorMessage(err));
       }
@@ -1003,21 +1080,19 @@ export default function App() {
 
   if (!isMock && !isAuthenticated) {
     return (
-      <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
+      <div className="app-shell min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
         {/* HEADER NAVBAR */}
         <header className="bg-slate-950 border-b border-slate-800 py-4 px-6 flex items-center justify-between shadow-lg">
           <div className="flex items-center gap-3">
-            <div className="bg-indigo-600 text-white rounded-lg p-2 font-bold text-lg tracking-wider shadow-md shadow-indigo-900/50">
-              LS
-            </div>
+            <img src="/capex-logo.svg" alt="CApex" className="h-12 w-16 object-contain" />
             <div>
-              <h1 className="text-xl font-bold tracking-tight text-white m-0">LedgerScrutiny</h1>
+              <h1 className="text-xl font-bold tracking-tight text-white m-0">CApex</h1>
               <p className="text-xs text-indigo-400 font-semibold tracking-wider uppercase">CA Pre-Audit Scrutiny Engine</p>
             </div>
           </div>
 
           <button
-            onClick={() => setIsMock(true)}
+            onClick={() => switchWorkspace(true)}
             className="bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-xl text-xs font-bold transition-all shadow-lg shadow-indigo-950/50 cursor-pointer"
           >
             Explore Fictional Demo
@@ -1031,16 +1106,14 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
+    <div className="app-shell min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
       
       {/* HEADER NAVBAR */}
       <header className="bg-slate-950 border-b border-slate-800 py-4 px-6 flex items-center justify-between shadow-lg sticky top-0 z-40">
         <div className="flex items-center gap-3">
-          <div className="bg-indigo-600 text-white rounded-lg p-2 font-bold text-lg tracking-wider shadow-md shadow-indigo-900/50">
-            LS
-          </div>
+          <img src="/capex-logo.svg" alt="CApex" className="h-12 w-16 object-contain" />
           <div>
-            <h1 className="text-xl font-bold tracking-tight text-white m-0">LedgerScrutiny</h1>
+            <h1 className="text-xl font-bold tracking-tight text-white m-0">CApex</h1>
             <p className="text-xs text-indigo-400 font-semibold tracking-wider uppercase">CA Pre-Audit Scrutiny Engine</p>
           </div>
         </div>
@@ -1059,7 +1132,7 @@ export default function App() {
                 Reset Demo
               </button>
               <button
-                onClick={() => setIsMock(false)}
+                onClick={() => switchWorkspace(false)}
                 className="text-xs font-semibold text-indigo-300 hover:text-white bg-indigo-950/50 hover:bg-indigo-900 border border-indigo-800/60 px-3 py-2 rounded-xl cursor-pointer"
               >
                 Live Workspace
@@ -1069,7 +1142,7 @@ export default function App() {
 
           {!isMock && isAuthenticated && (
             <button
-              onClick={() => setIsMock(true)}
+              onClick={() => switchWorkspace(true)}
               className="text-xs font-semibold text-indigo-300 hover:text-white bg-indigo-950/50 border border-indigo-800/60 px-3 py-2 rounded-xl cursor-pointer"
             >
               View Demo
@@ -1123,10 +1196,7 @@ export default function App() {
             <h2 className="text-sm font-semibold tracking-wider uppercase text-slate-400 m-0">Client Entities</h2>
             <button
               onClick={() => {
-                setNewEntity({
-                  name: "",
-                  materiality_threshold: "15000",
-                });
+                resetNewEntityForm();
                 setShowAddModal(true);
               }}
               className="bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg px-2.5 py-1 text-xs font-bold transition-all shadow-md shadow-indigo-900/30 flex items-center gap-1 cursor-pointer"
@@ -1205,8 +1275,16 @@ export default function App() {
                         Fictional company
                       </span>
                     )}
+                    {selectedEntity.rule_pack === "manufacturing_v1" && (
+                      <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-cyan-950 border border-cyan-800/60 text-cyan-300">
+                        Manufacturing · v1
+                      </span>
+                    )}
                   </div>
-                  <p className="text-xs text-slate-400 mt-1 m-0">Client Workspace ID: #{selectedEntity.id}</p>
+                  <p className="text-xs text-slate-400 mt-1 m-0">
+                    Client Workspace ID: #{selectedEntity.id}
+                    {selectedEntity.gstin && <> · GST profile: {selectedEntity.gstin} {selectedEntity.gstin === DEMO_GSTIN && "(simulated)"}</>}
+                  </p>
                 </div>
 
                 {/* ACTION BUTTONS */}
@@ -1324,7 +1402,7 @@ export default function App() {
                 <div className="grid grid-cols-1 xl:grid-cols-[1fr_1.4fr] gap-4">
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-4">
-                      <div className="text-2xl font-bold text-white">5</div>
+                      <div className="text-2xl font-bold text-white">{selectedEntity.rule_pack === "manufacturing_v1" ? 7 : 5}</div>
                       <div className="text-xxs font-bold uppercase tracking-wider text-slate-500 mt-1">Deterministic checks</div>
                     </div>
                     <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-4">
@@ -1362,7 +1440,9 @@ export default function App() {
                     </div>
                     <div className="mt-3 pt-3 border-t border-slate-800 flex justify-between text-xxs uppercase tracking-wider text-slate-500">
                       <span>Source: {selectedPeriod.source === "tally_xml" ? "Tally XML" : selectedPeriod.source || "Imported data"}</span>
-                      <span>Materiality-aware · Rule set v1</span>
+                      <span>
+                        Materiality-aware · {selectedEntity.rule_pack === "manufacturing_v1" ? "Core + Manufacturing v1" : "Core v1"}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -1457,7 +1537,7 @@ export default function App() {
                       <thead>
                         <tr className="border-b border-slate-800 text-slate-400 font-semibold uppercase tracking-wider text-xxs bg-slate-900/60 sticky top-0 z-10">
                           <th className="py-3 px-4">Severity</th>
-                          <th className="py-3 px-4">Ledger Account</th>
+                          <th className="py-3 px-4">Scope / Ledger Account</th>
                           <th className="py-3 px-4">Scrutiny Rule</th>
                           <th className="py-3 px-4">Exception Description</th>
                           <th className="py-3 px-4">Status</th>
@@ -1488,7 +1568,9 @@ export default function App() {
                               {/* Ledger Account */}
                               <td className="py-3 px-4 font-bold text-slate-200 whitespace-nowrap">
                                 {exc.ledger_account_name || (
-                                  <span className="text-slate-500 italic font-normal">N/A (Entity-wide)</span>
+                                  <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xxs font-bold uppercase tracking-wider text-slate-300 bg-slate-800 border border-slate-700">
+                                    Entity-wide
+                                  </span>
                                 )}
                               </td>
 
@@ -1496,6 +1578,11 @@ export default function App() {
                               <td className="py-3 px-4 font-semibold text-indigo-300 whitespace-nowrap">
                                 <div>{ruleLabel(exc.rule_name)}</div>
                                 <div className="text-xxs font-normal text-slate-600 mt-0.5">{exc.rule_name}</div>
+                                {exc.rule_name.startsWith("manufacturing_") && (
+                                  <span className="inline-flex mt-1 px-2 py-0.5 rounded-full text-xxs font-bold uppercase tracking-wider bg-cyan-950 text-cyan-300 border border-cyan-800/60">
+                                    Manufacturing scrutiny
+                                  </span>
+                                )}
                               </td>
 
                               {/* Message */}
@@ -1545,7 +1632,7 @@ export default function App() {
       {/* MODAL: ADD CLIENT ENTITY */}
       {showAddModal && (
         <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-6 shadow-2xl">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-bold text-white m-0">Register Client Entity</h3>
               <button onClick={() => setShowAddModal(false)} className="text-slate-400 hover:text-slate-200 font-bold text-xl cursor-pointer">
@@ -1554,6 +1641,68 @@ export default function App() {
             </div>
 
             <form onSubmit={handleCreateEntity} className="space-y-4">
+              {!isMock && (
+                <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-bold text-slate-200">GST-guided scrutiny profile</div>
+                      <div className="text-xxs text-slate-500 mt-0.5">Pitch mode uses one explicitly fictional registry response.</div>
+                    </div>
+                    <span className="text-xxs font-bold uppercase tracking-wider text-amber-300 bg-amber-950 border border-amber-800/60 px-2 py-1 rounded-lg">Simulated</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={newEntity.gstin}
+                      onChange={(event) => {
+                        setNewEntity({ ...newEntity, gstin: event.target.value.toUpperCase(), sector: "", rule_pack: "" });
+                        setGstProfile(null);
+                        setIsGstPackConfirmed(false);
+                      }}
+                      placeholder={DEMO_GSTIN}
+                      maxLength={15}
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded-xl px-3 py-2.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleGstLookup}
+                      disabled={isLookingUpGst || !newEntity.gstin.trim()}
+                      className="px-3 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 rounded-xl cursor-pointer"
+                    >
+                      {isLookingUpGst ? "Looking up…" : "Lookup GST"}
+                    </button>
+                  </div>
+
+                  {gstProfile && (
+                    <div className="bg-cyan-950/30 border border-cyan-800/50 rounded-xl p-3 text-xs space-y-2">
+                      <div className="flex justify-between gap-3">
+                        <span className="text-slate-400">Registry profile</span>
+                        <span className="font-bold text-cyan-200">{gstProfile.registration_status}</span>
+                      </div>
+                      <div className="flex justify-between gap-3">
+                        <span className="text-slate-400">Core activity</span>
+                        <span className="font-bold text-white">{gstProfile.core_business_activity}</span>
+                      </div>
+                      <div className="flex justify-between gap-3">
+                        <span className="text-slate-400">Suggested checks</span>
+                        <span className="font-bold text-cyan-300">Core + Manufacturing v1</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setIsGstPackConfirmed(true)}
+                        className={`w-full mt-1 py-2 rounded-lg text-xs font-bold border cursor-pointer ${
+                          isGstPackConfirmed
+                            ? "bg-emerald-950 border-emerald-700 text-emerald-300"
+                            : "bg-cyan-900/50 border-cyan-700 text-cyan-100 hover:bg-cyan-800/60"
+                        }`}
+                      >
+                        {isGstPackConfirmed ? "✓ Auditor confirmed Manufacturing v1" : "Confirm Manufacturing v1 pack"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Entity Name *</label>
                 <input
@@ -1587,7 +1736,8 @@ export default function App() {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 rounded-xl transition-all shadow-md shadow-indigo-950/50 cursor-pointer"
+                  disabled={Boolean(gstProfile && !isGstPackConfirmed)}
+                  className="px-4 py-2 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 disabled:text-slate-500 rounded-xl transition-all shadow-md shadow-indigo-950/50 cursor-pointer"
                 >
                   Create Client
                 </button>
@@ -1711,7 +1861,7 @@ export default function App() {
 
       {/* WORKPAPER REVIEW DRAWER */}
       {selectedException && (
-        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-50 flex justify-end">
+        <div className="workpaper-backdrop fixed inset-0 z-50 flex justify-end">
           <div className="w-full max-w-xl bg-slate-900 border-l border-slate-800 h-full flex flex-col p-6 shadow-2xl overflow-y-auto">
             <div className="flex justify-between items-center pb-4 border-b border-slate-800 mb-6">
               <div>
@@ -1733,8 +1883,14 @@ export default function App() {
               {/* DETAILS CARD */}
               <div className="bg-slate-950/60 rounded-xl border border-slate-800 p-4 space-y-3">
                 <div className="flex justify-between items-center text-xs">
-                  <span className="text-slate-400 font-semibold">Ledger Account:</span>
-                  <span className="font-bold text-slate-100">{selectedException.ledger_account_name || "N/A (Entity-wide)"}</span>
+                  <span className="text-slate-400 font-semibold">Scope:</span>
+                  {selectedException.ledger_account_name ? (
+                    <span className="font-bold text-slate-100">{selectedException.ledger_account_name}</span>
+                  ) : (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xxs font-bold uppercase tracking-wider text-slate-300 bg-slate-800 border border-slate-700">
+                      Entity-wide
+                    </span>
+                  )}
                 </div>
                 <div className="flex justify-between items-center text-xs">
                   <span className="text-slate-400 font-semibold">Rule Triggered:</span>

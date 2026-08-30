@@ -23,6 +23,7 @@ services:
       SECRET_KEY: ${SECRET_KEY:-local-demo-secret-change-before-deployment}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-local-demo-client-id}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+      GST_LOOKUP_MODE: ${GST_LOOKUP_MODE:-demo}
     ports:
       - "8000:8000"
     depends_on:

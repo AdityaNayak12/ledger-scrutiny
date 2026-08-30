@@ -78,7 +78,7 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
     } catch (err: unknown) {
       setError(
         err instanceof TypeError && err.message === "Failed to fetch"
-          ? `Cannot reach the LedgerScrutiny API at ${baseUrl}. Verify that the backend is running.`
+          ? `Cannot reach the CApex API at ${baseUrl}. Verify that the backend is running.`
           : err instanceof Error ? err.message : "XLSX trial balance ingestion failed."
       );
     } finally {
