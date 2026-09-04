@@ -63,9 +63,21 @@ def _add_columns(table_name: str, columns: dict[str, sa.Column]) -> None:
     missing = [column for name, column in columns.items() if name not in _columns(table_name)]
     if not missing:
         return
+    if _row_count(table_name):
+        unsafe = [column.name for column in missing if not column.nullable and column.server_default is None]
+        if unsafe:
+            raise RuntimeError(
+                f"Cannot add required column(s) {', '.join(unsafe)} to populated partial table "
+                f"'{table_name}' without a backfill"
+            )
     with op.batch_alter_table(table_name) as batch:
         for column in missing:
             batch.add_column(column)
+
+
+def _row_count(table_name: str) -> int:
+    table = sa.table(table_name)
+    return int(op.get_bind().execute(sa.select(sa.func.count()).select_from(table)).scalar_one())
 
 
 def _create_import_batches() -> None:
@@ -150,6 +162,13 @@ def _add_journal_entry_columns() -> None:
         },
     )
     _ensure_unique("journal_entries", "uq_journal_entry_batch_document", ["import_batch_id", "source_document_id"])
+    _ensure_foreign_keys(
+        "journal_entries",
+        {
+            "fk_journal_entries_import_batch": ("import_batches", ["import_batch_id"], ["id"], "CASCADE"),
+            "fk_journal_entries_entity": ("entities", ["entity_id"], ["id"], "CASCADE"),
+        },
+    )
     _ensure_indexes(
         "journal_entries",
         {
@@ -225,6 +244,13 @@ def _add_journal_line_columns() -> None:
         },
     )
     _ensure_unique("journal_lines", "uq_journal_line_entry_row", ["journal_entry_id", "source_row_number"])
+    _ensure_foreign_keys(
+        "journal_lines",
+        {
+            "fk_journal_lines_journal_entry": ("journal_entries", ["journal_entry_id"], ["id"], "CASCADE"),
+            "fk_journal_lines_ledger_account": ("ledger_accounts", ["ledger_account_id"], ["id"], "RESTRICT"),
+        },
+    )
     _ensure_indexes(
         "journal_lines",
         {
@@ -282,6 +308,19 @@ def _add_balance_checkpoint_columns() -> None:
         "uq_balance_checkpoint_batch_account_date",
         ["import_batch_id", "ledger_account_id", "balance_date"],
     )
+    _ensure_foreign_keys(
+        "balance_checkpoints",
+        {
+            "fk_balance_checkpoints_import_batch": ("import_batches", ["import_batch_id"], ["id"], "CASCADE"),
+            "fk_balance_checkpoints_entity": ("entities", ["entity_id"], ["id"], "CASCADE"),
+            "fk_balance_checkpoints_ledger_account": (
+                "ledger_accounts",
+                ["ledger_account_id"],
+                ["id"],
+                "RESTRICT",
+            ),
+        },
+    )
     _ensure_indexes(
         "balance_checkpoints",
         {
@@ -324,6 +363,34 @@ def _ensure_unique(table_name: str, constraint_name: str, columns: list[str]) ->
     if constraint_name not in names:
         with op.batch_alter_table(table_name) as batch:
             batch.create_unique_constraint(constraint_name, columns)
+
+
+def _ensure_foreign_keys(
+    table_name: str,
+    foreign_keys: dict[str, tuple[str, list[str], list[str], str]],
+) -> None:
+    existing = sa.inspect(op.get_bind()).get_foreign_keys(table_name)
+    missing = []
+    for constraint_name, (referred_table, local_columns, remote_columns, ondelete) in foreign_keys.items():
+        present = any(
+            foreign_key["constrained_columns"] == local_columns
+            and foreign_key["referred_table"] == referred_table
+            for foreign_key in existing
+        )
+        if not present:
+            missing.append((constraint_name, referred_table, local_columns, remote_columns, ondelete))
+
+    if not missing:
+        return
+    with op.batch_alter_table(table_name) as batch:
+        for constraint_name, referred_table, local_columns, remote_columns, ondelete in missing:
+            batch.create_foreign_key(
+                constraint_name,
+                referred_table,
+                local_columns,
+                remote_columns,
+                ondelete=ondelete,
+            )
 
 
 def _ensure_indexes(table_name: str, indexes: dict[str, list[str]]) -> None:
