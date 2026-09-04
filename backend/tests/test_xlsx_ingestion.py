@@ -579,7 +579,18 @@ def test_fixed_gl_confirm_activates_after_normalization_and_rolls_back_invalid_r
         assert active.status == "ACTIVE"
         assert active.validation_report["dataset_fingerprint"] == response["validation_report"]["dataset_fingerprint"]
         assert session.scalar(select(func.count()).select_from(JournalLine)) == 2
-        assert session.scalar(select(func.count()).select_from(ImportBatch)) == 1
+        assert session.scalar(select(func.count()).select_from(ImportBatch)) == 2
+        failed_batch = session.scalar(
+            select(ImportBatch).where(
+                ImportBatch.entity_id == test_entity,
+                ImportBatch.status == "FAILED",
+            )
+        )
+        assert failed_batch is not None
+        assert failed_batch.raw_source_bytes == invalid_contents
+        assert failed_batch.validation_report["rejected_rows"] == 1
+        assert failed_batch.validation_report["errors"]
+        assert failed_batch.validation_report["reject_reasons"]
 
 
 def test_xlsx_confirm_produces_identical_exceptions_to_xml_fixture(auth_headers, test_entity):

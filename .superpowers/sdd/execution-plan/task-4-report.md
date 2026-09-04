@@ -311,3 +311,82 @@ PYTHONPATH=. ../.venv/bin/python -m compileall -q app tests
 The three/four warnings are the existing FastAPI/Starlette deprecations. The
 supplied workbook was available and passed the smoke check; the corresponding
 local-path regression remains skipped when that external fixture is absent.
+
+## Round 3 fix report — 2026-09-05
+
+### Scope
+
+Fixed the remaining compatibility-route lifecycle gap in
+`backend/app/routers/scrutiny.py` and extended the focused API regression in
+`backend/tests/test_xlsx_ingestion.py`. The SDD ledger and Task 5+ code were
+not modified.
+
+The route now stages the batch outside the normalization savepoint. Candidate
+journal/snapshot writes and activation changes roll back on failure, while a
+fixed-profile normalization failure re-applies the structured FAILED report
+and commits the staged batch with its retained raw source bytes. The previous
+active dataset remains active. Successful replacements remain atomic, active
+exact-hash duplicates remain no-ops, non-active duplicates remain rejected, and
+legacy explicit trial-balance mappings retain their existing behavior.
+
+The regression asserts a malformed fixed-GL replacement returns HTTP 400,
+leaves the prior active batch and canonical rows intact, and persists exactly
+one FAILED candidate with raw bytes and structured reject/error details.
+
+### Test-first evidence
+
+RED command:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_xlsx_ingestion.py -k 'fixed_gl_confirm_activates_after_normalization'
+```
+
+Result: exit code 1; the focused regression failed because the malformed
+candidate was rolled back instead of being retained (28 tests deselected).
+
+### Verification
+
+Focused XLSX and API integration tests:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_xlsx_ingestion.py tests/test_api_integration.py
+```
+
+```text
+39 passed, 3 warnings in 11.50s
+```
+
+Full backend suite:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q
+```
+
+```text
+94 passed, 4 warnings in 14.65s
+```
+
+Whitespace check:
+
+```text
+git diff --check
+```
+
+```text
+(no output; exit code 0)
+```
+
+Compilation:
+
+```text
+PYTHONPATH=. ../.venv/bin/python -m compileall -q app tests
+```
+
+```text
+(no output; exit code 0)
+```
+
+The supplied Q1 workbook was not rerun in this round because the normalizer
+logic was unchanged; the prior report records its verified 59,167-row,
+10,914-document, 445-account, ₹0.00 signed-total smoke result. Existing
+FastAPI/Starlette deprecation warnings remain.

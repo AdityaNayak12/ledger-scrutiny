@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.db.session import get_db
 from app.db.models import AuditException, Entity, FinancialPeriod, ImportBatch, LedgerAccount, ReviewAction, ScrutinyRun, TrialBalanceSnapshot, User
-from app.ingestion.batches import activate_import_batch, create_import_batch, is_duplicate_import_batch
+from app.ingestion.batches import activate_import_batch, create_import_batch, fail_import_batch, is_duplicate_import_batch
 from app.ingestion.tally_parser import parse_tally_xml
 from app.ingestion.tally_http import TallyConnectorError, fetch_trial_balance
 from app.ingestion.tally_normalizer import normalize_tally_data
@@ -456,20 +456,21 @@ async def upload_xlsx_confirm(
 
     try:
         contents = await file.read()
-        with db.begin_nested():
-            batch = create_import_batch(
-                db,
-                entity_id=entity.id,
-                period_start=target_period_start,
-                period_end=target_period_end,
-                source="xlsx_trial_balance",
-                original_filename=file.filename,
-                contents=contents,
-                uploaded_by_user_id=current_user.id,
-                validation_report={"parser": "xlsx_trial_balance", "sign_convention": sign_convention},
-                activate=False,
-            )
-            if not is_duplicate_import_batch(batch):
+        batch = create_import_batch(
+            db,
+            entity_id=entity.id,
+            period_start=target_period_start,
+            period_end=target_period_end,
+            source="xlsx_trial_balance",
+            original_filename=file.filename,
+            contents=contents,
+            uploaded_by_user_id=current_user.id,
+            validation_report={"parser": "xlsx_trial_balance", "sign_convention": sign_convention},
+            activate=False,
+        )
+        if not is_duplicate_import_batch(batch):
+            savepoint = db.begin_nested()
+            try:
                 normalize_xlsx_confirm(
                     file_bytes=contents,
                     column_mapping=mapping_dict,
@@ -482,6 +483,26 @@ async def upload_xlsx_confirm(
                     import_batch_id=batch.id,
                 )
                 batch = activate_import_batch(db, batch, replace=True)
+            except ValueError as val_err:
+                failure_report = dict(batch.validation_report or {})
+                failed_by_normalizer = batch.status == "FAILED"
+                savepoint.rollback()
+                if failed_by_normalizer:
+                    fail_import_batch(
+                        db,
+                        batch,
+                        errors=[str(val_err)],
+                        validation_report=failure_report,
+                    )
+                    db.commit()
+                else:
+                    db.rollback()
+                raise
+            except Exception:
+                savepoint.rollback()
+                raise
+            else:
+                savepoint.commit()
         db.commit()
         return IngestionResponse(
             message="XLSX ingestion successful",
