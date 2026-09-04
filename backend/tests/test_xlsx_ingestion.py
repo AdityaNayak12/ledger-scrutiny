@@ -297,6 +297,192 @@ def test_fixed_gl_parser_allows_repeated_account_codes_within_a_document():
     assert [line.ledger_account_code for line in entries[0].lines] == ["1000", "1000", "2000"]
 
 
+@pytest.mark.skipif(
+    not os.path.exists("/Users/adinayak18/Downloads/GL Dump Q1.XLSX"),
+    reason="supplied Q1 workbook is not available",
+)
+def test_supplied_q1_gl_workbook_is_accepted_with_footer_and_nonnumeric_quantity():
+    contents = open("/Users/adinayak18/Downloads/GL Dump Q1.XLSX", "rb").read()
+
+    entries = parse_gl_xlsx(contents, date(2025, 4, 1), date(2025, 6, 30))
+
+    assert sum(len(entry.lines) for entry in entries) == 59167
+    assert len(entries) == 10914
+    assert len({line.ledger_account_code for entry in entries for line in entry.lines}) == 445
+    assert sum((line.amount for entry in entries for line in entry.lines), Decimal("0")) == Decimal("0.00")
+    om_line = next(
+        line for entry in entries for line in entry.lines
+        if line.source_row_number == 28096
+    )
+    assert om_line.quantity is None
+    assert om_line.source_metadata["Quantity"] == "OM"
+    assert om_line.dimensions["Quantity"] == "OM"
+
+
+def test_fixed_gl_parser_preserves_nonnumeric_optional_quantity_and_warns(canonical_session):
+    session, entity_id = canonical_session
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency", "Quantity"],
+        [["DOC-1", "1000", date(2025, 4, 1), 1, "OM"],
+         ["DOC-1", "2000", date(2025, 4, 1), -1, 2]],
+    )
+    batch = _stage_gl_batch(session, entity_id, contents)
+
+    report = normalize_gl_xlsx(
+        contents, date(2025, 4, 1), date(2025, 4, 30), entity_id, session,
+        import_batch_id=batch.id,
+    )
+
+    line = session.scalar(select(JournalLine).where(JournalLine.source_row_number == 2))
+    assert line.quantity is None
+    assert line.source_metadata["Quantity"] == "OM"
+    assert line.dimensions["Quantity"] == "OM"
+    assert sum("non-numeric" in warning for warning in report["warnings"]) == 1
+
+
+def test_fixed_gl_parser_skips_only_structured_summary_rows(canonical_session):
+    session, entity_id = canonical_session
+    headers = [
+        "Document Number", "G/L Account", "Posting Date", "Amount in local currency", "Description",
+    ]
+    contents = _xlsx_bytes(headers, [
+        ["DOC-1", "1000", date(2025, 4, 1), 1, "valid"],
+        ["DOC-1", "2000", date(2025, 4, 1), -1, "valid"],
+        [None, None, None, 0, "LIABILITY TOTAL"],
+    ])
+
+    parsed = parse_gl_xlsx(contents, date(2025, 4, 1), date(2025, 4, 30))
+    assert len(parsed) == 1
+    batch = _stage_gl_batch(session, entity_id, contents)
+    report = normalize_gl_xlsx(
+        contents, date(2025, 4, 1), date(2025, 4, 30), entity_id, session,
+        import_batch_id=batch.id,
+    )
+    assert report["skipped_rows"] == 1
+    assert report["skip_reasons"] == [
+        {"row": 4, "reason": "summary/footer row", "column": "Description", "marker": "LIABILITY TOTAL"}
+    ]
+
+    malformed = _xlsx_bytes(headers, [[None, None, None, 1, "ordinary text"]])
+    with pytest.raises(ValueError, match="Document Number.*required"):
+        parse_gl_xlsx(malformed, date(2025, 4, 1), date(2025, 4, 30))
+
+
+def test_fixed_gl_normalizer_resolves_accounts_by_entity_scoped_external_code_only(canonical_session):
+    session, entity_id = canonical_session
+    existing = LedgerAccount(
+        entity_id=entity_id,
+        external_code="LEGACY-1000",
+        name="1000",
+        group_name="Current Assets",
+        normal_balance="debit",
+    )
+    session.add(existing)
+    session.flush()
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [["DOC-1", "1000", date(2025, 4, 1), 1], ["DOC-1", "2000", date(2025, 4, 1), -1]],
+    )
+    batch = _stage_gl_batch(session, entity_id, contents)
+
+    normalize_gl_xlsx(
+        contents, date(2025, 4, 1), date(2025, 4, 30), entity_id, session,
+        import_batch_id=batch.id,
+    )
+
+    accounts = session.scalars(select(LedgerAccount).order_by(LedgerAccount.id)).all()
+    assert existing.external_code == "LEGACY-1000"
+    account_1000 = next(account for account in accounts if account.external_code == "1000")
+    assert account_1000.id != existing.id
+
+
+@pytest.mark.parametrize("status", ["ACTIVE", "FAILED", "SUPERSEDED"])
+def test_fixed_gl_normalizer_requires_staged_batch_and_preserves_existing_report(canonical_session, status):
+    session, entity_id = canonical_session
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [["DOC-1", "1000", date(2025, 4, 1), 1], ["DOC-1", "2000", date(2025, 4, 1), -1]],
+    )
+    batch = _stage_gl_batch(session, entity_id, contents)
+    batch.status = status
+    batch.validation_report = {"sentinel": status}
+    session.flush()
+
+    with pytest.raises(ValueError, match="requires a STAGED ImportBatch"):
+        normalize_gl_xlsx(
+            contents, date(2025, 4, 1), date(2025, 4, 30), entity_id, session,
+            import_batch_id=batch.id,
+        )
+
+    assert batch.validation_report == {"sentinel": status}
+    assert session.scalar(select(func.count()).select_from(JournalLine)) == 0
+    assert session.scalar(select(func.count()).select_from(LedgerAccount)) == 0
+
+
+def test_fixed_gl_normalizer_records_structured_report_for_staged_failure(canonical_session):
+    session, entity_id = canonical_session
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency", "Description"],
+        [[None, None, None, 0, "LIABILITY TOTAL"], ["DOC-1", None, date(2025, 4, 1), 1, "bad"]],
+    )
+    batch = _stage_gl_batch(session, entity_id, contents)
+
+    with pytest.raises(ValueError, match="G/L Account.*required"):
+        normalize_gl_xlsx(
+            contents, date(2025, 4, 1), date(2025, 4, 30), entity_id, session,
+            import_batch_id=batch.id,
+        )
+
+    assert batch.status == "FAILED"
+    assert batch.validation_report["input_rows"] == 2
+    assert batch.validation_report["accepted_rows"] == 0
+    assert batch.validation_report["skipped_rows"] == 1
+    assert batch.validation_report["rejected_rows"] == 1
+    assert batch.validation_report["skip_reasons"][0]["row"] == 2
+    assert batch.validation_report["reject_reasons"][0]["row"] == 3
+
+
+def test_fixed_gl_parser_aggregates_uncached_formula_warnings_for_unknown_columns(canonical_session):
+    session, entity_id = canonical_session
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency", "Mystery Dimension"],
+        [["DOC-1", "1000", date(2025, 4, 1), 1, "=CONCAT(\"a\", \"b\")"],
+         ["DOC-1", "2000", date(2025, 4, 1), -1, "=CONCAT(\"c\", \"d\")"]],
+    )
+
+    batch = _stage_gl_batch(session, entity_id, contents)
+    report = normalize_gl_xlsx(
+        contents, date(2025, 4, 1), date(2025, 4, 30), entity_id, session,
+        import_batch_id=batch.id,
+    )
+
+    assert len([warning for warning in report["warnings"] if "missing cached formula" in warning]) == 1
+    assert "Mystery Dimension" in next(
+        warning for warning in report["warnings"] if "missing cached formula" in warning
+    )
+
+
+def test_fixed_gl_parser_rejects_amount_precision_that_numeric_20_2_cannot_retain():
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [["DOC-1", "1000", date(2025, 4, 1), "1.001"]],
+    )
+
+    with pytest.raises(ValueError, match="Amount in local currency.*2 decimal"):
+        parse_gl_xlsx(contents, date(2025, 4, 1), date(2025, 4, 30))
+
+
+def test_fixed_gl_parser_rejects_numeric_quantity_precision_beyond_numeric_20_4():
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency", "Quantity"],
+        [["DOC-1", "1000", date(2025, 4, 1), 1, "1.00001"],
+         ["DOC-1", "2000", date(2025, 4, 1), -1, 0]],
+    )
+
+    with pytest.raises(ValueError, match="Quantity.*4 decimal"):
+        parse_gl_xlsx(contents, date(2025, 4, 1), date(2025, 4, 30))
+
+
 @pytest.fixture
 def auth_headers():
     res = client.post("/auth/register", json={

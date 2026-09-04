@@ -1,7 +1,8 @@
 """Fixed GL XLSX ingestion plus the legacy trial-balance compatibility path."""
 
 import io
-from collections import defaultdict
+import re
+from collections import Counter, defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping, Optional
@@ -36,15 +37,18 @@ _OPTIONAL_ALIASES = {
     "document_type": ("Document Type",),
     "document_date": ("Document Date",),
     "posting_key": ("Posting Key",),
-    "reference": ("Reference", "Invoice Reference", "Invoice/Reference", "Invoice / Reference", "Invoice"),
+    "reference": (
+        "Reference", "Invoice Reference", "Invoice/Reference", "Invoice / Reference", "Invoice",
+        "Invoice No/Reference",
+    ),
     "clearing_document": ("Clearing Document",),
     "profit_center": ("Profit Centre", "Profit Center"),
     "cost_center": ("Cost Centre", "Cost Center"),
-    "text": ("Text", "Description"),
-    "supplier": ("Supplier", "Vendor", "Supplier/Vendor"),
-    "wbs": ("WBS", "WBS Element"),
+    "text": ("Text", "Description", "Text/Bid/Cont/TndrNo", "L DESCRIPTION"),
+    "supplier": ("Supplier", "Vendor", "Supplier/Vendor", "Vendor Name"),
+    "wbs": ("WBS", "WBS Element", "WBS element"),
     "purchasing_document": ("Purchasing Document",),
-    "customer": ("Customer",),
+    "customer": ("Customer", "Customer Name"),
     "quantity": ("Quantity",),
     "currency": ("Currency", "Currency Code"),
 }
@@ -77,6 +81,23 @@ class _ParsedGL:
         self.warnings = warnings
         self.coverage_start = coverage_start
         self.coverage_end = coverage_end
+
+
+class _GLParseError(ValueError):
+    """Validation error carrying the reconciliation progress available before failure."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        input_rows: int = 0,
+        skipped_rows: int = 0,
+        skip_reasons: tuple[dict[str, Any], ...] = (),
+    ) -> None:
+        super().__init__(message)
+        self.input_rows = input_rows
+        self.skipped_rows = skipped_rows
+        self.skip_reasons = skip_reasons
 
 
 def _is_blank(value: Any) -> bool:
@@ -140,6 +161,43 @@ def _parse_decimal(value: Any, row_number: int, header: str, *, required: bool) 
     return result
 
 
+def _validate_numeric_capacity(
+    value: Decimal,
+    row_number: int,
+    header: str,
+    *,
+    scale: int,
+    precision: int = 20,
+) -> Decimal:
+    decimal_tuple = value.as_tuple()
+    decimal_scale = max(0, -decimal_tuple.exponent)
+    if decimal_scale > scale:
+        raise ValueError(
+            f"Row {row_number}: {header} supports at most {scale} decimal places "
+            f"(Numeric({precision},{scale})); got {value}."
+        )
+    integer_digits = max(0, value.adjusted() + 1) if value else 0
+    if integer_digits > precision - scale:
+        raise ValueError(
+            f"Row {row_number}: {header} exceeds Numeric({precision},{scale}) capacity; got {value}."
+        )
+    return value
+
+
+def _parse_storage_decimal(
+    value: Any,
+    row_number: int,
+    header: str,
+    *,
+    required: bool,
+    scale: int,
+) -> Optional[Decimal]:
+    result = _parse_decimal(value, row_number, header, required=required)
+    if result is None:
+        return None
+    return _validate_numeric_capacity(result, row_number, header, scale=scale)
+
+
 def _effective_coverage(
     target_period_start: Any,
     target_period_end: Any,
@@ -197,6 +255,123 @@ def _optional_columns(headers: list[str]) -> dict[str, tuple[str, int]]:
     return columns
 
 
+def _formula_cells(file_bytes: bytes, worksheet_title: str, header_row: int, required_columns: dict[str, int]) -> set[tuple[int, int]]:
+    """Return original formula cells outside the required fields without evaluating them."""
+    try:
+        formula_workbook = openpyxl.load_workbook(
+            io.BytesIO(file_bytes), data_only=False, read_only=True
+        )
+    except Exception as error:
+        raise ValueError(f"Failed to inspect original Excel formula cells: {error}") from error
+    try:
+        formula_sheet = formula_workbook[worksheet_title]
+        required_indexes = set(required_columns.values())
+        formulas: set[tuple[int, int]] = set()
+        for row_number, row in enumerate(formula_sheet.iter_rows(min_row=header_row + 1), header_row + 1):
+            for column_index, cell in enumerate(row):
+                if column_index in required_indexes:
+                    continue
+                value = cell.value
+                if cell.data_type == "f" or (isinstance(value, str) and value.startswith("=")):
+                    formulas.add((row_number, column_index))
+        return formulas
+    finally:
+        formula_workbook.close()
+
+
+def _summary_skip_reason(
+    values: list[Any],
+    headers: list[str],
+    required_columns: dict[str, int],
+    row_number: int,
+) -> dict[str, Any] | None:
+    """Recognize explicit zero-valued footer labels, not arbitrary malformed rows."""
+    required_indexes = set(required_columns.values())
+    marker: tuple[str, str] | None = None
+    for index, value in enumerate(values):
+        if index in required_indexes or _is_blank(value):
+            continue
+        text = _text_value(value)
+        normalized = text.upper() if text else ""
+        if normalized == "TOTAL" or normalized.endswith("TOTAL") or normalized.endswith("SUBTOTAL"):
+            marker = (headers[index], text)
+            break
+    if marker is None:
+        return None
+
+    identity_headers = ("Document Number", "G/L Account", "Posting Date")
+    if any(not _is_blank(values[required_columns[header]]) for header in identity_headers):
+        return None
+    amount_value = values[required_columns["Amount in local currency"]]
+    if not _is_blank(amount_value):
+        try:
+            amount = Decimal(str(amount_value).replace(",", "").strip())
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not amount.is_finite() or amount != 0:
+            return None
+    return {
+        "row": row_number,
+        "reason": "summary/footer row",
+        "column": marker[0],
+        "marker": marker[1],
+    }
+
+
+def _warning_messages(
+    warning_counts: Counter[tuple[str, str]],
+    invalid_quantity_counts: Counter[str],
+) -> tuple[str, ...]:
+    messages = [
+        f"{category} for optional column '{header}' in {count} row(s)."
+        for (category, header), count in sorted(warning_counts.items())
+    ]
+    messages.extend(
+        f"optional column '{header}' contains non-numeric values in {count} row(s); "
+        "canonical quantity left unset."
+        for header, count in sorted(invalid_quantity_counts.items())
+    )
+    return tuple(messages)
+
+
+def _failure_reconciliation_report(file_bytes: bytes, error: ValueError) -> dict[str, Any]:
+    """Build a JSON-safe failure report even when parsing stops at the first bad row."""
+    input_rows = getattr(error, "input_rows", 0)
+    skipped_rows = getattr(error, "skipped_rows", 0)
+    skip_reasons = list(getattr(error, "skip_reasons", ()))
+    if not input_rows:
+        try:
+            workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
+            try:
+                worksheet = workbook.active
+                if worksheet is not None and worksheet.max_row:
+                    header_row, _headers, _required_columns = _fixed_header_row(worksheet)
+                    input_rows = max(0, worksheet.max_row - header_row)
+            finally:
+                workbook.close()
+        except Exception:
+            pass
+
+    row_match = re.search(r"Row (\d+):", str(error))
+    reject_reason: dict[str, Any] = {"reason": str(error)}
+    if row_match:
+        reject_reason["row"] = int(row_match.group(1))
+    report = build_reconciliation_report(
+        (), input_rows=input_rows, rejected=1, errors=[str(error)], coverage_complete=False,
+    )
+    report.update({
+        "parser": "xlsx_gl",
+        "source_family": SourceFamily.GL_UPLOAD.value,
+        "accepted": 0,
+        "accepted_rows": 0,
+        "skipped": skipped_rows,
+        "skipped_rows": skipped_rows,
+        "skip_reasons": skip_reasons,
+        "reject_reasons": [reject_reason],
+    })
+    return report
+
+
 def _parse_fixed_gl_xlsx(
     file_bytes: bytes,
     target_period_start: Any,
@@ -222,16 +397,19 @@ def _parse_fixed_gl_xlsx(
     except Exception as error:
         raise ValueError(f"Failed to parse Excel file: {error}") from error
 
-    formula_workbook = None
+    input_rows = 0
+    skip_reasons: list[dict[str, Any]] = []
     try:
         worksheet = workbook.active
         if worksheet is None or worksheet.max_row == 0:
             raise ValueError("Workbook has no active sheet or the active sheet is empty.")
         header_row, headers, required_columns = _fixed_header_row(worksheet)
         optional_columns = _optional_columns(headers)
+        formula_cells = _formula_cells(file_bytes, worksheet.title, header_row, required_columns)
         entries: dict[str, dict[str, Any]] = {}
-        warnings: list[str] = []
-        skip_reasons: list[dict[str, Any]] = []
+        warning_counts: Counter[tuple[str, str]] = Counter()
+        invalid_quantity_counts: Counter[str] = Counter()
+        invalid_quantity_headers: set[str] = set()
         input_rows = max(0, worksheet.max_row - header_row)
 
         for row_number, row in enumerate(
@@ -241,6 +419,11 @@ def _parse_fixed_gl_xlsx(
             values = list(row)
             if all(_is_blank(value) for value in values):
                 skip_reasons.append({"row": row_number, "reason": "blank source row"})
+                continue
+
+            summary_reason = _summary_skip_reason(values, headers, required_columns, row_number)
+            if summary_reason is not None:
+                skip_reasons.append(summary_reason)
                 continue
 
             def required_value(header: str) -> Any:
@@ -262,6 +445,9 @@ def _parse_fixed_gl_xlsx(
             )
             assert source_document_id is not None
             assert account_code is not None and posting_date is not None and amount is not None
+            amount = _validate_numeric_capacity(
+                amount, row_number, "Amount in local currency", scale=2
+            )
             if not period_start <= posting_date <= period_end:
                 raise ValueError(
                     f"Row {row_number}: posting date {posting_date} is outside declared coverage "
@@ -282,34 +468,34 @@ def _parse_fixed_gl_xlsx(
             document_date = _parse_date(
                 optional_value("document_date"), row_number, "Document Date", required=False
             )
-            quantity = _parse_decimal(
-                optional_value("quantity"), row_number, "Quantity", required=False
-            )
+            quantity = None
+            quantity_header = optional_columns.get("quantity", (None, 0))[0]
+            raw_quantity = optional_value("quantity")
+            if not _is_blank(raw_quantity):
+                try:
+                    quantity = _parse_storage_decimal(
+                        raw_quantity, row_number, "Quantity", required=False, scale=4
+                    )
+                except ValueError as error:
+                    if "must be a valid decimal" not in str(error):
+                        raise
+                    assert quantity_header is not None
+                    invalid_quantity_headers.add(quantity_header)
+                    invalid_quantity_counts[quantity_header] += 1
             document_type = optional_text("document_type")
             text = optional_text("text")
 
-            if formula_workbook is None and any(_is_blank(optional_value(name)) for name in optional_columns):
-                try:
-                    formula_workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=False)
-                except Exception:
-                    formula_workbook = False
-            uncached = set()
-            if formula_workbook:
-                formula_sheet = formula_workbook[worksheet.title]
-                for header, column_index in optional_columns.values():
-                    cell = formula_sheet.cell(row=row_number, column=column_index + 1)
-                    if isinstance(cell.value, str) and cell.value.startswith("="):
-                        uncached.add(header)
-
-            for field_name, (header, column_index) in optional_columns.items():
+            for column_index, header in enumerate(headers):
+                if header in GL_REQUIRED_HEADERS:
+                    continue
                 value = values[column_index] if column_index < len(values) else None
                 if _is_blank(value):
-                    if header in uncached:
-                        warnings.append(
-                            f"Row {row_number}: missing cached formula value for optional column '{header}'."
-                        )
-                    else:
-                        warnings.append(f"Row {row_number}: optional dimension '{header}' is blank.")
+                    category = (
+                        "missing cached formula value"
+                        if (row_number, column_index) in formula_cells
+                        else "optional dimension is blank"
+                    )
+                    warning_counts[(category, header)] += 1
 
             source_metadata: dict[str, Any] = {}
             key_counts: defaultdict[str, int] = defaultdict(int)
@@ -324,7 +510,8 @@ def _parse_fixed_gl_xlsx(
             dimensions = {
                 source_keys[index]: source_metadata[source_keys[index]]
                 for index, header in enumerate(headers)
-                if header not in GL_REQUIRED_HEADERS and header not in known_optional_headers
+                if header not in GL_REQUIRED_HEADERS
+                and (header not in known_optional_headers or header in invalid_quantity_headers)
             }
             line = JournalLineRecord(
                 source_row_number=row_number,
@@ -393,13 +580,20 @@ def _parse_fixed_gl_xlsx(
             input_rows=input_rows,
             skipped_rows=len(skip_reasons),
             skip_reasons=tuple(skip_reasons),
-            warnings=tuple(warnings),
+            warnings=_warning_messages(warning_counts, invalid_quantity_counts),
             coverage_start=period_start,
             coverage_end=period_end,
         )
+    except ValueError as error:
+        if isinstance(error, _GLParseError):
+            raise
+        raise _GLParseError(
+            str(error),
+            input_rows=input_rows,
+            skipped_rows=len(skip_reasons),
+            skip_reasons=tuple(skip_reasons),
+        ) from error
     finally:
-        if formula_workbook:
-            formula_workbook.close()
         workbook.close()
 
 
@@ -457,6 +651,10 @@ def normalize_gl_xlsx(
         raise ValueError(f"Import batch {import_batch_id} not found.")
     if batch.entity_id != entity_id:
         raise ValueError(f"Import batch {import_batch_id} does not belong to entity {entity_id}.")
+    if batch.status != "STAGED":
+        raise ValueError(
+            f"Fixed GL normalization requires a STAGED ImportBatch; batch {import_batch_id} is {batch.status}."
+        )
 
     if (
         declared_coverage is None
@@ -481,30 +679,35 @@ def normalize_gl_xlsx(
             coverage_end=coverage_end,
         )
     except ValueError as error:
-        if batch.status == "STAGED":
-            fail_import_batch(
-                session,
-                batch,
-                errors=[str(error)],
-                validation_report={"parser": "xlsx_gl", "errors": [str(error)], "readiness": "INVALID"},
-            )
+        fail_import_batch(
+            session,
+            batch,
+            errors=[str(error)],
+            validation_report=_failure_reconciliation_report(file_bytes, error),
+        )
         raise
 
     accounts = session.execute(select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)).scalars().all()
     accounts_by_code = {account.external_code: account for account in accounts if account.external_code}
-    accounts_by_name = {account.name: account for account in accounts}
+    account_names = {account.name for account in accounts}
     unclassified_codes: set[str] = set()
     account_by_code: dict[str, LedgerAccount] = {}
     for entry in parsed.entries:
         for line in entry.lines:
             code = line.ledger_account_code
-            account = account_by_code.get(code) or accounts_by_code.get(code) or accounts_by_name.get(code)
+            account = account_by_code.get(code) or accounts_by_code.get(code)
             if account is None:
-                account = LedgerAccount(entity_id=entity.id, external_code=code, name=code)
+                account_name = code
+                if account_name in account_names:
+                    account_name = f"G/L {code}"
+                    suffix = 2
+                    while account_name in account_names:
+                        account_name = f"G/L {code} ({suffix})"
+                        suffix += 1
+                account = LedgerAccount(entity_id=entity.id, external_code=code, name=account_name)
                 session.add(account)
                 session.flush()
-            elif account.external_code is None:
-                account.external_code = code
+                account_names.add(account_name)
             account_by_code[code] = account
             if account.group_name is None or account.normal_balance is None:
                 unclassified_codes.add(code)
