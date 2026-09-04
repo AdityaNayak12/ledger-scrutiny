@@ -4,7 +4,29 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
-from app.db.models import Organization, User, Entity, LedgerAccount, Transaction, TrialBalanceSnapshot, AuditException
+from app.db.models import (
+    AuditException,
+    BalanceCheckpoint,
+    Entity,
+    FinancialPeriod,
+    ImportBatch,
+    JournalEntry,
+    JournalLine,
+    LedgerAccount,
+    Organization,
+    ScrutinyRun,
+    Transaction,
+    TrialBalanceSnapshot,
+    User,
+)
+from app.ingestion.schema import (
+    BatchKind,
+    BalanceCheckpointRecord,
+    JournalEntryRecord,
+    JournalLineRecord,
+    JournalLineSide,
+    SourceFamily,
+)
 
 
 def test_database_models_lifecycle():
@@ -159,3 +181,152 @@ def test_entity_transient_properties_fail_loud():
     finally:
         session.close()
         Base.metadata.drop_all(engine)
+
+
+def test_canonical_models_preserve_multiline_source_and_lineage():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    try:
+        org = Organization(name="Canonical Org")
+        session.add(org)
+        session.flush()
+        entity = Entity(
+            organization_id=org.id,
+            name="Canonical Corp",
+            materiality_threshold=Decimal("100.00"),
+        )
+        session.add(entity)
+        session.flush()
+        account = LedgerAccount(
+            entity_id=entity.id,
+            external_code="110000",
+            name="Cash",
+            group_name=None,
+            normal_balance=None,
+        )
+        revenue_account = LedgerAccount(
+            entity_id=entity.id,
+            external_code="400000",
+            name="Revenue",
+            group_name=None,
+            normal_balance=None,
+        )
+        period = FinancialPeriod(
+            entity_id=entity.id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            source="gl_upload",
+        )
+        session.add_all([account, revenue_account, period])
+        session.flush()
+        batch = ImportBatch(
+            entity_id=entity.id,
+            financial_period_id=period.id,
+            source="gl_upload",
+            source_family=SourceFamily.GL_UPLOAD.value,
+            kind=BatchKind.JOURNAL.value,
+            original_filename="gl.xlsx",
+            content_sha256="a" * 64,
+            parser_version="2",
+            status="STAGED",
+            raw_source_bytes=b"xlsx-bytes",
+            coverage_start=date(2025, 4, 1),
+            coverage_end=date(2025, 4, 30),
+            source_metadata={"profile": "sap_gl"},
+            validation_report={},
+        )
+        entry = JournalEntry(
+            entity_id=entity.id,
+            import_batch=batch,
+            source_document_id="DOC-1",
+            posting_date=date(2025, 4, 1),
+            document_type="SA",
+            narration="Cash sale",
+        )
+        entry.lines = [
+            JournalLine(
+                ledger_account=account,
+                source_row_number=2,
+                amount=Decimal("100.00"),
+                side=JournalLineSide.DEBIT.value,
+                posting_key="40",
+                currency="INR",
+                source_metadata={"text": "Cash sale"},
+            ),
+            JournalLine(
+                ledger_account=revenue_account,
+                source_row_number=3,
+                amount=Decimal("-100.00"),
+                side=JournalLineSide.CREDIT.value,
+                posting_key="50",
+                currency="INR",
+                source_metadata={"text": "Cash sale"},
+            ),
+        ]
+        session.add(batch)
+        session.flush()
+        checkpoint = BalanceCheckpoint(
+            entity_id=entity.id,
+            import_batch=batch,
+            ledger_account=account,
+            balance_date=date(2025, 3, 31),
+            balance=Decimal("100.00"),
+            currency="INR",
+        )
+        run = ScrutinyRun(
+            entity_id=entity.id,
+            financial_period_id=period.id,
+            dataset_fingerprint="b" * 64,
+            source_batch_ids=[batch.id],
+            rule_set_version="1",
+            status="COMPLETED",
+            summary={},
+        )
+        session.add_all([checkpoint, run])
+        session.commit()
+
+        loaded_lines = session.query(JournalLine).order_by(JournalLine.source_row_number).all()
+        loaded_line = loaded_lines[0]
+        assert loaded_line.journal_entry.source_document_id == "DOC-1"
+        assert loaded_line.ledger_account.external_code == "110000"
+        assert loaded_line.amount == Decimal("100.00")
+        assert loaded_line.source_metadata == {"text": "Cash sale"}
+        assert len(loaded_lines) == 2
+        assert {line.source_row_number for line in loaded_line.journal_entry.lines} == {2, 3}
+        assert session.query(BalanceCheckpoint).one().balance == Decimal("100.00")
+        loaded_batch = session.query(ImportBatch).one()
+        assert loaded_batch.raw_source_bytes == b"xlsx-bytes"
+        assert loaded_batch.coverage_start == date(2025, 4, 1)
+        assert session.query(ScrutinyRun).one().source_batch_ids == [batch.id]
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def test_canonical_schema_records_use_signed_decimal_contract():
+    line = JournalLineRecord(
+        source_row_number=2,
+        ledger_account_code="110000",
+        amount=Decimal("100.00"),
+        side=JournalLineSide.DEBIT,
+        currency="INR",
+    )
+    entry = JournalEntryRecord(
+        source_document_id="DOC-1",
+        posting_date=date(2025, 4, 1),
+        lines=(line,),
+        source_family=SourceFamily.GL_UPLOAD,
+    )
+    checkpoint = BalanceCheckpointRecord(
+        ledger_account_code="110000",
+        balance_date=date(2025, 3, 31),
+        balance=Decimal("100.00"),
+        source_family=SourceFamily.GL_UPLOAD,
+    )
+
+    assert entry.lines[0].amount == Decimal("100.00")
+    assert entry.lines[0].side is JournalLineSide.DEBIT
+    assert checkpoint.balance == Decimal("100.00")

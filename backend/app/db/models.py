@@ -1,7 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Optional
-from sqlalchemy import Date, DateTime, ForeignKey, JSON, Numeric, String, UniqueConstraint, func
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, JSON, LargeBinary, Numeric, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -67,6 +67,12 @@ class Entity(Base):
     snapshots: Mapped[list["TrialBalanceSnapshot"]] = relationship(
         "TrialBalanceSnapshot", back_populates="entity", cascade="all, delete-orphan"
     )
+    journal_entries: Mapped[list["JournalEntry"]] = relationship(
+        "JournalEntry", back_populates="entity", cascade="all, delete-orphan"
+    )
+    balance_checkpoints: Mapped[list["BalanceCheckpoint"]] = relationship(
+        "BalanceCheckpoint", back_populates="entity", cascade="all, delete-orphan"
+    )
     exceptions: Mapped[list["AuditException"]] = relationship(
         "AuditException", back_populates="entity", cascade="all, delete-orphan"
     )
@@ -106,6 +112,12 @@ class ImportBatch(Base):
     content_sha256: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     parser_version: Mapped[str] = mapped_column(String(50), nullable=False, default="1")
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="ACTIVE")
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, default="journal", server_default="journal")
+    raw_source_bytes: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    coverage_start: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    coverage_end: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    source_family: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    source_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     validation_report: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
@@ -114,6 +126,12 @@ class ImportBatch(Base):
     snapshots: Mapped[list["TrialBalanceSnapshot"]] = relationship("TrialBalanceSnapshot", back_populates="import_batch")
     transactions: Mapped[list["Transaction"]] = relationship("Transaction", back_populates="import_batch")
     scrutiny_runs: Mapped[list["ScrutinyRun"]] = relationship("ScrutinyRun", back_populates="import_batch")
+    journal_entries: Mapped[list["JournalEntry"]] = relationship(
+        "JournalEntry", back_populates="import_batch", cascade="all, delete-orphan"
+    )
+    balance_checkpoints: Mapped[list["BalanceCheckpoint"]] = relationship(
+        "BalanceCheckpoint", back_populates="import_batch", cascade="all, delete-orphan"
+    )
 
 
 class LedgerAccount(Base):
@@ -121,13 +139,17 @@ class LedgerAccount(Base):
     Represents an individual ledger account belonging to an entity.
     """
     __tablename__ = "ledger_accounts"
-    __table_args__ = (UniqueConstraint("entity_id", "name", name="uq_ledger_account_entity_name"),)
+    __table_args__ = (
+        UniqueConstraint("entity_id", "name", name="uq_ledger_account_entity_name"),
+        UniqueConstraint("entity_id", "external_code", name="uq_ledger_account_entity_external_code"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), nullable=False)
+    external_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
-    group_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    normal_balance: Mapped[str] = mapped_column(String(10), nullable=False)  # 'debit' or 'credit'
+    group_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    normal_balance: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)  # 'debit' or 'credit'
 
     # Relationships
     entity: Mapped["Entity"] = relationship("Entity", back_populates="accounts")
@@ -142,6 +164,102 @@ class LedgerAccount(Base):
     )
     exceptions: Mapped[list["AuditException"]] = relationship(
         "AuditException", back_populates="ledger_account"
+    )
+    journal_lines: Mapped[list["JournalLine"]] = relationship(
+        "JournalLine", back_populates="ledger_account"
+    )
+    balance_checkpoints: Mapped[list["BalanceCheckpoint"]] = relationship(
+        "BalanceCheckpoint", back_populates="ledger_account", cascade="all, delete-orphan"
+    )
+
+
+class JournalEntry(Base):
+    """One source document in the canonical journal representation."""
+    __tablename__ = "journal_entries"
+    __table_args__ = (
+        UniqueConstraint("import_batch_id", "source_document_id", name="uq_journal_entry_batch_document"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    import_batch_id: Mapped[int] = mapped_column(
+        ForeignKey("import_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_document_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    posting_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    document_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    document_type: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    narration: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+
+    import_batch: Mapped["ImportBatch"] = relationship("ImportBatch", back_populates="journal_entries")
+    entity: Mapped["Entity"] = relationship("Entity", back_populates="journal_entries")
+    lines: Mapped[list["JournalLine"]] = relationship(
+        "JournalLine", back_populates="journal_entry", cascade="all, delete-orphan"
+    )
+
+
+class JournalLine(Base):
+    """One source row in a canonical journal entry."""
+    __tablename__ = "journal_lines"
+    __table_args__ = (
+        UniqueConstraint("journal_entry_id", "source_row_number", name="uq_journal_line_entry_row"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    journal_entry_id: Mapped[int] = mapped_column(
+        ForeignKey("journal_entries.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ledger_account_id: Mapped[int] = mapped_column(
+        ForeignKey("ledger_accounts.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    source_row_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    posting_key: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    quantity: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 4), nullable=True)
+    currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    reference: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    clearing_document: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    profit_center: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    cost_center: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    text: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    supplier: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    wbs: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    purchasing_document: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    customer: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    dimensions: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    source_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    journal_entry: Mapped["JournalEntry"] = relationship("JournalEntry", back_populates="lines")
+    ledger_account: Mapped["LedgerAccount"] = relationship("LedgerAccount", back_populates="journal_lines")
+
+
+class BalanceCheckpoint(Base):
+    """One signed account balance at a source-provided balance date."""
+    __tablename__ = "balance_checkpoints"
+    __table_args__ = (
+        UniqueConstraint(
+            "import_batch_id", "ledger_account_id", "balance_date", name="uq_balance_checkpoint_batch_account_date"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    import_batch_id: Mapped[int] = mapped_column(
+        ForeignKey("import_batches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True)
+    ledger_account_id: Mapped[int] = mapped_column(
+        ForeignKey("ledger_accounts.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    balance_date: Mapped[date] = mapped_column(Date, nullable=False)
+    balance: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+    currency: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    source_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+    import_batch: Mapped["ImportBatch"] = relationship("ImportBatch", back_populates="balance_checkpoints")
+    entity: Mapped["Entity"] = relationship("Entity", back_populates="balance_checkpoints")
+    ledger_account: Mapped["LedgerAccount"] = relationship(
+        "LedgerAccount", back_populates="balance_checkpoints"
     )
 
 
@@ -215,6 +333,8 @@ class ScrutinyRun(Base):
     rule_set_version: Mapped[str] = mapped_column(String(50), nullable=False, default="1")
     status: Mapped[str] = mapped_column(String(30), nullable=False, default="COMPLETED")
     summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    dataset_fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    source_batch_ids: Mapped[Optional[list[int]]] = mapped_column(JSON, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
