@@ -14,6 +14,7 @@ from app.db.base import Base
 from app.db.models import Entity, ImportBatch, JournalEntry, JournalLine, LedgerAccount, Organization
 from app.ingestion.batches import stage_import_batch
 from app.ingestion.xlsx_normalizer import normalize_gl_xlsx, parse_gl_xlsx
+from conftest import TestingSessionLocal
 
 client = TestClient(app)
 
@@ -367,6 +368,12 @@ def test_fixed_gl_parser_skips_only_structured_summary_rows(canonical_session):
     with pytest.raises(ValueError, match="Document Number.*required"):
         parse_gl_xlsx(malformed, date(2025, 4, 1), date(2025, 4, 30))
 
+    blank_amount_footer = _xlsx_bytes(
+        headers, [["DOC-2", "1000", date(2025, 4, 1), None, "LIABILITY TOTAL"]]
+    )
+    with pytest.raises(ValueError, match="Amount in local currency.*required"):
+        parse_gl_xlsx(blank_amount_footer, date(2025, 4, 1), date(2025, 4, 30))
+
 
 def test_fixed_gl_normalizer_resolves_accounts_by_entity_scoped_external_code_only(canonical_session):
     session, entity_id = canonical_session
@@ -503,6 +510,76 @@ def test_entity(auth_headers):
     }, headers=auth_headers)
     assert res.status_code == 201
     return res.json()["id"]
+
+
+def test_fixed_gl_confirm_activates_after_normalization_and_rolls_back_invalid_replacement(
+    auth_headers, test_entity
+):
+    valid_contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [["DOC-1", "1000", date(2025, 4, 1), 100],
+         ["DOC-1", "2000", date(2025, 4, 1), -100]],
+    )
+    upload = client.post(
+        f"/entities/{test_entity}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("fixed_gl.xlsx", io.BytesIO(valid_contents),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=auth_headers,
+    )
+
+    assert upload.status_code == 200, upload.text
+    response = upload.json()
+    assert response["status"] == "ACTIVE"
+    assert response["validation_report"]["parser"] == "xlsx_gl"
+    assert response["validation_report"]["dataset_fingerprint"]
+    batch_id = response["import_batch_id"]
+    with TestingSessionLocal() as session:
+        assert session.get(ImportBatch, batch_id).status == "ACTIVE"
+
+    duplicate = client.post(
+        f"/entities/{test_entity}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("fixed_gl.xlsx", io.BytesIO(valid_contents),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=auth_headers,
+    )
+    assert duplicate.status_code == 200, duplicate.text
+    assert duplicate.json()["import_batch_id"] == batch_id
+
+    invalid_contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [["DOC-2", "1000", date(2025, 4, 1), 10],
+         ["DOC-2", "2000", date(2025, 4, 1), -9]],
+    )
+    failed = client.post(
+        f"/entities/{test_entity}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("replacement.xlsx", io.BytesIO(invalid_contents),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=auth_headers,
+    )
+    assert failed.status_code == 400
+
+    with TestingSessionLocal() as session:
+        active = session.get(ImportBatch, batch_id)
+        assert active is not None, session.scalars(select(ImportBatch)).all()
+        assert active.status == "ACTIVE"
+        assert active.validation_report["dataset_fingerprint"] == response["validation_report"]["dataset_fingerprint"]
+        assert session.scalar(select(func.count()).select_from(JournalLine)) == 2
+        assert session.scalar(select(func.count()).select_from(ImportBatch)) == 1
 
 
 def test_xlsx_confirm_produces_identical_exceptions_to_xml_fixture(auth_headers, test_entity):

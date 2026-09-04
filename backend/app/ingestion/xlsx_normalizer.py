@@ -303,13 +303,14 @@ def _summary_skip_reason(
     if any(not _is_blank(values[required_columns[header]]) for header in identity_headers):
         return None
     amount_value = values[required_columns["Amount in local currency"]]
-    if not _is_blank(amount_value):
-        try:
-            amount = Decimal(str(amount_value).replace(",", "").strip())
-        except (InvalidOperation, TypeError, ValueError):
-            return None
-        if not amount.is_finite() or amount != 0:
-            return None
+    if _is_blank(amount_value):
+        return None
+    try:
+        amount = Decimal(str(amount_value).replace(",", "").strip())
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not amount.is_finite() or amount != 0:
+        return None
     return {
         "row": row_number,
         "reason": "summary/footer row",

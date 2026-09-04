@@ -221,3 +221,93 @@ Result:
 The warnings remain the existing FastAPI/Starlette deprecations. No repeated
 full-suite, smoke, compile, or other long-running checks were started after
 the user requested stopping them.
+
+## Round 2 fix report — 2026-09-05
+
+### Scope
+
+Fixed the production XLSX confirmation lifecycle in
+`backend/app/routers/scrutiny.py` and tightened the footer rule in
+`backend/app/ingestion/xlsx_normalizer.py`. Added API and parser regressions in
+`backend/tests/test_xlsx_ingestion.py`. The SDD ledger and Task 5+ code were
+not modified.
+
+The XLSX confirmation route now creates a staged candidate, normalizes it,
+activates it with replacement/supersession only after successful validation,
+and returns the final active status, reconciliation report, and dataset
+fingerprint. Candidate work is isolated in a savepoint so failed normalization
+cannot remove an existing active dataset. Exact-hash active duplicates remain
+no-ops and non-active duplicates remain rejected by the shared batch helper.
+Explicit legacy trial-balance mappings continue through their compatibility
+path and are activated only after their existing normalization completes.
+
+Summary/footer recognition now requires a present, numerically zero amount;
+summary labels with a blank amount fail required-value validation.
+
+### Test-first evidence
+
+RED command:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_xlsx_ingestion.py -k 'fixed_gl_confirm_activates_after_normalization or structured_summary'
+```
+
+Result: exit code 1; 2 regressions failed and 27 tests were deselected. The
+API path failed because the route left the candidate active before fixed
+normalization, and the blank-amount summary row was incorrectly skipped.
+
+### Verification
+
+Focused XLSX and API integration tests:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_xlsx_ingestion.py tests/test_api_integration.py
+```
+
+```text
+39 passed, 3 warnings in 11.48s
+```
+
+Full backend suite:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q
+```
+
+```text
+94 passed, 4 warnings in 14.92s
+```
+
+Supplied Q1 workbook smoke/count/zero-balance check:
+
+```text
+PYTHONPATH=. ../.venv/bin/python -c 'from datetime import date; from decimal import Decimal; from app.ingestion.xlsx_normalizer import parse_gl_xlsx; p=parse_gl_xlsx(open("/Users/adinayak18/Downloads/GL Dump Q1.XLSX","rb").read(), date(2025,4,1), date(2025,6,30)); lines=[line for entry in p for line in entry.lines]; print({"rows":len(lines),"documents":len(p),"accounts":len({line.ledger_account_code for line in lines}),"signed_total":sum((line.amount for line in lines),Decimal("0")),"min_date":min(entry.posting_date for entry in p),"max_date":max(entry.posting_date for entry in p),"om_rows":[line.source_row_number for line in lines if line.source_row_number==28096 and line.quantity is None]})'
+```
+
+```text
+{'rows': 59167, 'documents': 10914, 'accounts': 445, 'signed_total': Decimal('0.00'), 'min_date': datetime.date(2025, 4, 1), 'max_date': datetime.date(2025, 6, 30), 'om_rows': [28096]}
+```
+
+Whitespace check:
+
+```text
+git diff --check
+```
+
+```text
+(no output; exit code 0)
+```
+
+Compilation:
+
+```text
+PYTHONPATH=. ../.venv/bin/python -m compileall -q app tests
+```
+
+```text
+(no output; exit code 0)
+```
+
+The three/four warnings are the existing FastAPI/Starlette deprecations. The
+supplied workbook was available and passed the smoke check; the corresponding
+local-path regression remains skipped when that external fixture is absent.
