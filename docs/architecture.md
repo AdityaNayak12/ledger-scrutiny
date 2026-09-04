@@ -1,100 +1,170 @@
 # Architecture
 
-## Pipeline
-Tally XML export -> ingestion parser -> normalizer -> Postgres
-  -> rules engine -> FastAPI -> (future) exception review UI
+## Release ingestion pipeline
 
-Each arrow is a hard boundary. The normalizer is the only thing allowed to
-know about Tally's XML shape. Everything after it only ever sees the
-internal schema below.
-
-## Audit lifecycle
-
-The system treats every upload and scrutiny execution as durable audit
-evidence. A re-upload never deletes the prior import: it creates a new
-`import_batch`, marks the prior active batch for the period as `SUPERSEDED`,
-and uses the new batch for subsequent scrutiny runs.
-
-```
-Entity -> FinancialPeriod -> ImportBatch -> ScrutinyRun -> Finding -> ReviewAction
+```text
+Tally HTTP or GL XLSX + signed prior-year TB
+                    |
+              source adapter
+                    |
+       canonical journal and balance records
+                    |
+       validation, reconciliation, readiness
+                    |
+        atomic active dataset and audit trail
+                    |
+                scrutiny rules
 ```
 
-- `ImportBatch` records the source, content SHA-256, uploader, parser version,
-  validation report, and lifecycle status.
-- `ScrutinyRun` records the exact active import batch, rule-set version,
-  timestamps, status, and summary.
-- Findings retain a stable fingerprint so review state can survive a rerun
-  when only amounts in the explanation change.
-- `ReviewAction` is append-only. The finding's current status/notes are a
-  convenience projection of the latest decision, not the only audit record.
+Tally and GL upload are the two user-facing ingestion surfaces. The signed
+trial balance is an account-level baseline artifact inside the GL workflow,
+not a third accounting source. Source adapters preserve raw artifacts and map
+both sources into the same source-agnostic records before scrutiny rules run.
 
-Database changes are managed by Alembic. Apply production migrations with
-`PYTHONPATH=. alembic upgrade head` from `backend/`; do not rely on
-`create_all` as a migration mechanism.
+## GL upload contract
 
-## Internal schema (source-agnostic)
+The first supported GL profile is the supplied transaction workbook. Required
+headers are fixed and case-sensitive in the release contract:
 
-entities
-  id, name, materiality_threshold
+- `Document Number`
+- `G/L Account`
+- `Posting Date`
+- `Amount in local currency`
 
-ledger_accounts
-  id, entity_id, name, group_name, normal_balance ('debit'|'credit')
-  group_name examples: 'Capital Account', 'Fixed Assets', 'Sundry Debtors',
-  'Sundry Creditors', 'Sales', 'Purchases', 'Direct Expenses', etc.
-  normal_balance is derived from group_name via a lookup table
-  (see rules/account_groups.py) — this is what rule #1 checks against.
+Document type/date, posting key, invoice/reference, clearing document, profit
+centre, cost centre, text, supplier/vendor, WBS, purchasing document, and
+customer fields are retained when present. The parser reads cached formula
+values (`data_only=True`) and warns when a formula has no cached result; it
+does not evaluate formulas. Missing required headers or values, invalid dates
+or decimals, and rows outside declared coverage are hard failures.
 
-transactions
-  id, entity_id, date, debit_account_id, credit_account_id, amount,
-  narration, voucher_type, source_voucher_id
+The supplied workbook is expected to contain 59,168 data rows, 10,914
+documents, and 445 G/L accounts. Every accepted document must balance to zero
+within `₹0.01`; no row may disappear without a recorded skip or rejection
+reason. Compact release fixtures live under
+`backend/tests/fixtures/`: `golden_gl.xlsx` and `golden_tally.xml`.
 
-trial_balance_snapshots
-  id, entity_id, ledger_account_id, period_start, period_end,
-  opening_balance, total_debits, total_credits, closing_balance
+## Signs, currency, and baseline
 
-exceptions
-  id, entity_id, rule_name, ledger_account_id (nullable), severity,
-  message, created_at
+Canonical amounts use `Decimal` with debit-positive and credit-negative signs.
+Positive signed GL local-currency amounts become debit lines; negative amounts
+become credit lines. Tally values are normalized to the same convention. No
+scrutiny rule re-interprets source signs after normalization.
 
-import_batches
-  id, entity_id, financial_period_id, source, original_filename,
-  content_sha256, parser_version, status, validation_report, created_at
+An entity has one configured functional currency. `Amount in local currency`
+means that configured currency because the GL source has no currency-code
+column. P0 does not consolidate multiple currencies.
 
-scrutiny_runs
-  id, entity_id, financial_period_id, import_batch_id, rule_set_version,
-  status, summary, started_at, completed_at
+When establishing a financial year, GL ingestion also requires a structured,
+machine-readable prior-year closing trial balance with one signed balance per
+G/L account code at a stated balance date. That checkpoint becomes the
+current-year opening baseline. A high-level balance-sheet or profit-and-loss
+total cannot seed account-level openings. Duplicate account codes,
+non-balanced signed totals, or incomplete account-level baseline coverage are
+hard failures. A signed PDF may be retained as evidence but is not an
+ingestible baseline without the structured account schedule.
 
-review_actions
-  id, exception_id, user_id, status, auditor_notes, created_at
+## Period and dataset rules
 
-## Why this schema shape
-- ledger_accounts.normal_balance is precomputed at normalization time
-  (not derived at query time) so the rules engine never needs to know
-  Tally's group naming conventions.
-- trial_balance_snapshots is a separate table from transactions rather
-  than a computed view, because scrutiny needs to compare *periods*
-  (this year's opening vs last year's closing), and materializing
-  snapshots makes that a simple join instead of an aggregation over
-  every transaction each time.
-- exceptions is its own table, not just an API response, because a CA
-  needs to be able to mark one reviewed/cleared without re-running the
-  whole scrutiny pass. Persisting exceptions is what makes the "human
-  reviews an exception queue" workflow possible later.
+- An entity has one active source family per financial year: Tally or GL
+  upload.
+- GL coverage is one full-year workbook or non-overlapping Q1-Q4 workbooks.
+- A full-year workbook explicitly replaces the quarterly set; replaced batches
+  remain `SUPERSEDED`.
+- A corrected period is validated before its previous active batch is replaced.
+- Gaps may remain staged, but a dataset is not `READY` until baseline and
+  required coverage are complete.
+- Active journal coverage may not overlap. The GL workflow validates rows
+  against their declared coverage dates.
 
-## Rules engine contract
-Every rule is a function with this signature:
+## Lifecycle and reconciliation
 
-    def rule_fn(entity: Entity, accounts: list[LedgerAccount],
-                snapshots: list[TrialBalanceSnapshot], period_start: date,
-                period_end: date) -> list[Exception]
+Every source follows preflight, stage, validate, reconcile, activate, and
+report steps. Lifecycle statuses are `STAGED`, `ACTIVE`, `FAILED`, and
+`SUPERSEDED`. A failed replacement leaves the previous active dataset
+untouched. Re-uploading the same SHA-256 is an idempotent duplicate, not a
+second accounting import.
 
-The engine calls its fixed rule set directly. Period dates are passed to every
-rule rather than being attached transiently to an entity.
+Each batch report includes input, accepted, skipped, and rejected row counts;
+debit, credit, and net totals; document and unbalanced-document counts;
+account and unmapped-account counts; posting-date min/max; baseline coverage;
+active batch IDs; and the dataset fingerprint. For each account and period:
 
-## Adding a new ingestion source later (SAP, Zoho)
-1. Write `ingestion/<source>_parser.py` that reads the source's native
-   export format.
-2. Write `ingestion/<source>_normalizer.py` that maps it into the same
-   entities/ledger_accounts/transactions/trial_balance_snapshots shape
-   Tally's normalizer produces.
-3. Nothing in rules/ or routers/ changes.
+```text
+derived closing = signed opening checkpoint + cumulative signed journal movement
+```
+
+Readiness is `INVALID`, `PARTIAL`, `READY`, or `READY_WITH_WARNINGS`.
+`INVALID` means parse or accounting validation failed. `PARTIAL` means valid
+staged data is missing baseline or period coverage. Only `READY` and
+`READY_WITH_WARNINGS` datasets may be passed to scrutiny rules.
+
+## Tally contract
+
+The Tally adapter uses the supported XML-over-HTTP response and fetches ledger
+or account master data with group hierarchy, opening and closing balances,
+voucher headers, every voucher ledger line, and stable Tally identifiers when
+available. Connector errors become actionable typed ingestion errors. Request
+bodies, raw XML, and credentials are never logged.
+
+The compatibility response keeps this shape until it enters the shared
+pipeline:
+
+```python
+{
+    "entity": {
+        "name": str,
+        "financial_year_start": date,
+        "financial_year_end": date,
+    },
+    "ledgers": [
+        {
+            "name": str,
+            "group_name": str,
+            "opening_balance": Decimal,
+            "closing_balance": Decimal,
+        },
+    ],
+    "vouchers": [
+        {
+            "date": date,
+            "voucher_type": str,
+            "source_voucher_id": str | None,
+            "narration": str | None,
+            "entries": [
+                {
+                    "ledger_name": str,
+                    "type": "debit" | "credit",
+                    "amount": Decimal,
+                },
+            ],
+        },
+    ],
+}
+```
+
+The shared pipeline maps every entry to a canonical signed journal line and
+retains the source document and line provenance. Voucher lines must balance
+within `₹0.01`; no arbitrary debit/credit pairing may discard additional
+lines.
+
+## Canonical records and audit lineage
+
+The canonical model contains one `JournalEntry` per source document, one
+`JournalLine` per source row, and one `BalanceCheckpoint` per account at a
+stated balance date. `JournalLine` retains source row number, signed amount,
+derived side, posting key, quantity, currency, typed dimensions where useful,
+and remaining source metadata. The source row number is the stable provenance
+key within an immutable batch.
+
+`ImportBatch` remains the provenance root. It retains raw source bytes,
+content SHA-256, parser version, declared coverage, source family, validation
+report, and lifecycle status. `ScrutinyRun` records the active dataset
+fingerprint and ordered source-batch IDs; legacy single-batch lineage may
+remain nullable during migration. Existing paired `Transaction` rows remain
+for compatibility while consumers move to canonical journal lines.
+
+## Rules boundary
+
+Scrutiny rules consume canonical records and period dates. They do not know
+Tally XML, GL headers, source signs, provider details, or file parsing rules.

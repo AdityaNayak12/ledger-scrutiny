@@ -1,0 +1,102 @@
+<ENVELOPE>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>All Ledger Entries</REPORTNAME>
+      </REQUESTDESC>
+      <REQUESTDATA>
+        <COMPANY>
+          <RENAME>Ledger Fixture Co</RENAME>
+          <BOOKSFROM>20250401</BOOKSFROM>
+          <BOOKSTO>20260331</BOOKSTO>
+        </COMPANY>
+        <TALLYMESSAGE>
+          <LEDGER NAME="110000">
+            <PARENT>Cash-in-hand</PARENT>
+            <OPENINGBALANCE>0.00 Dr</OPENINGBALANCE>
+            <CLOSINGBALANCE>1000.00 Dr</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="400000">
+            <PARENT>Sales Accounts</PARENT>
+            <OPENINGBALANCE>0.00 Cr</OPENINGBALANCE>
+            <CLOSINGBALANCE>3500.00 Cr</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="120000">
+            <PARENT>Sundry Debtors</PARENT>
+            <OPENINGBALANCE>0.00 Dr</OPENINGBALANCE>
+            <CLOSINGBALANCE>2500.00 Dr</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="500000">
+            <PARENT>Direct Expenses</PARENT>
+            <OPENINGBALANCE>0.00 Dr</OPENINGBALANCE>
+            <CLOSINGBALANCE>700.00 Dr</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <LEDGER NAME="210000">
+            <PARENT>Sundry Creditors</PARENT>
+            <OPENINGBALANCE>0.00 Cr</OPENINGBALANCE>
+            <CLOSINGBALANCE>700.00 Cr</CLOSINGBALANCE>
+          </LEDGER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="SA">
+            <DATE>20250401</DATE>
+            <VOUCHERNUMBER>DOC-1001</VOUCHERNUMBER>
+            <NARRATION>Cash sale</NARRATION>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>110000</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-1000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>400000</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>1000.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="DR">
+            <DATE>20250515</DATE>
+            <VOUCHERNUMBER>DOC-1002</VOUCHERNUMBER>
+            <NARRATION>Customer invoice</NARRATION>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>120000</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-2500.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>400000</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>2500.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+        <TALLYMESSAGE>
+          <VOUCHER VCHTYPE="KR">
+            <DATE>20250630</DATE>
+            <VOUCHERNUMBER>DOC-1003</VOUCHERNUMBER>
+            <NARRATION>Expense accrual</NARRATION>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>500000</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE>
+              <AMOUNT>-700.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+            <ALLLEDGERENTRIES.LIST>
+              <LEDGERNAME>210000</LEDGERNAME>
+              <ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE>
+              <AMOUNT>700.00</AMOUNT>
+            </ALLLEDGERENTRIES.LIST>
+          </VOUCHER>
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>
