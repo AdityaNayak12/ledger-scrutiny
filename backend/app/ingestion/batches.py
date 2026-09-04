@@ -9,6 +9,7 @@ from hashlib import sha256
 from typing import Any, Mapping
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.models import FinancialPeriod, ImportBatch
@@ -16,6 +17,7 @@ from app.ingestion.schema import BatchKind, BatchStatus, SourceFamily
 
 
 PARSER_VERSION = "2"
+_DUPLICATE_MARKER = "_duplicate_import_batch"
 
 
 class BatchLifecycleError(ValueError):
@@ -28,6 +30,25 @@ class BatchConflictError(BatchLifecycleError):
 
 class BatchValidationError(BatchLifecycleError):
     """A candidate batch failed validation before activation."""
+
+
+def is_duplicate_import_batch(batch: ImportBatch) -> bool:
+    """Return whether this staging result reused an existing hash-identical batch."""
+    return bool(getattr(batch, _DUPLICATE_MARKER, False))
+
+
+def _mark_duplicate(batch: ImportBatch) -> ImportBatch:
+    setattr(batch, _DUPLICATE_MARKER, True)
+    return batch
+
+
+def _find_duplicate_import_batch(session: Session, entity_id: int, content_sha256: str) -> ImportBatch | None:
+    return session.execute(
+        select(ImportBatch).where(
+            ImportBatch.entity_id == entity_id,
+            ImportBatch.content_sha256 == content_sha256,
+        ).order_by(ImportBatch.id.desc())
+    ).scalars().first()
 
 
 def _enum_value(value: Any) -> Any:
@@ -96,51 +117,55 @@ def stage_import_batch(
     """Create one staged raw-retaining batch, or return its hash duplicate."""
     contents = bytes(contents)
     content_sha256 = sha256(contents).hexdigest()
-    duplicate = session.execute(
-        select(ImportBatch).where(
-            ImportBatch.entity_id == entity_id,
-            ImportBatch.content_sha256 == content_sha256,
-        ).order_by(ImportBatch.id.desc())
-    ).scalars().first()
+    duplicate = _find_duplicate_import_batch(session, entity_id, content_sha256)
     if duplicate is not None:
-        return duplicate
+        return _mark_duplicate(duplicate)
 
-    period = session.execute(
-        select(FinancialPeriod).where(
-            FinancialPeriod.entity_id == entity_id,
-            FinancialPeriod.period_start == period_start,
-            FinancialPeriod.period_end == period_end,
-        ).order_by(FinancialPeriod.id.desc())
-    ).scalars().first()
-    if period is None:
-        period = FinancialPeriod(
-            entity_id=entity_id,
-            period_start=period_start,
-            period_end=period_end,
-            source=source,
-        )
-        session.add(period)
-        session.flush()
+    try:
+        with session.begin_nested():
+            period = session.execute(
+                select(FinancialPeriod).where(
+                    FinancialPeriod.entity_id == entity_id,
+                    FinancialPeriod.period_start == period_start,
+                    FinancialPeriod.period_end == period_end,
+                ).order_by(FinancialPeriod.id.desc())
+            ).scalars().first()
+            if period is None:
+                period = FinancialPeriod(
+                    entity_id=entity_id,
+                    period_start=period_start,
+                    period_end=period_end,
+                    source=source,
+                )
+                session.add(period)
+                session.flush()
 
-    batch = ImportBatch(
-        entity_id=entity_id,
-        financial_period_id=period.id,
-        uploaded_by_user_id=uploaded_by_user_id,
-        source=source,
-        original_filename=original_filename or "unnamed-upload",
-        content_sha256=content_sha256,
-        parser_version=PARSER_VERSION,
-        status=BatchStatus.STAGED.value,
-        kind=_enum_value(batch_kind if batch_kind is not None else kind),
-        raw_source_bytes=contents,
-        coverage_start=coverage_start or _as_date(period_start),
-        coverage_end=coverage_end or _as_date(period_end),
-        source_family=_source_family(source, source_family),
-        source_metadata=dict(source_metadata or {}),
-        validation_report=dict(validation_report or {}),
-    )
-    session.add(batch)
-    session.flush()
+            batch = ImportBatch(
+                entity_id=entity_id,
+                financial_period_id=period.id,
+                uploaded_by_user_id=uploaded_by_user_id,
+                source=source,
+                original_filename=original_filename or "unnamed-upload",
+                content_sha256=content_sha256,
+                parser_version=PARSER_VERSION,
+                status=BatchStatus.STAGED.value,
+                kind=_enum_value(batch_kind if batch_kind is not None else kind),
+                raw_source_bytes=contents,
+                coverage_start=coverage_start or _as_date(period_start),
+                coverage_end=coverage_end or _as_date(period_end),
+                source_family=_source_family(source, source_family),
+                source_metadata=dict(source_metadata or {}),
+                validation_report=dict(validation_report or {}),
+            )
+            session.add(batch)
+            session.flush()
+    except IntegrityError:
+        duplicate = _find_duplicate_import_batch(session, entity_id, content_sha256)
+        if duplicate is not None:
+            return _mark_duplicate(duplicate)
+        raise
+
+    setattr(batch, _DUPLICATE_MARKER, False)
     return batch
 
 
@@ -185,6 +210,8 @@ def create_import_batch(
         source_family=source_family,
         source_metadata=source_metadata,
     )
+    if is_duplicate_import_batch(batch):
+        return batch
     if activate is None:
         legacy_call = all(
             value is None
@@ -248,13 +275,15 @@ def activate_import_batch(
 ) -> ImportBatch:
     """Atomically activate validated batch and supersede replaced coverage."""
     batch = _get_batch(session, batch_or_id)
-    if validation_report is not None:
-        batch.validation_report = dict(validation_report)
     if batch.status == BatchStatus.ACTIVE.value:
         return batch
     if batch.status != BatchStatus.STAGED.value:
         raise BatchLifecycleError(f"Cannot activate batch {batch.id} from status {batch.status}.")
 
+    previous_batch_status = batch.status
+    previous_report = dict(batch.validation_report or {})
+    if validation_report is not None:
+        batch.validation_report = dict(validation_report)
     report = dict(batch.validation_report or {})
     if report.get("readiness") == "INVALID":
         message = f"Batch {batch.id} has INVALID readiness and cannot be activated."
@@ -264,47 +293,56 @@ def activate_import_batch(
     if allow_replacement is not None:
         replace = allow_replacement
 
-    candidates = [
-        active for active in _active_journal_batches(session, batch.entity_id)
-        if active.id != batch.id and _is_journal(active)
-    ]
-    candidate_dates = _batch_dates(batch)
-    candidate_family = _source_family(batch.source, batch.source_family)
-    candidate_year = _financial_year(candidate_dates[0])
+    if not _is_journal(batch):
+        try:
+            batch.status = BatchStatus.ACTIVE.value
+            session.flush()
+        except Exception:
+            batch.status = previous_batch_status
+            batch.validation_report = previous_report
+            raise
+        return batch
+
     replaced: list[ImportBatch] = []
 
     try:
-        for active in candidates:
-            active_dates = _batch_dates(active)
-            active_family = _source_family(active.source, active.source_family)
-            active_year = _financial_year(active_dates[0])
-            if (
-                candidate_family != active_family
-                and candidate_year is not None
-                and candidate_year == active_year
-            ):
-                raise BatchConflictError(
-                    f"Active source family conflict: batch {active.id} uses {active_family}, "
-                    f"candidate uses {candidate_family}."
-                )
-            if _overlaps(candidate_dates, active_dates):
-                if candidate_family != active_family:
+        with session.no_autoflush:
+            candidates = [
+                active for active in _active_journal_batches(session, batch.entity_id)
+                if active.id != batch.id and _is_journal(active)
+            ]
+            candidate_dates = _batch_dates(batch)
+            candidate_family = _source_family(batch.source, batch.source_family)
+            candidate_year = _financial_year(candidate_dates[0])
+            for active in candidates:
+                active_dates = _batch_dates(active)
+                active_family = _source_family(active.source, active.source_family)
+                active_year = _financial_year(active_dates[0])
+                if (
+                    candidate_family != active_family
+                    and candidate_year is not None
+                    and candidate_year == active_year
+                ):
                     raise BatchConflictError(
-                        f"Active journal coverage overlap with source family conflict: batch {active.id}."
+                        f"Active source family conflict: batch {active.id} uses {active_family}, "
+                        f"candidate uses {candidate_family}."
                     )
-                exact_coverage = candidate_dates == active_dates
-                if not (replace or exact_coverage):
-                    raise BatchConflictError(
-                        f"Active journal coverage overlap with batch {active.id}."
-                    )
-                replaced.append(active)
+                if _overlaps(candidate_dates, active_dates):
+                    if candidate_family != active_family:
+                        raise BatchConflictError(
+                            f"Active journal coverage overlap with source family conflict: batch {active.id}."
+                        )
+                    exact_coverage = candidate_dates == active_dates
+                    if not (replace or exact_coverage):
+                        raise BatchConflictError(
+                            f"Active journal coverage overlap with batch {active.id}."
+                        )
+                    replaced.append(active)
     except BatchLifecycleError as error:
         _mark_failed(session, batch, str(error))
         raise
 
     previous_statuses = {active.id: active.status for active in replaced}
-    previous_batch_status = batch.status
-    previous_report = dict(batch.validation_report or {})
     try:
         for active in replaced:
             active.status = BatchStatus.SUPERSEDED.value
@@ -331,8 +369,8 @@ def fail_import_batch(
 ) -> ImportBatch:
     """Persist failed validation without touching active batches."""
     batch = _get_batch(session, batch_or_id)
-    if batch.status == BatchStatus.ACTIVE.value:
-        raise BatchLifecycleError(f"Cannot fail active batch {batch.id}.")
+    if batch.status != BatchStatus.STAGED.value:
+        raise BatchLifecycleError(f"Cannot fail batch {batch.id} from status {batch.status}.")
     if validation_report is not None:
         batch.validation_report = dict(validation_report)
     message = "; ".join(errors) or "Batch validation failed."

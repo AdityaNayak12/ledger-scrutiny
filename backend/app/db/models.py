@@ -102,6 +102,13 @@ class FinancialPeriod(Base):
 class ImportBatch(Base):
     """Immutable record of one source-file ingestion attempt."""
     __tablename__ = "import_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_id",
+            "content_sha256",
+            name="uq_import_batch_entity_content_sha256",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     entity_id: Mapped[int] = mapped_column(ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True)

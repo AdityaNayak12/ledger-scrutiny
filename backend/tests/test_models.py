@@ -1,6 +1,8 @@
 from datetime import date, datetime
 from decimal import Decimal
-from sqlalchemy import create_engine
+import pytest
+from sqlalchemy import create_engine, inspect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
@@ -330,3 +332,91 @@ def test_canonical_schema_records_use_signed_decimal_contract():
     assert entry.lines[0].amount == Decimal("100.00")
     assert entry.lines[0].side is JournalLineSide.DEBIT
     assert checkpoint.balance == Decimal("100.00")
+
+
+def test_import_batch_hash_is_unique_per_entity_but_not_globally():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    try:
+        organization = Organization(name="Hash Constraint Org")
+        session.add(organization)
+        session.flush()
+        first_entity = Entity(
+            organization_id=organization.id,
+            name="First Hash Entity",
+            materiality_threshold=Decimal("0.00"),
+        )
+        second_entity = Entity(
+            organization_id=organization.id,
+            name="Second Hash Entity",
+            materiality_threshold=Decimal("0.00"),
+        )
+        session.add_all([first_entity, second_entity])
+        session.flush()
+        first_period = FinancialPeriod(
+            entity_id=first_entity.id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            source="gl_upload",
+        )
+        second_period = FinancialPeriod(
+            entity_id=second_entity.id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            source="gl_upload",
+        )
+        session.add_all([first_period, second_period])
+        session.flush()
+        session.add(ImportBatch(
+            entity_id=first_entity.id,
+            financial_period_id=first_period.id,
+            source="gl_upload",
+            original_filename="first.xlsx",
+            content_sha256="c" * 64,
+            parser_version="2",
+            status="STAGED",
+            raw_source_bytes=b"same-bytes",
+            validation_report={},
+        ))
+        session.commit()
+
+        duplicate = ImportBatch(
+            entity_id=first_entity.id,
+            financial_period_id=first_period.id,
+            source="gl_upload",
+            original_filename="duplicate.xlsx",
+            content_sha256="c" * 64,
+            parser_version="2",
+            status="STAGED",
+            raw_source_bytes=b"same-bytes",
+            validation_report={},
+        )
+        session.add(duplicate)
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+        session.add(ImportBatch(
+            entity_id=second_entity.id,
+            financial_period_id=second_period.id,
+            source="gl_upload",
+            original_filename="other-entity.xlsx",
+            content_sha256="c" * 64,
+            parser_version="2",
+            status="STAGED",
+            raw_source_bytes=b"same-bytes",
+            validation_report={},
+        ))
+        session.commit()
+
+        names = {
+            constraint["name"]
+            for constraint in inspect(engine).get_unique_constraints("import_batches")
+        }
+        assert "uq_import_batch_entity_content_sha256" in names
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)

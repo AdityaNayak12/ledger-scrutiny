@@ -4,8 +4,11 @@ from decimal import Decimal
 from datetime import date
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from app.main import app
+from app.db.models import ImportBatch, Transaction, TrialBalanceSnapshot
+from conftest import TestingSessionLocal
 
 client = TestClient(app)
 
@@ -151,6 +154,54 @@ def test_api_entities_lifecycle_flow():
     exceptions = list_exceptions_res.json()
     assert len(exceptions) == 1
     assert exceptions[0]["rule_name"] == "trial_balance_balances"
+
+
+def test_duplicate_tally_upload_is_idempotent_for_child_records():
+    registration = client.post("/auth/register", json={
+        "organization_name": "Duplicate Import Firm",
+        "email": f"duplicate.{os.urandom(4).hex()}@integration.com",
+        "password": "Password123",
+    })
+    assert registration.status_code == 201
+    headers = {"Authorization": f"Bearer {registration.json()['access_token']}"}
+    entity = client.post(
+        "/entities",
+        json={"name": "Duplicate Import Entity", "materiality_threshold": "0.00"},
+        headers=headers,
+    )
+    assert entity.status_code == 201
+    entity_id = entity.json()["id"]
+    xml_path = os.path.join(os.path.dirname(__file__), "sample_tally_export.xml")
+
+    with open(xml_path, "rb") as file_handle:
+        first = client.post(
+            f"/entities/{entity_id}/upload",
+            files={"file": ("sample_tally_export.xml", file_handle, "text/xml")},
+            headers=headers,
+        )
+    with open(xml_path, "rb") as file_handle:
+        duplicate = client.post(
+            f"/entities/{entity_id}/upload",
+            files={"file": ("sample_tally_export.xml", file_handle, "text/xml")},
+            headers=headers,
+        )
+
+    assert first.status_code == 200, first.text
+    assert duplicate.status_code == 200, duplicate.text
+    batch_id = first.json()["import_batch_id"]
+    assert duplicate.json()["import_batch_id"] == batch_id
+    with TestingSessionLocal() as session:
+        assert session.scalar(
+            select(func.count()).select_from(Transaction).where(Transaction.import_batch_id == batch_id)
+        ) == 2
+        assert session.scalar(
+            select(func.count()).select_from(TrialBalanceSnapshot).where(
+                TrialBalanceSnapshot.import_batch_id == batch_id
+            )
+        ) == 5
+        assert session.scalar(
+            select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)
+        ) == 1
 
 
 def test_api_scrutiny_with_violations():

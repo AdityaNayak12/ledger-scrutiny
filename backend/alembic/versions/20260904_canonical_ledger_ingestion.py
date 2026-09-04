@@ -105,6 +105,11 @@ def _create_import_batches() -> None:
         sa.Column("source_metadata", sa.JSON(), nullable=False, server_default="{}"),
         sa.Column("validation_report", sa.JSON(), nullable=False, server_default="{}"),
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
+        sa.UniqueConstraint(
+            "entity_id",
+            "content_sha256",
+            name="uq_import_batch_entity_content_sha256",
+        ),
     )
     op.create_index("ix_import_batches_entity_id", "import_batches", ["entity_id"])
     op.create_index("ix_import_batches_financial_period_id", "import_batches", ["financial_period_id"])
@@ -122,6 +127,11 @@ def _add_import_batch_columns() -> None:
             "source_family": sa.Column("source_family", sa.String(50), nullable=True),
             "source_metadata": sa.Column("source_metadata", sa.JSON(), nullable=False, server_default="{}"),
         },
+    )
+    _ensure_unique(
+        "import_batches",
+        "uq_import_batch_entity_content_sha256",
+        ["entity_id", "content_sha256"],
     )
 
 

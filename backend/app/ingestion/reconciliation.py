@@ -186,6 +186,8 @@ def build_reconciliation_report(
         "unbalanced_document_count": int(unbalanced),
         "account_count": len(account_codes),
         "unmapped_account_count": len(unmapped),
+        "account_codes": sorted(account_codes, key=str),
+        "unmapped_account_codes": sorted(unmapped, key=str),
         "posting_date_min": min(dates).isoformat() if dates else None,
         "posting_date_max": max(dates).isoformat() if dates else None,
         "baseline_coverage": baseline,
@@ -235,11 +237,20 @@ def build_active_dataset_report(session: Any, entity_id: int) -> dict[str, Any]:
         warnings=[warning for item in reports for warning in item.get("warnings", [])],
         errors=[error for item in reports for error in item.get("errors", [])],
     )
+    account_codes = set()
+    unmapped_account_codes = set()
+    for item in reports:
+        account_codes.update(item.get("account_codes", ()))
+        unmapped_account_codes.update(item.get("unmapped_account_codes", ()))
+    report["account_codes"] = sorted(account_codes, key=str)
+    report["unmapped_account_codes"] = sorted(unmapped_account_codes, key=str)
     for key in (
         "input", "accepted", "skipped", "rejected", "document_count",
-        "unbalanced_document_count", "account_count", "unmapped_account_count",
+        "unbalanced_document_count",
     ):
         report[key] = sum(int(item.get(key, 0)) for item in reports)
+    report["account_count"] = len(account_codes)
+    report["unmapped_account_count"] = len(unmapped_account_codes)
     for key in ("debit", "credit"):
         report[key] = format(sum((Decimal(str(item.get(key, "0"))) for item in reports), Decimal("0")), "f")
     report["net"] = format(Decimal(report["debit"]) - Decimal(report["credit"]), "f")

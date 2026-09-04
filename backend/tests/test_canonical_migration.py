@@ -211,3 +211,27 @@ def test_migration_repairs_foreign_keys_on_existing_canonical_tables(tmp_path: P
         ("entity_id", "entities", "CASCADE"),
         ("ledger_account_id", "ledger_accounts", "RESTRICT"),
     }
+
+
+def test_migration_adds_entity_scoped_import_hash_constraint(tmp_path: Path):
+    db_path = tmp_path / "import-hash-constraint.db"
+    _create_legacy_schema(db_path)
+
+    result = _run_upgrade(db_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    connection = sqlite3.connect(db_path)
+    try:
+        unique_indexes = [
+            row[1]
+            for row in connection.execute("PRAGMA index_list(import_batches)")
+            if row[2]
+        ]
+        unique_columns = [
+            [column[2] for column in connection.execute(f"PRAGMA index_info('{index_name}')")]
+            for index_name in unique_indexes
+        ]
+    finally:
+        connection.close()
+
+    assert ["entity_id", "content_sha256"] in unique_columns

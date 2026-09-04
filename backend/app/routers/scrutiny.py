@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict
 
 from app.db.session import get_db
 from app.db.models import AuditException, Entity, FinancialPeriod, ImportBatch, LedgerAccount, ReviewAction, ScrutinyRun, TrialBalanceSnapshot, User
-from app.ingestion.batches import create_import_batch
+from app.ingestion.batches import create_import_batch, is_duplicate_import_batch
 from app.ingestion.tally_parser import parse_tally_xml
 from app.ingestion.tally_http import TallyConnectorError, fetch_trial_balance
 from app.ingestion.tally_normalizer import normalize_tally_data
@@ -293,16 +293,17 @@ def import_from_tally_connector(
             uploaded_by_user_id=current_user.id,
             validation_report={"connector": "tally_http", "endpoint": request.endpoint, "ledger_count": len(parsed_data["ledgers"])},
         )
-        normalize_tally_data(
-            parsed_data,
-            db,
-            entity_id=entity.id,
-            materiality_threshold=entity.materiality_threshold,
-            clear_only_period=True,
-            target_period_start=request.period_start,
-            target_period_end=request.period_end,
-            import_batch_id=batch.id,
-        )
+        if not is_duplicate_import_batch(batch):
+            normalize_tally_data(
+                parsed_data,
+                db,
+                entity_id=entity.id,
+                materiality_threshold=entity.materiality_threshold,
+                clear_only_period=True,
+                target_period_start=request.period_start,
+                target_period_end=request.period_end,
+                import_batch_id=batch.id,
+            )
         db.commit()
         return IngestionResponse(
             message="TallyPrime import successful",
@@ -375,17 +376,18 @@ async def upload_tally_export(
             uploaded_by_user_id=current_user.id,
             validation_report={"parser": "tally_xml", "voucher_count": len(parsed_data["vouchers"])},
         )
-        normalize_tally_data(
-            parsed_data, 
-            db, 
-            materiality_threshold=entity.materiality_threshold, 
-            entity_id=entity.id,
-            organization_id=current_user.organization_id,
-            clear_only_period=clear_only_period,
-            target_period_start=target_period_start,
-            target_period_end=target_period_end,
-            import_batch_id=batch.id,
-        )
+        if not is_duplicate_import_batch(batch):
+            normalize_tally_data(
+                parsed_data,
+                db,
+                materiality_threshold=entity.materiality_threshold,
+                entity_id=entity.id,
+                organization_id=current_user.organization_id,
+                clear_only_period=clear_only_period,
+                target_period_start=target_period_start,
+                target_period_end=target_period_end,
+                import_batch_id=batch.id,
+            )
         db.commit()
         return IngestionResponse(
             message="Ingestion successful",
@@ -462,17 +464,18 @@ async def upload_xlsx_confirm(
             uploaded_by_user_id=current_user.id,
             validation_report={"parser": "xlsx_trial_balance", "sign_convention": sign_convention},
         )
-        normalize_xlsx_confirm(
-            file_bytes=contents,
-            column_mapping=mapping_dict,
-            sign_convention=sign_convention,
-            target_period_start=str(target_period_start),
-            target_period_end=str(target_period_end),
-            entity_id=entity.id,
-            session=db,
-            clear_only_period=clear_only_period,
-            import_batch_id=batch.id,
-        )
+        if not is_duplicate_import_batch(batch):
+            normalize_xlsx_confirm(
+                file_bytes=contents,
+                column_mapping=mapping_dict,
+                sign_convention=sign_convention,
+                target_period_start=str(target_period_start),
+                target_period_end=str(target_period_end),
+                entity_id=entity.id,
+                session=db,
+                clear_only_period=clear_only_period,
+                import_batch_id=batch.id,
+            )
         db.commit()
         return IngestionResponse(
             message="XLSX ingestion successful",

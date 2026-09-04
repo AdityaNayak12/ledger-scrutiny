@@ -10,12 +10,16 @@ from app.db.base import Base
 from app.db.models import Entity, ImportBatch, Organization
 from app.ingestion.batches import (
     BatchConflictError,
+    BatchLifecycleError,
     BatchValidationError,
     activate_import_batch,
     create_import_batch,
+    fail_import_batch,
+    is_duplicate_import_batch,
     stage_import_batch,
 )
 from app.ingestion.reconciliation import (
+    build_active_dataset_report,
     build_reconciliation_report,
     compute_dataset_fingerprint,
 )
@@ -84,6 +88,64 @@ def test_staging_retains_raw_bytes_and_exact_hash_duplicate_is_idempotent(sessio
     assert session.scalar(select(ImportBatch.id).order_by(ImportBatch.id.desc())) == first.id
 
 
+def test_duplicate_integrity_error_reloads_existing_batch(session, monkeypatch):
+    first = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"reloadable duplicate",
+    )
+    session.commit()
+    original_execute = session.execute
+    hidden_first_lookup = [True]
+
+    def execute(statement, *args, **kwargs):
+        if hidden_first_lookup[0] and "content_sha256" in str(statement):
+            hidden_first_lookup[0] = False
+            return original_execute(select(ImportBatch).where(ImportBatch.id == -1))
+        return original_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, "execute", execute)
+    duplicate = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"reloadable duplicate",
+    )
+
+    assert duplicate.id == first.id
+    assert is_duplicate_import_batch(duplicate)
+
+
+def test_same_hash_remains_importable_for_another_entity(session):
+    first = _stage(session, start=date(2025, 4, 1), end=date(2025, 6, 30), contents=b"cross-entity")
+    organization_id = session.scalar(select(Entity.organization_id).where(Entity.id == _entity_id(session)))
+    other = Entity(
+        organization_id=organization_id,
+        name="Second Pipeline Entity",
+        materiality_threshold=Decimal("0.00"),
+    )
+    session.add(other)
+    session.commit()
+
+    second = stage_import_batch(
+        session,
+        entity_id=other.id,
+        period_start=date(2025, 4, 1),
+        period_end=date(2025, 6, 30),
+        source="gl_upload",
+        source_family="gl_upload",
+        original_filename="journal.xlsx",
+        contents=b"cross-entity",
+        uploaded_by_user_id=None,
+        coverage_start=date(2025, 4, 1),
+        coverage_end=date(2025, 6, 30),
+    )
+
+    assert second.id != first.id
+    assert not is_duplicate_import_batch(second)
+
+
 def test_activation_supersedes_only_replaced_active_coverage(session):
     q1 = _stage(session, start=date(2025, 4, 1), end=date(2025, 6, 30), contents=b"q1")
     activate_import_batch(session, q1)
@@ -112,6 +174,30 @@ def test_annual_activation_explicitly_replaces_quarterly_coverage(session):
     assert annual.status == "ACTIVE"
 
 
+def test_checkpoint_activation_does_not_apply_journal_collision_rules(session):
+    journal = _stage(session, start=date(2025, 4, 1), end=date(2025, 6, 30), contents=b"journal-kind")
+    activate_import_batch(session, journal)
+    checkpoint = stage_import_batch(
+        session,
+        entity_id=_entity_id(session),
+        period_start=date(2025, 4, 1),
+        period_end=date(2025, 6, 30),
+        source="tally",
+        source_family="tally",
+        original_filename="opening.xlsx",
+        contents=b"checkpoint-kind",
+        uploaded_by_user_id=None,
+        kind="balance_checkpoint",
+        coverage_start=date(2025, 4, 1),
+        coverage_end=date(2025, 6, 30),
+    )
+
+    activate_import_batch(session, checkpoint)
+
+    assert journal.status == "ACTIVE"
+    assert checkpoint.status == "ACTIVE"
+
+
 def test_compatibility_create_import_batch_stages_without_legacy_parser_metadata(session):
     batch = create_import_batch(
         session,
@@ -125,6 +211,47 @@ def test_compatibility_create_import_batch_stages_without_legacy_parser_metadata
     )
 
     assert batch.status == "STAGED"
+
+
+def test_active_report_counts_distinct_accounts_across_batches(session):
+    baseline = {"present": True, "complete": True, "balance_date": "2025-03-31"}
+    first_entry = JournalEntryRecord(
+        source_document_id="DOC-A",
+        posting_date=date(2025, 4, 1),
+        lines=(
+            JournalLineRecord(1, "1100", Decimal("10.00"), JournalLineSide.DEBIT),
+            JournalLineRecord(2, "4000", Decimal("-10.00"), JournalLineSide.CREDIT),
+        ),
+    )
+    second_entry = JournalEntryRecord(
+        source_document_id="DOC-B",
+        posting_date=date(2025, 7, 1),
+        lines=(
+            JournalLineRecord(3, "4000", Decimal("20.00"), JournalLineSide.DEBIT),
+            JournalLineRecord(4, "5000", Decimal("-20.00"), JournalLineSide.CREDIT),
+        ),
+    )
+    first = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"report-q1",
+    )
+    first.validation_report = build_reconciliation_report((first_entry,), baseline_coverage=baseline)
+    activate_import_batch(session, first)
+    second = _stage(
+        session,
+        start=date(2025, 7, 1),
+        end=date(2025, 9, 30),
+        contents=b"report-q2",
+    )
+    second.validation_report = build_reconciliation_report((second_entry,), baseline_coverage=baseline)
+    activate_import_batch(session, second)
+
+    report = build_active_dataset_report(session, _entity_id(session))
+
+    assert report["account_count"] == 3
+    assert report["unmapped_account_count"] == 0
 
 
 def test_active_overlap_and_source_family_conflict_are_rejected_without_replacing_dataset(session):
@@ -160,6 +287,54 @@ def test_failed_replacement_leaves_old_active_batch_untouched(session):
 
     assert active.status == "ACTIVE"
     assert replacement.status == "FAILED"
+
+
+def test_activation_flush_failure_restores_candidate_report(session, monkeypatch):
+    active = _stage(session, start=date(2025, 4, 1), end=date(2025, 6, 30), contents=b"rollback-active")
+    activate_import_batch(session, active)
+    candidate = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"rollback-candidate",
+    )
+    candidate.validation_report = {"original": "report"}
+    original_flush = session.flush
+
+    def fail_flush(*args, **kwargs):
+        raise RuntimeError("flush failed")
+
+    monkeypatch.setattr(session, "flush", fail_flush)
+    with pytest.raises(RuntimeError, match="flush failed"):
+        activate_import_batch(session, candidate, validation_report={"replacement": "report"})
+    monkeypatch.setattr(session, "flush", original_flush)
+
+    assert active.status == "ACTIVE"
+    assert candidate.status == "STAGED"
+    assert candidate.validation_report == {"original": "report"}
+
+
+def test_fail_import_batch_rejects_terminal_statuses(session):
+    failed = _stage(session, start=date(2025, 4, 1), end=date(2025, 6, 30), contents=b"terminal-failed")
+    fail_import_batch(session, failed, errors=["bad input"])
+    session.commit()
+    failed_report = dict(failed.validation_report)
+
+    with pytest.raises(BatchLifecycleError):
+        fail_import_batch(session, failed, errors=["must not rewrite"])
+    assert failed.status == "FAILED"
+    assert failed.validation_report == failed_report
+
+    superseded = _stage(session, start=date(2025, 7, 1), end=date(2025, 9, 30), contents=b"terminal-active")
+    activate_import_batch(session, superseded)
+    replacement = _stage(session, start=date(2025, 7, 1), end=date(2025, 9, 30), contents=b"terminal-replacement")
+    activate_import_batch(session, replacement)
+    superseded_report = dict(superseded.validation_report)
+
+    with pytest.raises(BatchLifecycleError):
+        fail_import_batch(session, superseded, errors=["must not rewrite"])
+    assert superseded.status == "SUPERSEDED"
+    assert superseded.validation_report == superseded_report
 
 
 def test_reconciliation_report_totals_and_fingerprint_are_deterministic():
