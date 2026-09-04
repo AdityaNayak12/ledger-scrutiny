@@ -211,6 +211,10 @@ def create_import_batch(
         source_metadata=source_metadata,
     )
     if is_duplicate_import_batch(batch):
+        if batch.status != BatchStatus.ACTIVE.value:
+            raise BatchLifecycleError(
+                f"Exact duplicate batch {batch.id} is {batch.status}; no active import exists."
+            )
         return batch
     if activate is None:
         legacy_call = all(

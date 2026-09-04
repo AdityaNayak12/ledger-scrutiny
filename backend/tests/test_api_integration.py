@@ -204,6 +204,46 @@ def test_duplicate_tally_upload_is_idempotent_for_child_records():
         ) == 1
 
 
+def test_duplicate_tally_upload_of_failed_batch_is_rejected_without_new_rows():
+    registration = client.post("/auth/register", json={
+        "organization_name": "Failed Duplicate Firm",
+        "email": f"failed-duplicate.{os.urandom(4).hex()}@integration.com",
+        "password": "Password123",
+    })
+    assert registration.status_code == 201
+    headers = {"Authorization": f"Bearer {registration.json()['access_token']}"}
+    entity = client.post(
+        "/entities",
+        json={"name": "Failed Duplicate Entity", "materiality_threshold": "0.00"},
+        headers=headers,
+    )
+    entity_id = entity.json()["id"]
+    xml_path = os.path.join(os.path.dirname(__file__), "sample_tally_export.xml")
+
+    with open(xml_path, "rb") as file_handle:
+        first = client.post(
+            f"/entities/{entity_id}/upload",
+            files={"file": ("sample_tally_export.xml", file_handle, "text/xml")},
+            headers=headers,
+        )
+    assert first.status_code == 200, first.text
+    batch_id = first.json()["import_batch_id"]
+    with TestingSessionLocal() as session:
+        batch = session.get(ImportBatch, batch_id)
+        batch.status = "FAILED"
+        session.commit()
+
+    with open(xml_path, "rb") as file_handle:
+        duplicate = client.post(
+            f"/entities/{entity_id}/upload",
+            files={"file": ("sample_tally_export.xml", file_handle, "text/xml")},
+            headers=headers,
+        )
+
+    assert duplicate.status_code == 400
+    assert "no active import" in duplicate.json()["detail"]
+
+
 def test_api_scrutiny_with_violations():
     headers = get_auth_headers()
 

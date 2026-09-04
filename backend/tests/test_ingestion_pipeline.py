@@ -3,11 +3,11 @@ from decimal import Decimal
 from hashlib import sha256
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
-from app.db.models import Entity, ImportBatch, Organization
+from app.db.models import Entity, ImportBatch, LedgerAccount, Organization, TrialBalanceSnapshot
 from app.ingestion.batches import (
     BatchConflictError,
     BatchLifecycleError,
@@ -115,6 +115,40 @@ def test_duplicate_integrity_error_reloads_existing_batch(session, monkeypatch):
 
     assert duplicate.id == first.id
     assert is_duplicate_import_batch(duplicate)
+
+
+@pytest.mark.parametrize("status", ["STAGED", "FAILED", "SUPERSEDED"])
+def test_compatibility_duplicate_non_active_batch_is_rejected(session, status):
+    contents = f"non-active-{status}".encode()
+    first = create_import_batch(
+        session,
+        entity_id=_entity_id(session),
+        period_start=date(2025, 4, 1),
+        period_end=date(2025, 6, 30),
+        source="gl_upload",
+        original_filename="journal.xlsx",
+        contents=contents,
+        uploaded_by_user_id=None,
+    )
+    first.status = status
+    session.commit()
+
+    with pytest.raises(BatchLifecycleError, match="no active import"):
+        create_import_batch(
+            session,
+            entity_id=_entity_id(session),
+            period_start=date(2025, 4, 1),
+            period_end=date(2025, 6, 30),
+            source="gl_upload",
+            original_filename="journal.xlsx",
+            contents=contents,
+            uploaded_by_user_id=None,
+        )
+
+    assert session.scalar(
+        select(func.count()).select_from(ImportBatch).where(ImportBatch.content_sha256 == first.content_sha256)
+    ) == 1
+    assert first.status == status
 
 
 def test_same_hash_remains_importable_for_another_entity(session):
@@ -252,6 +286,99 @@ def test_active_report_counts_distinct_accounts_across_batches(session):
 
     assert report["account_count"] == 3
     assert report["unmapped_account_count"] == 0
+
+
+def test_active_report_derives_distinct_legacy_accounts_from_snapshots(session):
+    first = _stage(session, start=date(2025, 4, 1), end=date(2025, 6, 30), contents=b"legacy-q1")
+    second = _stage(session, start=date(2025, 7, 1), end=date(2025, 9, 30), contents=b"legacy-q2")
+    entity_id = _entity_id(session)
+    accounts = [
+        LedgerAccount(entity_id=entity_id, external_code=code, name=code)
+        for code in ("1100", "4000", "5000")
+    ]
+    session.add_all(accounts)
+    session.flush()
+    session.add_all([
+        TrialBalanceSnapshot(
+            import_batch_id=None,
+            entity_id=entity_id,
+            ledger_account_id=accounts[0].id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2025, 6, 30),
+            opening_balance=Decimal("0"),
+            total_debits=Decimal("0"),
+            total_credits=Decimal("0"),
+            closing_balance=Decimal("0"),
+        ),
+        TrialBalanceSnapshot(
+            import_batch_id=None,
+            entity_id=entity_id,
+            ledger_account_id=accounts[1].id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2025, 6, 30),
+            opening_balance=Decimal("0"),
+            total_debits=Decimal("0"),
+            total_credits=Decimal("0"),
+            closing_balance=Decimal("0"),
+        ),
+        TrialBalanceSnapshot(
+            import_batch_id=None,
+            entity_id=entity_id,
+            ledger_account_id=accounts[1].id,
+            period_start=date(2025, 7, 1),
+            period_end=date(2025, 9, 30),
+            opening_balance=Decimal("0"),
+            total_debits=Decimal("0"),
+            total_credits=Decimal("0"),
+            closing_balance=Decimal("0"),
+        ),
+        TrialBalanceSnapshot(
+            import_batch_id=None,
+            entity_id=entity_id,
+            ledger_account_id=accounts[2].id,
+            period_start=date(2025, 7, 1),
+            period_end=date(2025, 9, 30),
+            opening_balance=Decimal("0"),
+            total_debits=Decimal("0"),
+            total_credits=Decimal("0"),
+            closing_balance=Decimal("0"),
+        ),
+    ])
+    first.validation_report = {
+        "account_count": 2,
+        "unmapped_account_count": 0,
+        "baseline_coverage": {"present": True, "complete": True},
+        "readiness": "READY",
+    }
+    second.validation_report = {
+        "account_count": 2,
+        "unmapped_account_count": 0,
+        "baseline_coverage": {"present": True, "complete": True},
+        "readiness": "READY",
+    }
+    activate_import_batch(session, first)
+    activate_import_batch(session, second)
+
+    report = build_active_dataset_report(session, entity_id)
+
+    assert report["account_count"] == 3
+    assert report["unmapped_account_count"] == 0
+
+
+def test_active_report_retains_legacy_counts_without_account_rows(session):
+    batch = _stage(session, start=date(2025, 4, 1), end=date(2025, 6, 30), contents=b"legacy-counts")
+    batch.validation_report = {
+        "account_count": 4,
+        "unmapped_account_count": 2,
+        "baseline_coverage": {"present": True, "complete": True},
+        "readiness": "READY",
+    }
+    activate_import_batch(session, batch)
+
+    report = build_active_dataset_report(session, _entity_id(session))
+
+    assert report["account_count"] == 4
+    assert report["unmapped_account_count"] == 2
 
 
 def test_active_overlap_and_source_family_conflict_are_rejected_without_replacing_dataset(session):

@@ -209,6 +209,128 @@ def build_reconciliation_report(
     return report
 
 
+def _batch_coverage(batch: Any) -> tuple[date | None, date | None]:
+    period = _field(batch, "financial_period")
+    start = _field(batch, "coverage_start") or _field(period, "period_start")
+    end = _field(batch, "coverage_end") or _field(period, "period_end")
+    if isinstance(start, datetime):
+        start = start.date()
+    if isinstance(end, datetime):
+        end = end.date()
+    return start, end
+
+
+def _canonical_account_identities(session: Any, entity_id: int, batches: Iterable[Any]) -> set[str]:
+    """Find distinct stored account identities for active and legacy batch rows."""
+    from sqlalchemy import and_, or_, select
+    from app.db.models import (
+        BalanceCheckpoint,
+        JournalEntry,
+        JournalLine,
+        LedgerAccount,
+        Transaction,
+        TrialBalanceSnapshot,
+    )
+
+    batches = tuple(batches)
+    batch_ids = [batch.id for batch in batches]
+    account_ids: set[int] = set()
+
+    if batch_ids:
+        account_ids.update(session.execute(
+            select(JournalLine.ledger_account_id)
+            .join(JournalEntry, JournalEntry.id == JournalLine.journal_entry_id)
+            .where(JournalEntry.import_batch_id.in_(batch_ids))
+        ).scalars())
+
+    legacy_transaction_filters = []
+    legacy_snapshot_filters = []
+    legacy_checkpoint_filters = []
+    for batch in batches:
+        start, end = _batch_coverage(batch)
+        if start is None or end is None:
+            legacy_transaction_filters.append(and_(
+                Transaction.entity_id == entity_id,
+                Transaction.import_batch_id.is_(None),
+            ))
+            legacy_snapshot_filters.append(and_(
+                TrialBalanceSnapshot.entity_id == entity_id,
+                TrialBalanceSnapshot.import_batch_id.is_(None),
+            ))
+            legacy_checkpoint_filters.append(and_(
+                BalanceCheckpoint.entity_id == entity_id,
+                BalanceCheckpoint.import_batch_id.is_(None),
+            ))
+            continue
+        legacy_transaction_filters.append(and_(
+            Transaction.entity_id == entity_id,
+            Transaction.import_batch_id.is_(None),
+            Transaction.date >= start,
+            Transaction.date <= end,
+        ))
+        legacy_snapshot_filters.append(and_(
+            TrialBalanceSnapshot.entity_id == entity_id,
+            TrialBalanceSnapshot.import_batch_id.is_(None),
+            TrialBalanceSnapshot.period_start <= end,
+            TrialBalanceSnapshot.period_end >= start,
+        ))
+        legacy_checkpoint_filters.append(and_(
+            BalanceCheckpoint.entity_id == entity_id,
+            BalanceCheckpoint.import_batch_id.is_(None),
+            BalanceCheckpoint.balance_date >= start,
+            BalanceCheckpoint.balance_date <= end,
+        ))
+
+    if batch_ids or legacy_snapshot_filters:
+        snapshot_filters = []
+        if batch_ids:
+            snapshot_filters.append(TrialBalanceSnapshot.import_batch_id.in_(batch_ids))
+        snapshot_filters.extend(legacy_snapshot_filters)
+        account_ids.update(session.execute(
+            select(TrialBalanceSnapshot.ledger_account_id).where(
+                TrialBalanceSnapshot.entity_id == entity_id,
+                or_(*snapshot_filters),
+            )
+        ).scalars())
+
+    if batch_ids or legacy_checkpoint_filters:
+        checkpoint_filters = []
+        if batch_ids:
+            checkpoint_filters.append(BalanceCheckpoint.import_batch_id.in_(batch_ids))
+        checkpoint_filters.extend(legacy_checkpoint_filters)
+        account_ids.update(session.execute(
+            select(BalanceCheckpoint.ledger_account_id).where(
+                BalanceCheckpoint.entity_id == entity_id,
+                or_(*checkpoint_filters),
+            )
+        ).scalars())
+
+    transaction_filters = []
+    if batch_ids:
+        transaction_filters.append(Transaction.import_batch_id.in_(batch_ids))
+    transaction_filters.extend(legacy_transaction_filters)
+    if transaction_filters:
+        for debit_id, credit_id in session.execute(
+            select(Transaction.debit_account_id, Transaction.credit_account_id).where(
+                Transaction.entity_id == entity_id,
+                or_(*transaction_filters),
+            )
+        ):
+            account_ids.update(account_id for account_id in (debit_id, credit_id) if account_id is not None)
+
+    if not account_ids:
+        return set()
+    identities = session.execute(
+        select(LedgerAccount.id, LedgerAccount.external_code, LedgerAccount.name).where(
+            LedgerAccount.id.in_(account_ids)
+        )
+    )
+    return {
+        str(external_code or name or f"ledger_account:{account_id}")
+        for account_id, external_code, name in identities
+    }
+
+
 def build_active_dataset_report(session: Any, entity_id: int) -> dict[str, Any]:
     """Summarize active journal batches for one entity."""
     from sqlalchemy import select
@@ -239,9 +361,27 @@ def build_active_dataset_report(session: Any, entity_id: int) -> dict[str, Any]:
     )
     account_codes = set()
     unmapped_account_codes = set()
+    legacy_account_counts = []
+    legacy_unmapped_counts = []
     for item in reports:
-        account_codes.update(item.get("account_codes", ()))
-        unmapped_account_codes.update(item.get("unmapped_account_codes", ()))
+        if "account_codes" in item and item.get("account_codes") is not None:
+            account_codes.update(item.get("account_codes", ()))
+        else:
+            legacy_account_counts.append(int(item.get("account_count", 0)))
+        if "unmapped_account_codes" in item and item.get("unmapped_account_codes") is not None:
+            unmapped_account_codes.update(item.get("unmapped_account_codes", ()))
+        else:
+            legacy_unmapped_counts.append(int(item.get("unmapped_account_count", 0)))
+    needs_legacy_accounts = any(
+        "account_codes" not in item or item.get("account_codes") is None
+        for item in reports
+    )
+    stored_account_codes = (
+        _canonical_account_identities(session, entity_id, batches)
+        if needs_legacy_accounts
+        else set()
+    )
+    account_codes.update(stored_account_codes)
     report["account_codes"] = sorted(account_codes, key=str)
     report["unmapped_account_codes"] = sorted(unmapped_account_codes, key=str)
     for key in (
@@ -249,8 +389,10 @@ def build_active_dataset_report(session: Any, entity_id: int) -> dict[str, Any]:
         "unbalanced_document_count",
     ):
         report[key] = sum(int(item.get(key, 0)) for item in reports)
-    report["account_count"] = len(account_codes)
-    report["unmapped_account_count"] = len(unmapped_account_codes)
+    report["account_count"] = max(len(account_codes), max(legacy_account_counts, default=0))
+    report["unmapped_account_count"] = max(
+        len(unmapped_account_codes), max(legacy_unmapped_counts, default=0)
+    )
     for key in ("debit", "credit"):
         report[key] = format(sum((Decimal(str(item.get(key, "0"))) for item in reports), Decimal("0")), "f")
     report["net"] = format(Decimal(report["debit"]) - Decimal(report["credit"]), "f")
