@@ -15,7 +15,7 @@ from app.ingestion.baseline import (
     normalize_balance_checkpoint_xlsx,
     parse_baseline_xlsx,
 )
-from app.ingestion.batches import stage_import_batch
+from app.ingestion.batches import activate_import_batch, stage_import_batch
 
 
 HEADERS = ["Account Code", "Balance Date", "Signed Balance", "Currency"]
@@ -328,6 +328,34 @@ def test_active_exact_sha_duplicate_replay_is_idempotent(baseline_session):
     assert replayed_batch.status == "ACTIVE"
     assert replay_report == first_report
     assert [checkpoint.id for checkpoint in session.scalars(select(BalanceCheckpoint)).all()] == checkpoint_ids
+
+
+def test_active_exact_sha_journal_batch_is_rejected_by_baseline_normalizer(baseline_session):
+    session, entity_id = baseline_session
+    contents = _valid_bytes()
+    batch = stage_import_batch(
+        session,
+        entity_id=entity_id,
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        source="gl_upload",
+        source_family="gl_upload",
+        original_filename="journal.xlsx",
+        contents=contents,
+        uploaded_by_user_id=None,
+        kind="journal",
+        coverage_start=date(2025, 4, 1),
+        coverage_end=date(2026, 3, 31),
+    )
+    activate_import_batch(session, batch, validation_report={"readiness": "READY"})
+
+    with pytest.raises(ValueError, match="balance_checkpoint"):
+        normalize_balance_checkpoint_xlsx(
+            contents, entity_id, session, import_batch_id=batch.id, expected_currency="INR"
+        )
+
+    assert batch.status == "ACTIVE"
+    assert session.scalar(select(BalanceCheckpoint.id)) is None
 
 
 def test_baseline_fingerprint_includes_account_balance_pairs(baseline_session):

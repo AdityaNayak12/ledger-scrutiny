@@ -533,6 +533,10 @@ def normalize_baseline_xlsx(
         raise ValueError(f"Import batch {import_batch_id} not found.")
     if batch.entity_id != entity_id:
         raise ValueError(f"Import batch {import_batch_id} does not belong to entity {entity_id}.")
+    if batch.kind != BatchKind.BALANCE_CHECKPOINT.value:
+        raise ValueError(
+            f"Baseline normalization requires a {BatchKind.BALANCE_CHECKPOINT.value} ImportBatch."
+        )
     file_bytes = bytes(file_bytes)
     if batch.status == "ACTIVE" and sha256(file_bytes).hexdigest() == batch.content_sha256:
         return json.loads(json.dumps(batch.validation_report or {}))
@@ -540,11 +544,6 @@ def normalize_baseline_xlsx(
         raise ValueError(
             f"Baseline normalization requires a STAGED ImportBatch; batch {import_batch_id} is {batch.status}."
         )
-    if batch.kind != BatchKind.BALANCE_CHECKPOINT.value:
-        raise ValueError(
-            f"Baseline normalization requires a {BatchKind.BALANCE_CHECKPOINT.value} ImportBatch."
-        )
-
     evidence_bytes = signed_pdf_bytes
     if evidence_bytes is None and file_bytes.lstrip().startswith(_PDF_PREFIX):
         evidence_bytes = file_bytes
