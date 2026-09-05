@@ -130,6 +130,29 @@ def test_tally_connector_does_not_expose_endpoint_credentials_or_raw_xml(monkeyp
     assert raw_secret not in message
 
 
+def test_tally_connector_does_not_expose_endpoint_path_in_error_or_context(monkeypatch):
+    endpoint = "http://user:secret@8.8.8.8:9000/export/signed-token?access=secret#fragment"
+
+    def fake_post(*args, **kwargs):
+        raise httpx.ConnectError("upstream failure", request=httpx.Request("POST", args[0]))
+
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    with pytest.raises(TallyConnectorError) as exc_info:
+        fetch_trial_balance(
+            endpoint=endpoint,
+            company_name="Example Company",
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+        )
+
+    error = exc_info.value
+    message = "Could not reach TallyPrime at http://8.8.8.8:9000."
+    assert str(error) == message
+    assert repr(error) == f"TallyConnectorError({message!r})"
+    assert error.__cause__ is None
+    assert error.__context__ is None
+
+
 def test_tally_connector_maps_http_status_failure_without_response_body(monkeypatch):
     def fake_post(*args, **kwargs):
         return httpx.Response(503, content=b"private upstream detail", request=httpx.Request("POST", args[0]))

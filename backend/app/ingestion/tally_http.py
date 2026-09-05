@@ -27,7 +27,7 @@ def _safe_endpoint(endpoint: str) -> str:
         netloc = host
         if parsed.port is not None:
             netloc = f"{netloc}:{parsed.port}"
-        return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+        return urlunsplit((parsed.scheme, netloc, "", "", ""))
     except (TypeError, ValueError):
         return "<configured endpoint>"
 
