@@ -134,7 +134,12 @@ def _select_journal_batches(
         if batch_start is None or batch_end is None or batch_start > batch_end:
             result["errors"].append(f"{_batch_label(batch)} has invalid coverage metadata.")
             continue
-        if _batch_year(batch) != financial_year or _source_family(batch.source, batch.source_family) != family:
+        if _source_family(batch.source, batch.source_family) != family:
+            continue
+        if batch_start < start or batch_end > end:
+            result["errors"].append(
+                f"{_batch_label(batch)} coverage falls outside financial year {financial_year}."
+            )
             continue
         dated.append((batch, batch_start, batch_end))
 
@@ -188,7 +193,19 @@ def _batch_report_state(
             if readiness == "INVALID" and not report.get("errors"):
                 result["errors"].append(f"{_batch_label(batch)} has invalid validation state.")
         elif readiness == "PARTIAL" or not readiness:
-            partial = True
+            baseline = report.get("baseline_coverage") or {}
+            batch_start, batch_end = (_as_date(value) for value in _batch_dates(batch))
+            baseline_only = (
+                readiness == "PARTIAL"
+                and baseline.get("complete") is False
+                and batch_start is not None
+                and batch_end is not None
+                and report.get("coverage_start") == batch_start.isoformat()
+                and report.get("coverage_end") == batch_end.isoformat()
+                and report.get("coverage_complete") is not False
+            )
+            if not baseline_only:
+                partial = True
         result["warnings"].extend(str(warning) for warning in report.get("warnings", ()))
     return partial
 
@@ -216,26 +233,45 @@ def _resolve_baseline(
     year_start, _year_end = _year_window(financial_year)
     target_date = year_start - timedelta(days=1)
 
-    def is_candidate(batch: ImportBatch) -> bool:
-        if batch.kind != BatchKind.BALANCE_CHECKPOINT.value:
-            return False
-        if _source_family(batch.source, batch.source_family) != family:
-            return False
-        if _batch_year(batch) == financial_year:
-            return True
-        coverage = (batch.validation_report or {}).get("baseline_coverage") or {}
-        return coverage.get("balance_date") == target_date.isoformat()
-
     checkpoint_batches = [
         batch
         for batch in active_batches
-        if is_candidate(batch)
+        if batch.kind == BatchKind.BALANCE_CHECKPOINT.value
+        and _source_family(batch.source, batch.source_family) == family
     ]
-    checkpoint_batch = max(checkpoint_batches, key=lambda batch: batch.id or 0) if checkpoint_batches else None
+    checkpoint_rows = session.execute(
+        select(BalanceCheckpoint).where(
+            BalanceCheckpoint.entity_id == entity_id,
+            BalanceCheckpoint.import_batch_id.in_({batch.id for batch in checkpoint_batches} or {-1}),
+        ).order_by(BalanceCheckpoint.id)
+    ).scalars().all()
+    target_checkpoint_batches = [
+        batch for batch in checkpoint_batches
+        if any(
+            row.import_batch_id == batch.id and row.balance_date == target_date
+            for row in checkpoint_rows
+        )
+    ]
+    if not target_checkpoint_batches and family == "tally":
+        target_checkpoint_batches = [
+            batch for batch in checkpoint_batches
+            if any(
+                row.import_batch_id == batch.id and row.balance_date == year_start
+                for row in checkpoint_rows
+            )
+        ]
+    checkpoint_batch = (
+        max(target_checkpoint_batches, key=lambda batch: batch.id or 0)
+        if target_checkpoint_batches
+        else None
+    )
     checkpoint_batch_ids = [checkpoint_batch.id] if checkpoint_batch else []
     checkpoint_source_ids = set(checkpoint_batch_ids)
     source_ids = checkpoint_source_ids or {batch.id for batch, _start, _end in selected_journals}
-    rows = session.execute(
+    rows = [
+        row for row in checkpoint_rows
+        if row.import_batch_id in checkpoint_source_ids
+    ] if checkpoint_source_ids else session.execute(
         select(BalanceCheckpoint).where(
             BalanceCheckpoint.entity_id == entity_id,
             BalanceCheckpoint.import_batch_id.in_(source_ids or {-1}),
@@ -277,18 +313,26 @@ def _resolve_baseline(
             result["errors"].append(f"{_batch_label(checkpoint_batch)} has invalid baseline validation.")
 
     baseline_date = target_rows[0].balance_date.isoformat() if target_rows else None
+    row_currencies = {row.currency for row in target_rows if row.currency is not None}
+    baseline_currency = (
+        next(iter(row_currencies))
+        if len(row_currencies) == 1
+        else coverage_report.get("currency")
+    )
     result["baseline_coverage"] = {
         "present": bool(target_rows),
         "complete": baseline_complete,
         "balance_date": baseline_date,
         "account_count": len(account_ids),
     }
+    if baseline_currency is not None or "currency" in coverage_report:
+        result["baseline_coverage"]["currency"] = baseline_currency
     if missing_codes:
         result["baseline_coverage"]["missing_account_codes"] = missing_codes
     if duplicate_codes:
         result["baseline_coverage"]["duplicate_account_codes"] = duplicate_codes
     if coverage_report:
-        for key in ("currency", "signed_total"):
+        for key in ("signed_total",):
             if key in coverage_report:
                 result["baseline_coverage"][key] = coverage_report[key]
     return balances, account_ids, baseline_complete
@@ -325,7 +369,17 @@ def resolve_active_dataset(
         result["gaps"] = []
         return _finish(result, partial=True)
 
-    candidate_journals = [batch for batch in journal_active if _batch_year(batch) == requested_year]
+    year_start, year_end = _year_window(requested_year)
+    candidate_journals = []
+    for batch in journal_active:
+        batch_start, batch_end = (_as_date(value) for value in _batch_dates(batch))
+        if (
+            batch_start is not None
+            and batch_end is not None
+            and batch_start <= year_end
+            and batch_end >= year_start
+        ):
+            candidate_journals.append(batch)
     families = sorted({_source_family(batch.source, batch.source_family) for batch in candidate_journals})
     if len(families) > 1:
         result["active_batch_ids"] = sorted(batch.id for batch in candidate_journals)
@@ -335,7 +389,6 @@ def resolve_active_dataset(
         return _finish(result)
     family = families[0] if families else None
     result["source_family"] = family
-    year_start, year_end = _year_window(requested_year)
     selected_journals: list[tuple[ImportBatch, date, date]] = []
     baseline_balances: dict[int, Decimal] = {}
     baseline_account_ids: set[int] = set()
@@ -363,14 +416,48 @@ def resolve_active_dataset(
     selected_ids = [batch.id for batch, _start, _end in selected_journals]
     movements: dict[int, Decimal] = defaultdict(lambda: Decimal("0"))
     if selected_ids:
+        entries = session.execute(
+            select(JournalEntry)
+            .where(JournalEntry.import_batch_id.in_(selected_ids))
+            .order_by(JournalEntry.posting_date, JournalEntry.id)
+        ).scalars().all()
+        entry_by_id = {entry.id: entry for entry in entries}
         lines = session.execute(
             select(JournalLine)
             .join(JournalEntry, JournalEntry.id == JournalLine.journal_entry_id)
             .where(JournalEntry.import_batch_id.in_(selected_ids))
             .order_by(JournalEntry.posting_date, JournalEntry.id, JournalLine.source_row_number)
         ).scalars().all()
+        journal_errors: list[str] = []
+        for entry in entries:
+            if entry.entity_id != entity_id:
+                journal_errors.append(
+                    f"Journal entry {entry.id} does not belong to entity {entity_id}."
+                )
+        account_ids_in_journal = {line.ledger_account_id for line in lines}
+        journal_accounts = session.execute(
+            select(LedgerAccount).where(LedgerAccount.id.in_(account_ids_in_journal or {-1}))
+        ).scalars().all()
+        journal_accounts_by_id = {account.id: account for account in journal_accounts}
         for line in lines:
-            movements[line.ledger_account_id] += _signed_amount(line)
+            parent = entry_by_id.get(line.journal_entry_id)
+            if parent is None or parent.entity_id != entity_id:
+                journal_errors.append(
+                    f"Journal line {line.id} has a parent entry outside entity {entity_id}."
+                )
+            account = journal_accounts_by_id.get(line.ledger_account_id)
+            if account is None or account.entity_id != entity_id:
+                journal_errors.append(
+                    f"Journal line {line.id} account {line.ledger_account_id} "
+                    f"does not belong to entity {entity_id}."
+                )
+        if journal_errors:
+            result["errors"].extend(journal_errors)
+            return _finish(result)
+        for line in lines:
+            posting_date = _as_date(entry_by_id[line.journal_entry_id].posting_date)
+            if posting_date is not None and year_start <= posting_date <= year_end:
+                movements[line.ledger_account_id] += _signed_amount(line)
 
     account_ids = set(movements) | set(baseline_balances) | baseline_account_ids
     account_keys = _load_account_keys(session, entity_id, account_ids)
@@ -403,6 +490,7 @@ def resolve_active_dataset(
         "kind": BatchKind.BALANCE_CHECKPOINT.value,
         "source_family": family,
         "balance_date": result["baseline_coverage"]["balance_date"],
+        "currency": result["baseline_coverage"].get("currency"),
         "account_balance_pairs": baseline_pairs,
     })
     result["dataset_fingerprint"] = compute_dataset_fingerprint(fingerprint_items)
