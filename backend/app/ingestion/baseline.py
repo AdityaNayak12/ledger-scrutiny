@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import BalanceCheckpoint, Entity, ImportBatch, LedgerAccount
 from app.ingestion.batches import activate_import_batch, fail_import_batch
-from app.ingestion.reconciliation import build_reconciliation_report
+from app.ingestion.reconciliation import build_reconciliation_report, compute_dataset_fingerprint
 from app.ingestion.schema import (
     DOCUMENT_BALANCE_TOLERANCE,
     BalanceCheckpointRecord,
@@ -25,12 +25,6 @@ from app.ingestion.schema import (
 
 
 BASELINE_REQUIRED_HEADERS = ("Account Code", "Balance Date", "Signed Balance", "Currency")
-_HEADER_ALIASES = {
-    "account_code": ("Account Code", "G/L Account", "G/L Account Code"),
-    "balance_date": ("Balance Date",),
-    "signed_balance": ("Signed Balance", "Closing Balance", "Balance"),
-    "currency": ("Currency", "Currency Code"),
-}
 _DECIMAL_ZERO = Decimal("0")
 _PDF_PREFIX = b"%PDF"
 
@@ -135,15 +129,15 @@ def _header_row(worksheet: Any) -> tuple[int, dict[str, int]]:
             min_row=row_number, max_row=row_number, values_only=True
         ))[0]
         positions: dict[str, int] = {}
-        for field_name, aliases in _HEADER_ALIASES.items():
-            matches = [index for index, value in enumerate(values) if value in aliases]
+        for header in BASELINE_REQUIRED_HEADERS:
+            matches = [index for index, value in enumerate(values) if value == header]
             if len(matches) > 1:
                 raise BaselineValidationError(
-                    f"Required baseline header {field_name!r} appears more than once."
+                    f"Required baseline header {header!r} appears more than once."
                 )
             if matches:
-                positions[field_name] = matches[0]
-        if len(positions) == len(_HEADER_ALIASES):
+                positions[header] = matches[0]
+        if len(positions) == len(BASELINE_REQUIRED_HEADERS):
             return row_number, positions
     raise BaselineValidationError(
         "Could not locate the exact required baseline headers in the first 15 rows. "
@@ -183,6 +177,24 @@ def _record_summary(records: Iterable[BalanceCheckpointRecord]) -> dict[str, Any
         "debit": format(debit, "f"),
         "credit": format(credit, "f"),
     }
+
+
+def _baseline_fingerprint(
+    records: Iterable[BalanceCheckpointRecord], summary: Mapping[str, Any]
+) -> str:
+    account_balance_pairs = sorted(
+        (
+            record.ledger_account_code,
+            format(record.balance, "f"),
+        )
+        for record in records
+    )
+    return compute_dataset_fingerprint(({
+        "kind": BatchKind.BALANCE_CHECKPOINT.value,
+        "balance_date": summary["balance_date"],
+        "currency": summary["currency"],
+        "account_balance_pairs": account_balance_pairs,
+    },))
 
 
 def _validate_records(
@@ -307,11 +319,13 @@ def _parse_baseline_xlsx(
                 skipped_rows += 1
                 skip_reasons.append({"row": row_number, "reason": "blank source row"})
                 continue
-            account_code = _text_value(values[columns["account_code"]] if columns["account_code"] < len(values) else None)
+            account_code = _text_value(
+                values[columns["Account Code"]] if columns["Account Code"] < len(values) else None
+            )
             if account_code is not None and account_code.upper() in {"TOTAL", "TOTALS", "GRAND TOTAL"}:
                 if all(
                     _is_blank(values[columns[field]] if columns[field] < len(values) else None)
-                    for field in ("balance_date", "currency")
+                    for field in ("Balance Date", "Currency")
                 ):
                     skipped_rows += 1
                     skip_reasons.append({"row": row_number, "reason": "summary/footer row"})
@@ -321,15 +335,15 @@ def _parse_baseline_xlsx(
                     f"Row {row_number}: Account Code is a required value."
                 )
             balance_date = _parse_date(
-                values[columns["balance_date"]] if columns["balance_date"] < len(values) else None,
+                values[columns["Balance Date"]] if columns["Balance Date"] < len(values) else None,
                 row_number,
             )
             balance = _parse_decimal(
-                values[columns["signed_balance"]] if columns["signed_balance"] < len(values) else None,
+                values[columns["Signed Balance"]] if columns["Signed Balance"] < len(values) else None,
                 row_number,
             )
             currency = _normalise_currency(
-                values[columns["currency"]] if columns["currency"] < len(values) else None
+                values[columns["Currency"]] if columns["Currency"] < len(values) else None
             )
             if currency is None:
                 raise BaselineValidationError(
@@ -445,6 +459,7 @@ def _baseline_report(
         rejected=1 if errors else 0,
         errors=errors,
         coverage_complete=not errors and not missing and not unknown and bool(records),
+        fingerprint=_baseline_fingerprint(records, summary),
     )
     report.update({
         "parser": "xlsx_baseline",

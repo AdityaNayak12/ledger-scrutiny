@@ -143,6 +143,44 @@ def test_duplicate_account_codes_are_rejected():
         parse_baseline_xlsx(contents)
 
 
+@pytest.mark.parametrize(
+    ("header_index", "unsupported_header"),
+    [
+        (0, "G/L Account"),
+        (0, "G/L Account Code"),
+        (2, "Closing Balance"),
+        (2, "Balance"),
+        (3, "Currency Code"),
+    ],
+)
+def test_unsupported_baseline_header_aliases_are_rejected(header_index, unsupported_header):
+    headers = HEADERS.copy()
+    headers[header_index] = unsupported_header
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(headers)
+    worksheet.append(["1000", BALANCE_DATE, "100.00", "INR"])
+    output = io.BytesIO()
+    workbook.save(output)
+
+    with pytest.raises(ValueError, match="required baseline headers"):
+        parse_baseline_xlsx(output.getvalue())
+
+
+def test_baseline_headers_beyond_fixed_profile_scan_window_are_rejected():
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    for _ in range(15):
+        worksheet.append(["Report title"])
+    worksheet.append(HEADERS)
+    worksheet.append(["1000", BALANCE_DATE, "100.00", "INR"])
+    output = io.BytesIO()
+    workbook.save(output)
+
+    with pytest.raises(ValueError, match="first 15 rows"):
+        parse_baseline_xlsx(output.getvalue())
+
+
 def test_non_balanced_signed_total_is_rejected():
     contents = _xlsx_bytes([
         ["1000", BALANCE_DATE, "100.00", "INR"],
@@ -235,3 +273,25 @@ def test_invalid_staged_batch_keeps_workbook_and_optional_pdf_bytes(baseline_ses
     assert batch.raw_source_bytes == contents
     evidence = batch.source_metadata["supporting_evidence"]["signed_pdf"]
     assert base64.b64decode(evidence["bytes_base64"]) == pdf_bytes
+
+
+def test_baseline_fingerprint_includes_account_balance_pairs(baseline_session):
+    session, entity_id = baseline_session
+    first_contents = _valid_bytes()
+    second_contents = _xlsx_bytes([
+        ["1000", BALANCE_DATE, "90.00", "INR"],
+        ["2000", BALANCE_DATE, "-50.00", "INR"],
+        ["3000", BALANCE_DATE, "-40.00", "INR"],
+    ])
+    first = _stage(session, entity_id, first_contents)
+    second = _stage(session, entity_id, second_contents)
+
+    first_report = normalize_balance_checkpoint_xlsx(
+        first_contents, entity_id, session, import_batch_id=first.id, expected_currency="INR"
+    )
+    second_report = normalize_balance_checkpoint_xlsx(
+        second_contents, entity_id, session, import_batch_id=second.id, expected_currency="INR"
+    )
+
+    assert first_report["signed_total"] == second_report["signed_total"] == "0.00"
+    assert first_report["dataset_fingerprint"] != second_report["dataset_fingerprint"]
