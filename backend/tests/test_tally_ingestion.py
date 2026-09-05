@@ -464,6 +464,21 @@ def test_tally_normalizer_writes_canonical_multiline_rows_and_replays_without_du
         assert [entry.source_document_id for entry in session.scalars(select(JournalEntry).order_by(JournalEntry.id))] == first_ids
         assert session.scalar(select(func.count()).select_from(JournalLine)) == first_line_count
 
+        other_entity = Entity(
+            organization_id=organization.id,
+            name="Reassigned Entity",
+            materiality_threshold=Decimal("0"),
+        )
+        session.add(other_entity)
+        session.flush()
+        transaction = session.scalar(select(Transaction).where(Transaction.import_batch_id == batch.id))
+        assert transaction is not None
+        transaction.entity_id = other_entity.id
+        session.commit()
+        with pytest.raises(TallyConnectorError, match="partial canonical records"):
+            normalize_tally_data(parsed_data, session, entity_id=entity.id, import_batch_id=batch.id)
+        session.rollback()
+
         checkpoint = session.scalars(select(BalanceCheckpoint).order_by(BalanceCheckpoint.id)).first()
         session.delete(checkpoint)
         session.commit()

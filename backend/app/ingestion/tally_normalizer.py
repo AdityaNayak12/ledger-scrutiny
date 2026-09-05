@@ -656,6 +656,7 @@ def _canonical_replay_complete(
 
     expected_transactions = [
         (
+            entity_id,
             spec["date"],
             accounts[spec["debit_ledger"]].id,
             accounts[spec["credit_ledger"]].id,
@@ -671,6 +672,7 @@ def _canonical_replay_complete(
     ).scalars().all()
     actual_transaction_values = [
         (
+            transaction.entity_id,
             transaction.date,
             transaction.debit_account_id,
             transaction.credit_account_id,
