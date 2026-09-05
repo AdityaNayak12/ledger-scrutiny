@@ -197,6 +197,8 @@ def build_reconciliation_report(
         "warnings": [_jsonable(item) for item in warnings],
         "errors": [_jsonable(item) for item in errors],
     }
+    if coverage_complete is not None:
+        report["coverage_complete"] = coverage_complete
     report.update({
         "input_rows": input_count,
         "accepted_rows": accepted,

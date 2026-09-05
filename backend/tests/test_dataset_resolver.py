@@ -1,6 +1,8 @@
+import io
 from datetime import date
 from decimal import Decimal
 
+import openpyxl
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -18,6 +20,7 @@ from app.db.models import (
 from app.ingestion.batches import activate_import_batch, stage_import_batch
 from app.ingestion.datasets import resolve_active_dataset
 from app.ingestion.reconciliation import build_reconciliation_report
+from app.ingestion.xlsx_normalizer import normalize_gl_xlsx
 
 
 FY_START = date(2025, 4, 1)
@@ -56,14 +59,25 @@ def _account_ids(session, entity_id):
     }
 
 
-def _active_batch(session, entity_id, start, end, contents, *, kind="journal", lifecycle=False):
+def _active_batch(
+    session,
+    entity_id,
+    start,
+    end,
+    contents,
+    *,
+    kind="journal",
+    lifecycle=False,
+    source="gl_upload",
+    source_family="gl_upload",
+):
     batch = stage_import_batch(
         session,
         entity_id=entity_id,
         period_start=start,
         period_end=end,
-        source="gl_upload",
-        source_family="gl_upload",
+        source=source,
+        source_family=source_family,
         original_filename=f"{contents.decode()}.xlsx",
         contents=contents,
         uploaded_by_user_id=None,
@@ -132,6 +146,22 @@ def _baseline(session, entity_id, account_ids, cash=Decimal("100.00")):
         ),
     ])
     return batch
+
+
+def _gl_xlsx_bytes():
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append([
+        "Document Number",
+        "G/L Account",
+        "Posting Date",
+        "Amount in local currency",
+    ])
+    worksheet.append(["NORMALIZER-1", "1000", date(2025, 4, 10), "25.00"])
+    worksheet.append(["NORMALIZER-1", "2000", date(2025, 4, 10), "-25.00"])
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
 
 
 def test_q1_q2_accumulate_signed_movement_and_report_gaps(session):
@@ -231,27 +261,61 @@ def test_normalizer_partial_journal_becomes_ready_after_complete_baseline(sessio
     db, entity_id = session
     account_ids = _account_ids(db, entity_id)
     _baseline(db, entity_id, account_ids)
-    annual = _active_batch(
+    for account in db.query(LedgerAccount).filter_by(entity_id=entity_id):
+        account.group_name = account.name
+        account.normal_balance = "debit"
+    contents = _gl_xlsx_bytes()
+    annual = stage_import_batch(
         db,
-        entity_id,
+        entity_id=entity_id,
+        period_start=FY_START,
+        period_end=FY_END,
+        source="gl_upload",
+        source_family="gl_upload",
+        original_filename="normalizer-partial.xlsx",
+        contents=contents,
+        uploaded_by_user_id=None,
+        coverage_start=FY_START,
+        coverage_end=FY_END,
+    )
+    report = normalize_gl_xlsx(
+        contents,
         FY_START,
         FY_END,
-        b"normalizer-partial",
-        lifecycle=True,
+        entity_id,
+        db,
+        import_batch_id=annual.id,
     )
-    annual.validation_report = build_reconciliation_report((), coverage_complete=True)
-    annual.validation_report.update({
-        "coverage_start": FY_START.isoformat(),
-        "coverage_end": FY_END.isoformat(),
-    })
-    _entry(db, annual, date(2025, 4, 10), "PARTIAL-1", account_ids, Decimal("25.00"))
+    activate_import_batch(db, annual)
     db.commit()
 
     result = resolve_active_dataset(db, entity_id, financial_year=2025)
 
+    assert report["coverage_complete"] is True
+    assert annual.status == "ACTIVE"
     assert annual.validation_report["readiness"] == "PARTIAL"
     assert result["baseline_coverage"]["complete"] is True
     assert result["readiness"] == "READY"
+
+
+def test_incomplete_period_coverage_remains_partial_after_complete_baseline(session):
+    db, entity_id = session
+    account_ids = _account_ids(db, entity_id)
+    _baseline(db, entity_id, account_ids)
+    annual = _active_batch(db, entity_id, FY_START, FY_END, b"incomplete-period")
+    annual.validation_report = build_reconciliation_report((), coverage_complete=False)
+    annual.validation_report.update({
+        "coverage_start": FY_START.isoformat(),
+        "coverage_end": FY_END.isoformat(),
+    })
+    _entry(db, annual, date(2025, 4, 10), "INCOMPLETE-1", account_ids, Decimal("25.00"))
+    db.commit()
+
+    result = resolve_active_dataset(db, entity_id, financial_year=2025)
+
+    assert annual.validation_report["coverage_complete"] is False
+    assert result["baseline_coverage"]["complete"] is True
+    assert result["readiness"] == "PARTIAL"
 
 
 def test_baseline_prefers_target_date_rows_over_newer_wrong_date_checkpoint(session):
@@ -291,6 +355,109 @@ def test_baseline_prefers_target_date_rows_over_newer_wrong_date_checkpoint(sess
     assert result["baseline_batch_ids"] == [valid.id]
     assert result["opening_balances"]["1000"] == "100.00"
     assert result["readiness"] == "READY"
+
+
+def test_tally_baseline_falls_back_to_financial_year_start(session):
+    db, entity_id = session
+    account_ids = _account_ids(db, entity_id)
+    baseline = _active_batch(
+        db,
+        entity_id,
+        FY_START,
+        FY_END,
+        b"tally-fy-start-baseline",
+        kind="balance_checkpoint",
+        source="tally_xml",
+        source_family="tally",
+    )
+    db.add_all([
+        BalanceCheckpoint(
+            import_batch_id=baseline.id,
+            entity_id=entity_id,
+            ledger_account_id=account_ids["1000"],
+            balance_date=FY_START,
+            balance=Decimal("100.00"),
+        ),
+        BalanceCheckpoint(
+            import_batch_id=baseline.id,
+            entity_id=entity_id,
+            ledger_account_id=account_ids["2000"],
+            balance_date=FY_START,
+            balance=Decimal("-100.00"),
+        ),
+    ])
+    annual = _active_batch(
+        db,
+        entity_id,
+        FY_START,
+        FY_END,
+        b"tally-fy-start-journal",
+        source="tally_xml",
+        source_family="tally",
+    )
+    _entry(db, annual, date(2025, 4, 10), "TALLY-FY-START-1", account_ids, Decimal("10.00"))
+    db.commit()
+
+    result = resolve_active_dataset(db, entity_id, financial_year=2025)
+
+    assert result["baseline_batch_ids"] == [baseline.id]
+    assert result["baseline_coverage"]["balance_date"] == FY_START.isoformat()
+    assert result["opening_balances"] == {"1000": "100.00", "2000": "-100.00"}
+    assert result["readiness"] == "READY"
+
+
+def test_foreign_checkpoint_rows_invalidate_baseline_without_fallback_balances(session):
+    db, entity_id = session
+    account_ids = _account_ids(db, entity_id)
+    organization_id = db.query(Organization).one().id
+    other_entity = Entity(
+        organization_id=organization_id,
+        name="Other Baseline Entity",
+        materiality_threshold=Decimal("0.00"),
+    )
+    db.add(other_entity)
+    db.flush()
+    foreign_account = LedgerAccount(
+        entity_id=other_entity.id,
+        external_code="3000",
+        name="Other Cash",
+    )
+    wrong_entity_account = LedgerAccount(
+        entity_id=other_entity.id,
+        external_code="4000",
+        name="Other Capital",
+    )
+    db.add_all([foreign_account, wrong_entity_account])
+    db.flush()
+    baseline = _baseline(db, entity_id, account_ids, cash=Decimal("0.00"))
+    db.add_all([
+        BalanceCheckpoint(
+            import_batch_id=baseline.id,
+            entity_id=entity_id,
+            ledger_account_id=foreign_account.id,
+            balance_date=BASELINE_DATE,
+            balance=Decimal("999.00"),
+        ),
+        BalanceCheckpoint(
+            import_batch_id=baseline.id,
+            entity_id=other_entity.id,
+            ledger_account_id=wrong_entity_account.id,
+            balance_date=BASELINE_DATE,
+            balance=Decimal("888.00"),
+        ),
+    ])
+    _active_batch(db, entity_id, FY_START, FY_END, b"foreign-baseline-journal")
+    db.commit()
+
+    result = resolve_active_dataset(db, entity_id, financial_year=2025)
+
+    assert result["readiness"] == "INVALID"
+    assert result["opening_balances"] == {}
+    assert result["closing_balances"] == {}
+    assert f"ledger_account:{foreign_account.id}" not in repr(result)
+    assert f"ledger_account:{wrong_entity_account.id}" not in repr(result)
+    assert any("checkpoint" in error.lower() for error in result["errors"])
+    assert any("entity" in error.lower() or "account" in error.lower() for error in result["errors"])
 
 
 def test_cross_financial_year_journal_coverage_is_invalid_without_out_of_window_movement(session):

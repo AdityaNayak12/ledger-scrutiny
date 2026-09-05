@@ -241,7 +241,6 @@ def _resolve_baseline(
     ]
     checkpoint_rows = session.execute(
         select(BalanceCheckpoint).where(
-            BalanceCheckpoint.entity_id == entity_id,
             BalanceCheckpoint.import_batch_id.in_({batch.id for batch in checkpoint_batches} or {-1}),
         ).order_by(BalanceCheckpoint.id)
     ).scalars().all()
@@ -273,7 +272,6 @@ def _resolve_baseline(
         if row.import_batch_id in checkpoint_source_ids
     ] if checkpoint_source_ids else session.execute(
         select(BalanceCheckpoint).where(
-            BalanceCheckpoint.entity_id == entity_id,
             BalanceCheckpoint.import_batch_id.in_(source_ids or {-1}),
         ).order_by(BalanceCheckpoint.id)
     ).scalars().all()
@@ -286,8 +284,25 @@ def _resolve_baseline(
 
     baseline_report = dict(checkpoint_batch.validation_report or {}) if checkpoint_batch else {}
     coverage_report = dict(baseline_report.get("baseline_coverage") or {})
+    row_account_ids = {row.ledger_account_id for row in rows}
+    accounts = session.execute(
+        select(LedgerAccount).where(LedgerAccount.id.in_(row_account_ids or {-1}))
+    ).scalars().all()
+    accounts_by_id = {account.id: account for account in accounts}
+    baseline_errors = []
+    for row in rows:
+        if row.entity_id != entity_id:
+            baseline_errors.append(
+                f"Balance checkpoint {row.id} does not belong to entity {entity_id}."
+            )
+        account = accounts_by_id.get(row.ledger_account_id)
+        if account is None or account.entity_id != entity_id:
+            baseline_errors.append(
+                f"Balance checkpoint {row.id} account {row.ledger_account_id} "
+                f"does not belong to entity {entity_id}."
+            )
+
     account_ids = {row.ledger_account_id for row in target_rows}
-    account_keys = _load_account_keys(session, entity_id, account_ids)
     entity_accounts = session.execute(
         select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)
     ).scalars().all()
@@ -297,14 +312,22 @@ def _resolve_baseline(
     }
     balances: dict[int, Decimal] = {}
     duplicate_ids: set[int] = set()
-    for row in target_rows:
-        if row.ledger_account_id in balances:
-            duplicate_ids.add(row.ledger_account_id)
-        balances[row.ledger_account_id] = Decimal(str(row.balance))
-
-    missing_codes = sorted(set(expected_codes) - set(account_keys.values()))
-    duplicate_codes = sorted(account_keys[account_id] for account_id in duplicate_ids)
-    baseline_complete = bool(target_rows) and not missing_codes and not duplicate_ids
+    account_keys: dict[int, str] = {}
+    if baseline_errors:
+        result["errors"].extend(baseline_errors)
+        baseline_complete = False
+        account_ids = set()
+        missing_codes: list[str] = []
+        duplicate_codes: list[str] = []
+    else:
+        account_keys = _load_account_keys(session, entity_id, account_ids)
+        for row in target_rows:
+            if row.ledger_account_id in balances:
+                duplicate_ids.add(row.ledger_account_id)
+            balances[row.ledger_account_id] = Decimal(str(row.balance))
+        missing_codes = sorted(set(expected_codes) - set(account_keys.values()))
+        duplicate_codes = sorted(account_keys[account_id] for account_id in duplicate_ids)
+        baseline_complete = bool(target_rows) and not missing_codes and not duplicate_ids
     if coverage_report and coverage_report.get("complete") is False:
         baseline_complete = False
     if baseline_report.get("readiness") == "INVALID" or baseline_report.get("errors"):
