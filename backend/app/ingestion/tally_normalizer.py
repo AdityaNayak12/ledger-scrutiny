@@ -104,8 +104,16 @@ def _generated_voucher_id(voucher: dict[str, Any], index: int) -> str:
         (entry.get("ledger_name"), entry.get("type"), str(entry.get("amount")))
         for entry in voucher.get("entries", ())
     )
-    value = repr((voucher.get("date"), voucher.get("voucher_type"), voucher.get("narration"), entries, index))
+    value = repr((voucher.get("date"), voucher.get("voucher_type"), voucher.get("narration"), entries))
     return f"generated:{sha256(value.encode("utf-8")).hexdigest()}"
+
+
+def _legacy_source_voucher_id(voucher: dict[str, Any]) -> str:
+    source_id = str(voucher["source_voucher_id"])
+    voucher_number = voucher.get("voucher_number")
+    if voucher_number is not None and str(voucher_number).strip() and str(voucher_number).strip() != source_id:
+        return f"{source_id}|VOUCHERNUMBER:{str(voucher_number).strip()}"
+    return source_id
 
 
 def _prepare_records(
@@ -114,6 +122,7 @@ def _prepare_records(
     period_start: date,
     period_end: date,
     canonical: bool,
+    allow_legacy_missing_closing: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], tuple[JournalEntryRecord, ...]]:
     entity_data = parsed_data.get("entity")
     if not isinstance(entity_data, dict):
@@ -159,6 +168,8 @@ def _prepare_records(
                 else _as_decimal(ledger.get("closing_balance"), f"closing balance for ledger '{name}'")
             ),
         })
+        if canonical and not allow_legacy_missing_closing and item["closing_balance"] is None:
+            raise TallyConnectorError("Tally ledger data is missing a required closing balance.")
         ledgers.append(item)
 
     raw_vouchers = parsed_data.get("vouchers", [])
@@ -167,6 +178,7 @@ def _prepare_records(
     vouchers: list[dict[str, Any]] = []
     voucher_ids: set[str] = set()
     canonical_entries: list[JournalEntryRecord] = []
+    ledgers_by_name = {ledger["name"]: ledger for ledger in ledgers}
     for voucher_index, raw_voucher in enumerate(raw_vouchers):
         if not isinstance(raw_voucher, dict):
             raise TallyConnectorError("Tally data contains a malformed voucher record.")
@@ -174,6 +186,8 @@ def _prepare_records(
         voucher_type = str(raw_voucher.get("voucher_type") or "").strip()
         if not voucher_type:
             raise TallyConnectorError(f"Voucher on {voucher_date} is missing its type.")
+        voucher_number = raw_voucher.get("voucher_number")
+        voucher_number = None if voucher_number is None else str(voucher_number).strip() or None
         if canonical and not period_start <= voucher_date <= period_end:
             raise TallyConnectorError(
                 f"Voucher on {voucher_date} is outside selected period {period_start} to {period_end}."
@@ -227,11 +241,19 @@ def _prepare_records(
                 "source_row_number": source_row_number,
             })
             prepared_entries.append(prepared_entry)
-            ledger_code = next(
-                ledger["external_id"] or ledger["name"] for ledger in ledgers if ledger["name"] == ledger_name
-            )
+            ledger = ledgers_by_name[ledger_name]
+            ledger_code = ledger["external_id"] or ledger["name"]
             source_metadata = dict(raw_entry.get("source_metadata") or {})
-            source_metadata.update({"tally_ledger_name": ledger_name, "tally_entry_index": line_index})
+            source_metadata.update({
+                "tally_ledger_name": ledger_name,
+                "tally_ledger_id": ledger.get("external_id"),
+                "tally_entry_index": line_index,
+                "tally_voucher_id": source_id,
+                "tally_voucher_number": voucher_number,
+                "tally_group_name": ledger["group_name"],
+                "tally_group_hierarchy": list(ledger.get("group_hierarchy") or [ledger["group_name"]]),
+                "tally_group_identifiers": list(ledger.get("group_hierarchy_records") or []),
+            })
             if raw_entry.get("source_line_id"):
                 source_metadata["source_line_id"] = str(raw_entry["source_line_id"])
             line_records.append(JournalLineRecord(
@@ -255,6 +277,7 @@ def _prepare_records(
             "document_date": document_date,
             "voucher_type": voucher_type,
             "source_voucher_id": source_id,
+            "voucher_number": voucher_number,
             "entries": prepared_entries,
         })
         vouchers.append(prepared_voucher)
@@ -342,6 +365,14 @@ def _selected_period(
         if target_start is None and batch.coverage_start is not None and batch.coverage_end is not None:
             target_start, target_end = batch.coverage_start, batch.coverage_end
 
+    if import_batch_id is not None and batch is not None:
+        batch_start, batch_end = batch.coverage_start, batch.coverage_end
+        if target_start is not None and (batch_start, batch_end) != (target_start, target_end):
+            raise ValueError("Selected period does not match the import batch period.")
+        if batch_start is not None and batch_end is not None:
+            target_start, target_end = batch_start, batch_end
+        if target_start is not None and (fy_start != target_start or fy_end != target_end):
+            raise ValueError("Tally source period does not match the import batch period.")
     if clear_only_period and target_start is not None and (fy_start != target_start or fy_end != target_end):
         raise ValueError(
             f"Uploaded XML period ({fy_start} to {fy_end}) does not match "
@@ -418,7 +449,12 @@ def _upsert_accounts(
     return result
 
 
-def _canonical_report(entries: tuple[JournalEntryRecord, ...], period_start: date, period_end: date) -> dict[str, Any]:
+def _canonical_report(
+    entries: tuple[JournalEntryRecord, ...],
+    period_start: date,
+    period_end: date,
+    ledgers: list[dict[str, Any]],
+) -> dict[str, Any]:
     report = build_reconciliation_report(entries, coverage_complete=True)
     report.update({
         "parser": "tally_xml",
@@ -426,8 +462,47 @@ def _canonical_report(entries: tuple[JournalEntryRecord, ...], period_start: dat
         "coverage_start": period_start.isoformat(),
         "coverage_end": period_end.isoformat(),
         "skip_reasons": [],
+        "tally_group_hierarchy": {
+            ledger["name"]: list(ledger.get("group_hierarchy_records") or [])
+            for ledger in ledgers
+        },
+        "tally_voucher_identifiers": [
+            {
+                "source_voucher_id": entry.source_document_id,
+                "voucher_number": next(
+                    (
+                        line.source_metadata.get("tally_voucher_number")
+                        for line in entry.lines
+                        if line.source_metadata.get("tally_voucher_number")
+                    ),
+                    None,
+                ),
+            }
+            for entry in entries
+        ],
     })
     return report
+
+
+def _has_canonical_records(session: Session, batch_id: int) -> bool:
+    return bool(
+        session.scalar(
+            select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
+        )
+        or session.scalar(
+            select(func.count()).select_from(BalanceCheckpoint).where(BalanceCheckpoint.import_batch_id == batch_id)
+        )
+    )
+
+
+def _is_legacy_compatibility_batch(session: Session, batch: ImportBatch | None) -> bool:
+    return bool(
+        batch is not None
+        and batch.status == "ACTIVE"
+        and batch.source == "tally_xml"
+        and (batch.validation_report or {}).get("parser") == "tally_xml"
+        and not _has_canonical_records(session, batch.id)
+    )
 
 
 def normalize_tally_data(
@@ -450,12 +525,15 @@ def normalize_tally_data(
         target_period_end=target_period_end,
         import_batch_id=import_batch_id,
     )
+    # ponytail: the legacy XML upload auto-activates before normalization; keep its old rows until Task 8 stages it.
+    allow_legacy_missing_closing = _is_legacy_compatibility_batch(session, batch)
     canonical = import_batch_id is not None
     ledgers, vouchers, canonical_entries = _prepare_records(
         parsed_data,
         period_start=period_start,
         period_end=period_end,
         canonical=canonical,
+        allow_legacy_missing_closing=allow_legacy_missing_closing,
     )
     account_plans = None
     entity = _resolve_entity(
@@ -500,7 +578,7 @@ def normalize_tally_data(
         accounts = _upsert_accounts(session, entity, ledgers, account_plans or {})
         if canonical:
             assert batch is not None
-            report = _canonical_report(canonical_entries, period_start, period_end)
+            report = _canonical_report(canonical_entries, period_start, period_end, ledgers)
             for entry_record in canonical_entries:
                 journal_entry = JournalEntry(
                     import_batch_id=batch.id,
@@ -533,6 +611,8 @@ def normalize_tally_data(
                 account = accounts[ledger["name"]]
                 closing = ledger["closing_balance"]
                 if closing is None:
+                    if canonical and not allow_legacy_missing_closing:
+                        raise TallyConnectorError("Tally ledger data is missing a required closing balance.")
                     closing = ledger["opening_balance"] + movements[ledger["name"]]
                 checkpoint_values = (
                     ((period_start, ledger["opening_balance"], "opening_closing"),)
@@ -563,6 +643,8 @@ def normalize_tally_data(
                 )
                 closing = ledger["closing_balance"]
                 if closing is None:
+                    if canonical and not allow_legacy_missing_closing:
+                        raise TallyConnectorError("Tally ledger data is missing a required closing balance.")
                     closing = ledger["opening_balance"] + debits - credits
                 session.add(TrialBalanceSnapshot(
                     import_batch_id=batch.id,
@@ -590,7 +672,7 @@ def normalize_tally_data(
                         amount=pair["amount"],
                         narration=voucher.get("narration"),
                         voucher_type=voucher["voucher_type"],
-                        source_voucher_id=voucher["source_voucher_id"],
+                        source_voucher_id=_legacy_source_voucher_id(voucher),
                     ))
             batch.validation_report = {**(batch.validation_report or {}), **report}
             batch.source_metadata = {
@@ -652,7 +734,7 @@ def normalize_tally_data(
                         amount=pair["amount"],
                         narration=voucher.get("narration"),
                         voucher_type=voucher["voucher_type"],
-                        source_voucher_id=voucher["source_voucher_id"],
+                        source_voucher_id=_legacy_source_voucher_id(voucher),
                     ))
         session.flush()
     return entity

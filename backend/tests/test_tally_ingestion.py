@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
-from app.db.models import Entity, ImportBatch, JournalEntry, JournalLine, LedgerAccount, Organization, Transaction, TrialBalanceSnapshot
+from app.db.models import BalanceCheckpoint, Entity, ImportBatch, JournalEntry, JournalLine, LedgerAccount, Organization, Transaction, TrialBalanceSnapshot
 from app.ingestion.batches import stage_import_batch
 from app.ingestion.tally_http import TallyConnectorError
 from app.ingestion.tally_parser import parse_tally_amount, parse_tally_xml
@@ -370,6 +370,7 @@ def test_tally_parser_preserves_multiline_voucher_ids_rows_and_signed_values():
     parsed = parse_tally_xml(xml_content)
     voucher = parsed["vouchers"][0]
     assert voucher["source_voucher_id"] == "DOC-GUID"
+    assert voucher["voucher_number"] == "DOC-1"
     assert voucher["date"] == date(2025, 6, 15)
     assert voucher["voucher_type"] == "Journal"
     assert [entry["ledger_name"] for entry in voucher["entries"]] == ["Bank", "Expense", "Tax"]
@@ -381,16 +382,18 @@ def test_tally_parser_preserves_multiline_voucher_ids_rows_and_signed_values():
 
 
 def test_tally_amount_and_parser_fail_loudly_on_malformed_values():
-    with pytest.raises(TallyConnectorError, match="Invalid Tally amount"):
-        parse_tally_amount("not-a-number")
+    with pytest.raises(TallyConnectorError, match="Invalid Tally amount") as exc_info:
+        parse_tally_amount("opaque-secret-456")
+    assert "opaque-secret-456" not in str(exc_info.value)
     with pytest.raises(TallyConnectorError, match="Invalid Tally amount"):
         parse_tally_amount("")
 
     malformed = b"""<ENVELOPE><COMPANY><RENAME>Broken</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
       <LEDGER NAME="Cash"><PARENT>Cash-in-hand</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>0</CLOSINGBALANCE></LEDGER>
-      <VOUCHER VCHTYPE="Journal"><DATE>20250401</DATE><VOUCHERNUMBER>BAD-1</VOUCHERNUMBER><ALLLEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>oops</AMOUNT></ALLLEDGERENTRIES.LIST></VOUCHER></ENVELOPE>"""
-    with pytest.raises(TallyConnectorError, match="Invalid Tally amount"):
+      <VOUCHER VCHTYPE="Journal"><DATE>20250401</DATE><VOUCHERNUMBER>BAD-1</VOUCHERNUMBER><ALLLEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>opaque-secret-456</AMOUNT></ALLLEDGERENTRIES.LIST></VOUCHER></ENVELOPE>"""
+    with pytest.raises(TallyConnectorError, match="Invalid Tally amount") as exc_info:
         parse_tally_xml(malformed)
+    assert "opaque-secret-456" not in str(exc_info.value)
 
 
 def test_tally_parser_rejects_unbalanced_voucher_with_connector_error():
@@ -408,6 +411,10 @@ def test_tally_normalizer_writes_canonical_multiline_rows_and_replays_without_du
     xml_path = os.path.join(os.path.dirname(__file__), "sample_tally_export.xml")
     contents = open(xml_path, "rb").read()
     parsed_data = parse_tally_xml(contents)
+    parsed_data["ledgers"] = [
+        {**ledger, "closing_balance": ledger["opening_balance"]}
+        for ledger in parsed_data["ledgers"]
+    ]
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
@@ -500,3 +507,181 @@ def test_tally_normalizer_rejects_unknown_voucher_ledger_before_writing_accounts
     finally:
         session.close()
         Base.metadata.drop_all(engine)
+
+
+def test_tally_normalizer_rejects_missing_closing_for_canonical_batch_before_writes():
+    parsed = {
+        "entity": {"name": "Canonical Corp", "financial_year_start": date(2025, 4, 1), "financial_year_end": date(2026, 3, 31)},
+        "ledgers": [{"name": "Cash", "group_name": "Cash-in-hand", "opening_balance": Decimal("0"), "closing_balance": None}],
+        "vouchers": [{"source_voucher_id": "DOC-1", "date": date(2025, 4, 1), "voucher_type": "Journal", "entries": [
+            {"ledger_name": "Cash", "type": "debit", "amount": Decimal("10")},
+            {"ledger_name": "Cash", "type": "credit", "amount": Decimal("10")},
+        ]}],
+    }
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        organization = Organization(name="Canonical Org")
+        session.add(organization)
+        session.flush()
+        entity = Entity(organization_id=organization.id, name="Canonical Corp", materiality_threshold=Decimal("0"))
+        session.add(entity)
+        session.flush()
+        batch = stage_import_batch(
+            session,
+            entity_id=entity.id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            source="tally_xml",
+            source_family="tally",
+            original_filename="missing-closing.xml",
+            contents=b"missing-closing",
+            uploaded_by_user_id=None,
+        )
+
+        with pytest.raises(TallyConnectorError, match="closing balance"):
+            normalize_tally_data(parsed, session, entity_id=entity.id, import_batch_id=batch.id)
+        assert session.scalar(select(func.count()).select_from(LedgerAccount)) == 0
+        assert session.scalar(select(func.count()).select_from(JournalEntry)) == 0
+        assert session.scalar(select(func.count()).select_from(BalanceCheckpoint)) == 0
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def test_tally_canonical_import_rejects_source_period_mismatch_before_writes():
+    parsed = {
+        "entity": {"name": "Period Corp", "financial_year_start": date(2024, 4, 1), "financial_year_end": date(2025, 3, 31)},
+        "ledgers": [{"name": "Cash", "group_name": "Cash-in-hand", "opening_balance": Decimal("0"), "closing_balance": Decimal("0")}],
+        "vouchers": [],
+    }
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        organization = Organization(name="Period Org")
+        session.add(organization)
+        session.flush()
+        entity = Entity(organization_id=organization.id, name="Period Corp", materiality_threshold=Decimal("0"))
+        session.add(entity)
+        session.flush()
+        batch = stage_import_batch(
+            session,
+            entity_id=entity.id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            source="tally_xml",
+            source_family="tally",
+            original_filename="wrong-period.xml",
+            contents=b"wrong-period",
+            uploaded_by_user_id=None,
+        )
+
+        with pytest.raises(ValueError, match="does not match"):
+            normalize_tally_data(parsed, session, entity_id=entity.id, import_batch_id=batch.id)
+        assert session.scalar(select(func.count()).select_from(LedgerAccount)) == 0
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def test_tally_canonical_persists_group_and_voucher_provenance():
+    xml_content = b"""<ENVELOPE><COMPANY><RENAME>Provenance Corp</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
+      <GROUP NAME="Assets" GUID="GROUP-ASSETS"><PARENT>Primary</PARENT></GROUP>
+      <GROUP NAME="Bank Accounts" GUID="GROUP-BANK"><PARENT>Assets</PARENT></GROUP>
+      <LEDGER NAME="Bank" GUID="LEDGER-BANK"><PARENT>Bank Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>0</CLOSINGBALANCE></LEDGER>
+      <LEDGER NAME="Offset" GUID="LEDGER-OFFSET"><PARENT>Bank Accounts</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>0</CLOSINGBALANCE></LEDGER>
+      <VOUCHER GUID="DOC-GUID" VCHTYPE="Journal"><DATE>20250615</DATE><VOUCHERNUMBER>DOC-1</VOUCHERNUMBER>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Bank</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-100</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Offset</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>100</AMOUNT></ALLLEDGERENTRIES.LIST>
+      </VOUCHER></ENVELOPE>"""
+    parsed = parse_tally_xml(xml_content)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        organization = Organization(name="Provenance Org")
+        session.add(organization)
+        session.flush()
+        entity = Entity(organization_id=organization.id, name="Provenance Corp", materiality_threshold=Decimal("0"))
+        session.add(entity)
+        session.flush()
+        batch = stage_import_batch(
+            session,
+            entity_id=entity.id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            source="tally_xml",
+            source_family="tally",
+            original_filename="provenance.xml",
+            contents=xml_content,
+            uploaded_by_user_id=None,
+        )
+
+        normalize_tally_data(parsed, session, entity_id=entity.id, import_batch_id=batch.id)
+        session.commit()
+
+        lines = list(session.scalars(select(JournalLine).order_by(JournalLine.id)))
+        assert len(lines) == 2
+        assert all(line.source_metadata["tally_voucher_id"] == "DOC-GUID" for line in lines)
+        assert all(line.source_metadata["tally_voucher_number"] == "DOC-1" for line in lines)
+        assert lines[0].source_metadata["tally_group_hierarchy"] == ["Bank Accounts", "Assets", "Primary"]
+        assert lines[0].source_metadata["tally_group_identifiers"] == [
+            {"name": "Bank Accounts", "external_id": "GROUP-BANK", "parent_name": "Assets"},
+            {"name": "Assets", "external_id": "GROUP-ASSETS", "parent_name": "Primary"},
+            {"name": "Primary", "external_id": None, "parent_name": None},
+        ]
+        assert batch.validation_report["tally_group_hierarchy"]["Bank"] == [
+            {"name": "Bank Accounts", "external_id": "GROUP-BANK", "parent_name": "Assets"},
+            {"name": "Assets", "external_id": "GROUP-ASSETS", "parent_name": "Primary"},
+            {"name": "Primary", "external_id": None, "parent_name": None},
+        ]
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def test_tally_legacy_transaction_keeps_stable_id_and_voucher_number():
+    xml_content = b"""<ENVELOPE><COMPANY><RENAME>Legacy Provenance Corp</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
+      <LEDGER NAME="Cash"><PARENT>Cash-in-hand</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>0</CLOSINGBALANCE></LEDGER>
+      <LEDGER NAME="Offset"><PARENT>Capital Account</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>0</CLOSINGBALANCE></LEDGER>
+      <VOUCHER GUID="DOC-GUID" VCHTYPE="Journal"><DATE>20250615</DATE><VOUCHERNUMBER>DOC-1</VOUCHERNUMBER>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-100</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Offset</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>100</AMOUNT></ALLLEDGERENTRIES.LIST>
+      </VOUCHER></ENVELOPE>"""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        normalize_tally_data(parse_tally_xml(xml_content), session)
+        session.commit()
+        source_id = session.scalar(select(Transaction.source_voucher_id))
+        assert source_id == "DOC-GUID|VOUCHERNUMBER:DOC-1"
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def test_tally_generated_voucher_ids_are_order_independent_and_reject_ambiguous_duplicates():
+    prefix = b"""<ENVELOPE><COMPANY><RENAME>Generated Corp</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
+      <LEDGER NAME="Cash"><PARENT>Cash-in-hand</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>0</CLOSINGBALANCE></LEDGER>"""
+    voucher_a = b"""<VOUCHER VCHTYPE="Journal"><DATE>20250401</DATE><NARRATION>Alpha</NARRATION>
+      <ALLLEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1</AMOUNT></ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1</AMOUNT></ALLLEDGERENTRIES.LIST></VOUCHER>"""
+    voucher_b = b"""<VOUCHER VCHTYPE="Journal"><DATE>20250401</DATE><NARRATION>Beta</NARRATION>
+      <ALLLEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-2</AMOUNT></ALLLEDGERENTRIES.LIST>
+      <ALLLEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>2</AMOUNT></ALLLEDGERENTRIES.LIST></VOUCHER>"""
+    suffix = b"</ENVELOPE>"
+
+    first = parse_tally_xml(prefix + voucher_a + voucher_b + suffix)
+    second = parse_tally_xml(prefix + voucher_b + voucher_a + suffix)
+    assert sorted(voucher["source_voucher_id"] for voucher in first["vouchers"]) == sorted(
+        voucher["source_voucher_id"] for voucher in second["vouchers"]
+    )
+    with pytest.raises(TallyConnectorError, match="duplicate voucher"):
+        parse_tally_xml(prefix + voucher_a + voucher_a + suffix)

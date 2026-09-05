@@ -59,30 +59,19 @@ def build_ledger_request(company_name: str, period_start: date, period_end: date
     </STATICVARIABLES>
     <TDL><TDLMESSAGE>
       <COLLECTION NAME="LedgerScrutinyCollection" ISINITIALIZE="Yes">
-        <TYPE>Ledger</TYPE>
-        <NATIVEMETHOD>Name</NATIVEMETHOD>
-        <NATIVEMETHOD>GUID</NATIVEMETHOD>
-        <NATIVEMETHOD>MasterID</NATIVEMETHOD>
-        <NATIVEMETHOD>Parent</NATIVEMETHOD>
-        <NATIVEMETHOD>OpeningBalance</NATIVEMETHOD>
-        <NATIVEMETHOD>ClosingBalance</NATIVEMETHOD>
+        <COLLECTION>LedgerScrutinyLedgers, LedgerScrutinyGroups, LedgerScrutinyVouchers</COLLECTION>
       </COLLECTION>
       <COLLECTION NAME="LedgerScrutinyGroups" ISINITIALIZE="Yes">
         <TYPE>Group</TYPE>
-        <NATIVEMETHOD>Name</NATIVEMETHOD>
-        <NATIVEMETHOD>GUID</NATIVEMETHOD>
-        <NATIVEMETHOD>MasterID</NATIVEMETHOD>
-        <NATIVEMETHOD>Parent</NATIVEMETHOD>
+        <FETCH>Name, GUID, MasterID, Parent</FETCH>
+      </COLLECTION>
+      <COLLECTION NAME="LedgerScrutinyLedgers" ISINITIALIZE="Yes">
+        <TYPE>Ledger</TYPE>
+        <FETCH>Name, GUID, MasterID, Parent, OpeningBalance, ClosingBalance</FETCH>
       </COLLECTION>
       <COLLECTION NAME="LedgerScrutinyVouchers" ISINITIALIZE="Yes">
         <TYPE>Voucher</TYPE>
-        <NATIVEMETHOD>GUID</NATIVEMETHOD>
-        <NATIVEMETHOD>MasterID</NATIVEMETHOD>
-        <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
-        <NATIVEMETHOD>Date</NATIVEMETHOD>
-        <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-        <NATIVEMETHOD>Narration</NATIVEMETHOD>
-        <NATIVEMETHOD>AllLedgerEntries</NATIVEMETHOD>
+        <FETCH>GUID, VCHKEY, MasterID, VoucherNumber, Date, VoucherTypeName, Narration, AllLedgerEntries.*</FETCH>
       </COLLECTION>
     </TDLMESSAGE></TDL>
   </DESC></BODY>
@@ -126,20 +115,19 @@ def fetch_trial_balance(
         require_status=True,
     )
     if parsed_data["entity"]["name"] != company_name:
-        raise TallyConnectorError(
-            f"Tally response company '{parsed_data['entity']['name']}' does not match the requested company."
-        )
+        raise TallyConnectorError("Tally response company does not match the requested company.")
     if (
         parsed_data["entity"]["financial_year_start"] != period_start
         or parsed_data["entity"]["financial_year_end"] != period_end
     ):
-        raise TallyConnectorError(
-            "Tally response period does not match the requested period "
-            f"{period_start} to {period_end}."
-        )
+        raise TallyConnectorError("Tally response period does not match the requested period.")
     for ledger in parsed_data["ledgers"]:
         if ledger.get("closing_balance") is None:
             raise TallyConnectorError(
-                f"Tally response omitted closing balance for ledger '{ledger['name']}'."
+                "Tally response omitted a required closing balance."
             )
+    if not parsed_data["vouchers"]:
+        raise TallyConnectorError(
+            "Tally response returned no vouchers. Check the selected company, period, and export configuration."
+        )
     return parsed_data, raw_xml

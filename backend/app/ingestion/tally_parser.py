@@ -3,7 +3,6 @@
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-import re
 from typing import Any, Dict
 
 from lxml import etree
@@ -15,9 +14,6 @@ class TallyConnectorError(ValueError):
 
 _ENTRY_TAGS = {"ALLLEDGERENTRIES.LIST", "LEDGERENTRIES.LIST"}
 _IDENTIFIER_NAMES = ("GUID", "VCHKEY", "MASTERID", "ID", "EXTERNALID", "ALTERID")
-_SENSITIVE_DETAIL = re.compile(
-    r"(?i)\b(password|passwd|token|secret|api[_-]?key|authorization|bearer)\s*[:=]\s*[^\s,;]+"
-)
 
 
 def _local_name(value: Any) -> str:
@@ -62,14 +58,9 @@ def _stable_identifier(node: etree._Element) -> str | None:
 
 
 def _safe_status_detail(root: etree._Element) -> str:
-    detail = " ".join(
-        text.strip() for node in _descendants(root, "LINEERROR") for text in [node.text or ""] if text.strip()
-    )
-    if not detail:
-        return ""
-    detail = _SENSITIVE_DETAIL.sub(lambda match: f"{match.group(1)}=[redacted]", detail)
-    detail = re.sub(r"<[^>]*>", "", detail).strip()
-    return detail[:240]
+    if _descendants(root, "LINEERROR"):
+        return "TallyPrime rejected the export request; verify the selected company, period, and server configuration."
+    return ""
 
 
 def parse_tally_date(date_str: str) -> date:
@@ -82,7 +73,7 @@ def parse_tally_date(date_str: str) -> date:
             return datetime.strptime(value, fmt).date()
         except ValueError:
             continue
-    raise TallyConnectorError(f"Unable to parse Tally date '{value}'.")
+    raise TallyConnectorError("Unable to parse Tally date.")
 
 
 def parse_tally_amount(amount_str: str) -> Decimal:
@@ -104,9 +95,9 @@ def parse_tally_amount(amount_str: str) -> Decimal:
     try:
         amount = Decimal(value.replace(",", "").strip())
     except (InvalidOperation, TypeError, ValueError):
-        raise TallyConnectorError(f"Invalid Tally amount '{original}'.") from None
+        raise TallyConnectorError("Invalid Tally amount.") from None
     if not amount.is_finite():
-        raise TallyConnectorError(f"Invalid Tally amount '{original}'.")
+        raise TallyConnectorError("Invalid Tally amount.")
     if suffix == "DR":
         return abs(amount)
     if suffix == "CR":
@@ -153,7 +144,7 @@ def _entity_period(
     if start is None or end is None:
         raise TallyConnectorError("Tally response omitted the financial period start or end date.")
     if start > end:
-        raise TallyConnectorError(f"Tally response has an invalid period: {start} is after {end}.")
+        raise TallyConnectorError("Tally response has an invalid financial period.")
     return str(entity_name).strip(), start, end
 
 
@@ -196,6 +187,7 @@ def _group_path(group_name: str, parents: dict[str, str | None]) -> list[str]:
 
 def _parse_ledgers(root: etree._Element, report_name: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     groups, parents = _group_data(root)
+    groups_by_name = {group["name"]: group for group in groups}
     ledger_nodes = _descendants(root, "LEDGER")
     if not ledger_nodes:
         raise TallyConnectorError("Tally response returned no ledgers/account data.")
@@ -239,6 +231,14 @@ def _parse_ledgers(root: etree._Element, report_name: str) -> tuple[list[dict[st
             "opening_balance": opening,
             "closing_balance": closing,
         }
+        item["group_hierarchy_records"] = [
+            {
+                "name": hierarchy_name,
+                "external_id": groups_by_name.get(hierarchy_name, {}).get("external_id"),
+                "parent_name": groups_by_name.get(hierarchy_name, {}).get("parent_name"),
+            }
+            for hierarchy_name in item["group_hierarchy"]
+        ]
         if external_id:
             item["external_id"] = external_id
         ledgers.append(item)
@@ -258,7 +258,7 @@ def _voucher_id(
     number = _text(voucher, "VOUCHERNUMBER", "VOUCHERNO", "NUMBER")
     if number:
         return number
-    fingerprint = repr((date_value.isoformat(), voucher_type, entries, index)).encode("utf-8")
+    fingerprint = repr((date_value.isoformat(), voucher_type, entries)).encode("utf-8")
     return f"generated:{sha256(fingerprint).hexdigest()}"
 
 
@@ -276,6 +276,7 @@ def _parse_vouchers(root: etree._Element) -> list[dict[str, Any]]:
             raise TallyConnectorError(f"Voucher of type '{voucher_type}' is missing its date.")
         voucher_date = parse_tally_date(date_text)
         narration = _text(voucher, "NARRATION", "DESCRIPTION")
+        voucher_number = _text(voucher, "VOUCHERNUMBER", "VOUCHERNO", "NUMBER")
         entry_nodes = [node for node in voucher.iter() if _local_name(node.tag) in _ENTRY_TAGS]
         if not entry_nodes:
             raise TallyConnectorError(
@@ -329,14 +330,16 @@ def _parse_vouchers(root: etree._Element) -> list[dict[str, Any]]:
                 f"debits={debit_total}, credits={credit_total}."
             )
         document_date = _parse_date_text(_text(voucher, "DOCUMENTDATE", "REFERENCEDATE"), "document date")
-        vouchers.append({
+        parsed_voucher = {
             "date": voucher_date,
             "document_date": document_date,
             "voucher_type": voucher_type.strip(),
             "source_voucher_id": source_id,
+            "voucher_number": voucher_number,
             "narration": narration,
             "entries": entries,
-        })
+        }
+        vouchers.append(parsed_voucher)
     return vouchers
 
 
