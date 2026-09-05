@@ -163,21 +163,22 @@ def test_unsupported_baseline_header_aliases_are_rejected(header_index, unsuppor
     output = io.BytesIO()
     workbook.save(output)
 
-    with pytest.raises(ValueError, match="required baseline headers"):
+    with pytest.raises(ValueError, match="exact required headers"):
         parse_baseline_xlsx(output.getvalue())
 
 
-def test_baseline_headers_beyond_fixed_profile_scan_window_are_rejected():
+@pytest.mark.parametrize("header_row", [2, 16])
+def test_baseline_headers_outside_fixed_row_one_are_rejected(header_row):
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
-    for _ in range(15):
+    for _ in range(header_row - 1):
         worksheet.append(["Report title"])
     worksheet.append(HEADERS)
     worksheet.append(["1000", BALANCE_DATE, "100.00", "INR"])
     output = io.BytesIO()
     workbook.save(output)
 
-    with pytest.raises(ValueError, match="first 15 rows"):
+    with pytest.raises(ValueError, match="row 1"):
         parse_baseline_xlsx(output.getvalue())
 
 
@@ -273,6 +274,60 @@ def test_invalid_staged_batch_keeps_workbook_and_optional_pdf_bytes(baseline_ses
     assert batch.raw_source_bytes == contents
     evidence = batch.source_metadata["supporting_evidence"]["signed_pdf"]
     assert base64.b64decode(evidence["bytes_base64"]) == pdf_bytes
+
+
+def test_mismatched_caller_bytes_fail_staged_batch_and_retain_artifacts(baseline_session):
+    session, entity_id = baseline_session
+    staged_contents = _valid_bytes()
+    caller_contents = _xlsx_bytes([
+        ["1000", BALANCE_DATE, "90.00", "INR"],
+        ["2000", BALANCE_DATE, "-50.00", "INR"],
+        ["3000", BALANCE_DATE, "-40.00", "INR"],
+    ])
+    pdf_bytes = b"%PDF-1.7 signed evidence"
+    batch = _stage(session, entity_id, staged_contents)
+
+    with pytest.raises(ValueError, match="do not match staged"):
+        normalize_balance_checkpoint_xlsx(
+            caller_contents,
+            entity_id,
+            session,
+            import_batch_id=batch.id,
+            signed_pdf_bytes=pdf_bytes,
+            expected_currency="INR",
+        )
+
+    assert batch.status == "FAILED"
+    assert batch.raw_source_bytes == staged_contents
+    evidence = batch.source_metadata["supporting_evidence"]["signed_pdf"]
+    assert base64.b64decode(evidence["bytes_base64"]) == pdf_bytes
+    assert session.scalar(select(BalanceCheckpoint.id)) is None
+    assert any("do not match staged" in error for error in batch.validation_report["errors"])
+
+
+def test_active_exact_sha_duplicate_replay_is_idempotent(baseline_session):
+    session, entity_id = baseline_session
+    contents = _valid_bytes()
+    batch = _stage(session, entity_id, contents)
+    first_report = normalize_balance_checkpoint_xlsx(
+        contents, entity_id, session, import_batch_id=batch.id, expected_currency="INR"
+    )
+    session.commit()
+    checkpoint_ids = [checkpoint.id for checkpoint in session.scalars(select(BalanceCheckpoint)).all()]
+
+    duplicate = _stage(session, entity_id, contents)
+    duplicate_id = duplicate.id
+    session.expunge_all()
+    replay_report = normalize_balance_checkpoint_xlsx(
+        contents, entity_id, session, import_batch_id=duplicate_id, expected_currency="INR"
+    )
+    session.commit()
+
+    replayed_batch = session.get(ImportBatch, duplicate_id)
+    assert replayed_batch.id == batch.id
+    assert replayed_batch.status == "ACTIVE"
+    assert replay_report == first_report
+    assert [checkpoint.id for checkpoint in session.scalars(select(BalanceCheckpoint)).all()] == checkpoint_ids
 
 
 def test_baseline_fingerprint_includes_account_balance_pairs(baseline_session):

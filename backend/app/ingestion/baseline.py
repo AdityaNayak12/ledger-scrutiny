@@ -124,23 +124,20 @@ def _parse_decimal(value: Any, row_number: int) -> Decimal:
 
 
 def _header_row(worksheet: Any) -> tuple[int, dict[str, int]]:
-    for row_number in range(1, min(15, worksheet.max_row) + 1):
-        values = list(worksheet.iter_rows(
-            min_row=row_number, max_row=row_number, values_only=True
-        ))[0]
-        positions: dict[str, int] = {}
-        for header in BASELINE_REQUIRED_HEADERS:
-            matches = [index for index, value in enumerate(values) if value == header]
-            if len(matches) > 1:
-                raise BaselineValidationError(
-                    f"Required baseline header {header!r} appears more than once."
-                )
-            if matches:
-                positions[header] = matches[0]
-        if len(positions) == len(BASELINE_REQUIRED_HEADERS):
-            return row_number, positions
+    values = list(worksheet.iter_rows(min_row=1, max_row=1, values_only=True))[0]
+    positions: dict[str, int] = {}
+    for header in BASELINE_REQUIRED_HEADERS:
+        matches = [index for index, value in enumerate(values) if value == header]
+        if len(matches) > 1:
+            raise BaselineValidationError(
+                f"Required baseline header {header!r} appears more than once."
+            )
+        if matches:
+            positions[header] = matches[0]
+    if len(positions) == len(BASELINE_REQUIRED_HEADERS):
+        return 1, positions
     raise BaselineValidationError(
-        "Could not locate the exact required baseline headers in the first 15 rows. "
+        "Baseline headers must be the exact required headers in worksheet row 1. "
         f"Required headers: {', '.join(BASELINE_REQUIRED_HEADERS)}."
     )
 
@@ -536,6 +533,9 @@ def normalize_baseline_xlsx(
         raise ValueError(f"Import batch {import_batch_id} not found.")
     if batch.entity_id != entity_id:
         raise ValueError(f"Import batch {import_batch_id} does not belong to entity {entity_id}.")
+    file_bytes = bytes(file_bytes)
+    if batch.status == "ACTIVE" and sha256(file_bytes).hexdigest() == batch.content_sha256:
+        return json.loads(json.dumps(batch.validation_report or {}))
     if batch.status != "STAGED":
         raise ValueError(
             f"Baseline normalization requires a STAGED ImportBatch; batch {import_batch_id} is {batch.status}."
@@ -545,7 +545,6 @@ def normalize_baseline_xlsx(
             f"Baseline normalization requires a {BatchKind.BALANCE_CHECKPOINT.value} ImportBatch."
         )
 
-    file_bytes = bytes(file_bytes)
     evidence_bytes = signed_pdf_bytes
     if evidence_bytes is None and file_bytes.lstrip().startswith(_PDF_PREFIX):
         evidence_bytes = file_bytes
@@ -563,6 +562,22 @@ def normalize_baseline_xlsx(
     expected_codes = _normalise_codes(expected_account_codes)
     if expected_codes is None:
         expected_codes = set(accounts_by_code)
+
+    received_sha256 = sha256(file_bytes).hexdigest()
+    if received_sha256 != batch.content_sha256:
+        message = (
+            "Baseline workbook bytes do not match staged ImportBatch content_sha256 "
+            f"(staged {batch.content_sha256}, received {received_sha256})."
+        )
+        report = _baseline_report(
+            (),
+            input_rows=0,
+            errors=[message],
+            expected_account_codes=expected_codes,
+            allowed_account_codes=set(accounts_by_code),
+        )
+        fail_import_batch(session, batch, errors=[message], validation_report=report)
+        raise BaselineValidationError(message)
 
     try:
         parsed = _parse_baseline_xlsx(
