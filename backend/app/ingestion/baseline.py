@@ -125,6 +125,20 @@ def _parse_decimal(value: Any, row_number: int) -> Decimal:
 
 def _header_row(worksheet: Any) -> tuple[int, dict[str, int]]:
     values = list(worksheet.iter_rows(min_row=1, max_row=1, values_only=True))[0]
+    unexpected = [
+        value
+        for value in values
+        if not _is_blank(value) and value not in BASELINE_REQUIRED_HEADERS
+    ]
+    if unexpected:
+        raise BaselineValidationError(
+            "Baseline headers must be the exact required headers in worksheet row 1; "
+            "unexpected nonblank header(s): "
+            + ", ".join(repr(value) for value in unexpected)
+            + ". Required headers: "
+            + ", ".join(BASELINE_REQUIRED_HEADERS)
+            + "."
+        )
     positions: dict[str, int] = {}
     for header in BASELINE_REQUIRED_HEADERS:
         matches = [index for index, value in enumerate(values) if value == header]
@@ -537,6 +551,10 @@ def normalize_baseline_xlsx(
         raise ValueError(
             f"Baseline normalization requires a {BatchKind.BALANCE_CHECKPOINT.value} ImportBatch."
         )
+    if batch.source_family != SourceFamily.GL_UPLOAD.value:
+        raise ValueError(
+            "Baseline normalization requires a gl_upload source_family for balance checkpoints."
+        )
     file_bytes = bytes(file_bytes)
     if batch.status == "ACTIVE" and sha256(file_bytes).hexdigest() == batch.content_sha256:
         return json.loads(json.dumps(batch.validation_report or {}))
@@ -558,9 +576,7 @@ def normalize_baseline_xlsx(
         for account in accounts
         if account.external_code is not None and str(account.external_code).strip()
     }
-    expected_codes = _normalise_codes(expected_account_codes)
-    if expected_codes is None:
-        expected_codes = set(accounts_by_code)
+    expected_codes = set(accounts_by_code)
 
     received_sha256 = sha256(file_bytes).hexdigest()
     if received_sha256 != batch.content_sha256:

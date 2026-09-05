@@ -103,3 +103,37 @@ exit 0 (no output)
 ```
 
 The warnings are existing FastAPI/Starlette deprecations; no test or compile failures occurred.
+
+## Round 5 final fixes
+
+- Baseline normalization now derives completeness from the entity's full external-code master, so `expected_account_codes` cannot narrow the required set.
+- `balance_checkpoint` baseline normalization now requires `source_family == "gl_upload"` before active replay, evidence handling, or workbook parsing; rejected Tally batches retain their staged lifecycle and artifacts.
+- Baseline row-1 header validation now rejects nonblank headers outside the four exact required names while allowing blank trailing cells.
+- Added regressions for caller-supplied account subsets, Tally checkpoint rejection, extra headers, and blank trailing header cells.
+
+## Round 5 verification
+
+Focused baseline tests:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_baseline_ingestion.py
+23 passed, 3 warnings in 0.26s
+```
+
+Full backend tests:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q
+117 passed, 4 warnings in 14.64s
+```
+
+Compile and whitespace checks:
+
+```text
+../.venv/bin/python -m compileall -q app tests
+exit 0 (no output)
+git diff --check
+exit 0 (no output)
+```
+
+The warnings remain existing FastAPI/Starlette deprecations; no test or compile failures occurred.

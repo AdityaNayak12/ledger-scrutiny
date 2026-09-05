@@ -22,10 +22,10 @@ HEADERS = ["Account Code", "Balance Date", "Signed Balance", "Currency"]
 BALANCE_DATE = date(2025, 3, 31)
 
 
-def _xlsx_bytes(rows):
+def _xlsx_bytes(rows, headers=HEADERS):
     workbook = openpyxl.Workbook()
     worksheet = workbook.active
-    worksheet.append(HEADERS)
+    worksheet.append(headers)
     for row in rows:
         worksheet.append(row)
     output = io.BytesIO()
@@ -131,6 +131,84 @@ def test_valid_baseline_persists_checkpoints_reports_and_activates(baseline_sess
     assert report["signed_total"] == "0.00"
     assert report["baseline_coverage"]["complete"] is True
     json.dumps(report)
+
+
+def test_caller_expected_account_subset_cannot_weaken_master_completeness(baseline_session):
+    session, entity_id = baseline_session
+    contents = _xlsx_bytes([["1000", BALANCE_DATE, "0.00", "INR"]])
+    batch = _stage(session, entity_id, contents)
+
+    with pytest.raises(ValueError, match="Missing expected account code"):
+        normalize_balance_checkpoint_xlsx(
+            contents,
+            entity_id,
+            session,
+            import_batch_id=batch.id,
+            expected_account_codes=["1000"],
+            expected_currency="INR",
+        )
+
+    assert batch.status == "FAILED"
+    assert batch.raw_source_bytes == contents
+    assert session.scalar(select(BalanceCheckpoint.id)) is None
+    assert batch.validation_report["readiness"] == "INVALID"
+    assert batch.validation_report["baseline_coverage"]["complete"] is False
+    assert batch.validation_report["missing_account_codes"] == ["2000", "3000"]
+
+
+def test_tally_balance_checkpoint_is_rejected_without_mutating_staged_batch(baseline_session):
+    session, entity_id = baseline_session
+    contents = b"not-an-xlsx"
+    batch = stage_import_batch(
+        session,
+        entity_id=entity_id,
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        source="tally",
+        source_family="tally",
+        original_filename="tally-checkpoint.xlsx",
+        contents=contents,
+        uploaded_by_user_id=None,
+        kind="balance_checkpoint",
+        coverage_start=date(2025, 4, 1),
+        coverage_end=date(2026, 3, 31),
+    )
+    original_metadata = dict(batch.source_metadata or {})
+
+    with pytest.raises(ValueError, match="gl_upload"):
+        normalize_balance_checkpoint_xlsx(
+            contents,
+            entity_id,
+            session,
+            import_batch_id=batch.id,
+        )
+
+    assert batch.status == "STAGED"
+    assert batch.raw_source_bytes == contents
+    assert batch.source_metadata == original_metadata
+    assert batch.validation_report == {}
+    assert session.scalar(select(BalanceCheckpoint.id)) is None
+
+
+def test_nonblank_extra_baseline_header_is_rejected():
+    contents = _xlsx_bytes(
+        [["1000", BALANCE_DATE, "0.00", "INR"]],
+        headers=HEADERS + ["Notes"],
+    )
+
+    with pytest.raises(ValueError, match="unexpected.*header"):
+        parse_baseline_xlsx(contents)
+
+
+def test_blank_trailing_baseline_headers_are_allowed():
+    contents = _xlsx_bytes(
+        [["1000", BALANCE_DATE, "0.00", "INR"]],
+        headers=HEADERS + [None, None],
+    )
+
+    records = parse_baseline_xlsx(contents)
+
+    assert [record.ledger_account_code for record in records] == ["1000"]
 
 
 def test_duplicate_account_codes_are_rejected():
