@@ -2,6 +2,7 @@ import os
 from decimal import Decimal
 from datetime import date
 import pytest
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
@@ -11,6 +12,11 @@ from app.ingestion.batches import stage_import_batch
 from app.ingestion.tally_http import TallyConnectorError
 from app.ingestion.tally_parser import parse_tally_amount, parse_tally_xml
 from app.ingestion.tally_normalizer import normalize_tally_data
+from app.main import app
+from conftest import TestingSessionLocal
+
+
+client = TestClient(app)
 
 
 def test_tally_ingestion_end_to_end():
@@ -442,6 +448,8 @@ def test_tally_normalizer_writes_canonical_multiline_rows_and_replays_without_du
         session.commit()
         assert session.scalar(select(func.count()).select_from(JournalEntry)) == 2
         assert session.scalar(select(func.count()).select_from(JournalLine)) == 4
+        assert session.scalar(select(func.count()).select_from(BalanceCheckpoint)) == 10
+        assert session.scalar(select(func.count()).select_from(TrialBalanceSnapshot)) == 5
         assert session.scalar(select(func.count()).select_from(Transaction)) == 2
         lines = list(session.scalars(select(JournalLine).order_by(JournalLine.id)))
         assert [line.side for line in lines] == ["debit", "credit", "debit", "credit"]
@@ -455,6 +463,18 @@ def test_tally_normalizer_writes_canonical_multiline_rows_and_replays_without_du
         session.commit()
         assert [entry.source_document_id for entry in session.scalars(select(JournalEntry).order_by(JournalEntry.id))] == first_ids
         assert session.scalar(select(func.count()).select_from(JournalLine)) == first_line_count
+
+        checkpoint = session.scalars(select(BalanceCheckpoint).order_by(BalanceCheckpoint.id)).first()
+        session.delete(checkpoint)
+        session.commit()
+        with pytest.raises(TallyConnectorError, match="partial canonical records"):
+            normalize_tally_data(parsed_data, session, entity_id=entity.id, import_batch_id=batch.id)
+        session.rollback()
+        assert session.scalar(select(func.count()).select_from(JournalEntry)) == 2
+        assert session.scalar(select(func.count()).select_from(JournalLine)) == 4
+        assert session.scalar(select(func.count()).select_from(BalanceCheckpoint)) == 9
+        assert session.scalar(select(func.count()).select_from(TrialBalanceSnapshot)) == 5
+        assert session.scalar(select(func.count()).select_from(Transaction)) == 2
     finally:
         session.close()
         Base.metadata.drop_all(engine)
@@ -549,6 +569,103 @@ def test_tally_normalizer_rejects_missing_closing_for_canonical_batch_before_wri
     finally:
         session.close()
         Base.metadata.drop_all(engine)
+
+
+def test_tally_normalizer_rejects_empty_vouchers_for_canonical_batch_before_writes():
+    parsed = {
+        "entity": {"name": "Empty Canonical Corp", "financial_year_start": date(2025, 4, 1), "financial_year_end": date(2026, 3, 31)},
+        "ledgers": [{"name": "Cash", "group_name": "Cash-in-hand", "opening_balance": Decimal("0"), "closing_balance": Decimal("0")}],
+        "vouchers": [],
+    }
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    try:
+        organization = Organization(name="Empty Canonical Org")
+        session.add(organization)
+        session.flush()
+        entity = Entity(organization_id=organization.id, name="Empty Canonical Corp", materiality_threshold=Decimal("0"))
+        session.add(entity)
+        session.flush()
+        batch = stage_import_batch(
+            session,
+            entity_id=entity.id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            source="tally_xml",
+            source_family="tally",
+            original_filename="empty.xml",
+            contents=b"empty-canonical",
+            uploaded_by_user_id=None,
+        )
+
+        with pytest.raises(TallyConnectorError, match="at least one voucher"):
+            normalize_tally_data(parsed, session, entity_id=entity.id, import_batch_id=batch.id)
+        assert batch.status == "STAGED"
+        assert session.scalar(select(func.count()).select_from(LedgerAccount)) == 0
+        assert session.scalar(select(func.count()).select_from(JournalEntry)) == 0
+        assert session.scalar(select(func.count()).select_from(BalanceCheckpoint)) == 0
+        assert session.scalar(select(func.count()).select_from(TrialBalanceSnapshot)) == 0
+        assert session.scalar(select(func.count()).select_from(Transaction)) == 0
+    finally:
+        session.close()
+        Base.metadata.drop_all(engine)
+
+
+def _create_upload_entity(name: str) -> tuple[dict[str, str], int]:
+    registration = client.post("/auth/register", json={
+        "organization_name": f"{name} Org",
+        "email": f"{name.lower().replace(' ', '-')}.{os.urandom(4).hex()}@integration.com",
+        "password": "Password123",
+    })
+    assert registration.status_code == 201, registration.text
+    headers = {"Authorization": f"Bearer {registration.json()['access_token']}"}
+    entity = client.post(
+        "/entities",
+        json={"name": name, "materiality_threshold": "0.00"},
+        headers=headers,
+    )
+    assert entity.status_code == 201, entity.text
+    return headers, entity.json()["id"]
+
+
+def test_tally_xml_upload_rejects_empty_vouchers_before_batch_activation():
+    headers, entity_id = _create_upload_entity("Empty Upload Corp")
+    xml_content = b"""<ENVELOPE><COMPANY><RENAME>Empty Upload Corp</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
+      <LEDGER NAME="Cash"><PARENT>Cash-in-hand</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>0</CLOSINGBALANCE></LEDGER></ENVELOPE>"""
+
+    response = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("empty.xml", xml_content, "text/xml")},
+        headers=headers,
+    )
+    assert response.status_code == 400
+    assert "voucher" in response.json()["detail"].lower()
+    with TestingSessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)) == 0
+
+
+def test_tally_xml_upload_rejects_missing_closing_without_legacy_synthesis():
+    headers, entity_id = _create_upload_entity("Missing Closing Upload Corp")
+    xml_content = b"""<ENVELOPE><COMPANY><RENAME>Missing Closing Upload Corp</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
+      <LEDGER NAME="Cash"><PARENT>Cash-in-hand</PARENT><OPENINGBALANCE>0</OPENINGBALANCE></LEDGER>
+      <LEDGER NAME="Offset"><PARENT>Capital Account</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>0</CLOSINGBALANCE></LEDGER>
+      <VOUCHER GUID="UPLOAD-DOC" VCHTYPE="Journal"><DATE>20250401</DATE>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-10</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Offset</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>10</AMOUNT></ALLLEDGERENTRIES.LIST>
+      </VOUCHER></ENVELOPE>"""
+
+    response = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("missing-closing.xml", xml_content, "text/xml")},
+        headers=headers,
+    )
+    assert response.status_code == 400
+    assert "closing balance" in response.json()["detail"].lower()
+    with TestingSessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)) == 0
+        assert session.scalar(select(func.count()).select_from(LedgerAccount).where(LedgerAccount.entity_id == entity_id)) == 0
 
 
 def test_tally_canonical_import_rejects_source_period_mismatch_before_writes():

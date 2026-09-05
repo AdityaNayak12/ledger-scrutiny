@@ -120,7 +120,12 @@ pipeline:
     "ledgers": [
         {
             "name": str,
+            "external_id": str | None,
             "group_name": str,
+            "group_hierarchy": list[str],
+            "group_hierarchy_records": [
+                {"name": str, "external_id": str | None, "parent_name": str | None},
+            ],
             "opening_balance": Decimal,
             "closing_balance": Decimal,
         },
@@ -128,14 +133,18 @@ pipeline:
     "vouchers": [
         {
             "date": date,
+            "document_date": date | None,
             "voucher_type": str,
-            "source_voucher_id": str | None,
+            "voucher_number": str | None,
+            "source_voucher_id": str,
             "narration": str | None,
             "entries": [
                 {
                     "ledger_name": str,
                     "type": "debit" | "credit",
                     "amount": Decimal,
+                    "source_row_number": int,
+                    "source_line_id": str | None,
                 },
             ],
         },

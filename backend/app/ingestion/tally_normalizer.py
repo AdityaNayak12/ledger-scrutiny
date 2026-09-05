@@ -484,25 +484,204 @@ def _canonical_report(
     return report
 
 
-def _has_canonical_records(session: Session, batch_id: int) -> bool:
-    return bool(
-        session.scalar(
-            select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
-        )
-        or session.scalar(
-            select(func.count()).select_from(BalanceCheckpoint).where(BalanceCheckpoint.import_batch_id == batch_id)
-        )
-    )
+def _transaction_specs(
+    vouchers: list[dict[str, Any]],
+    period_start: date,
+    period_end: date,
+) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    for voucher in vouchers:
+        if not period_start <= voucher["date"] <= period_end:
+            continue
+        debits = [entry for entry in voucher["entries"] if entry["type"] == "debit"]
+        credits = [entry for entry in voucher["entries"] if entry["type"] == "credit"]
+        for pair in decompose_entries(debits, credits):
+            specs.append({
+                "date": voucher["date"],
+                "debit_ledger": pair["debit_ledger"],
+                "credit_ledger": pair["credit_ledger"],
+                "amount": pair["amount"],
+                "narration": voucher.get("narration"),
+                "voucher_type": voucher["voucher_type"],
+                "source_voucher_id": _legacy_source_voucher_id(voucher),
+            })
+    return specs
 
 
-def _is_legacy_compatibility_batch(session: Session, batch: ImportBatch | None) -> bool:
-    return bool(
-        batch is not None
-        and batch.status == "ACTIVE"
-        and batch.source == "tally_xml"
-        and (batch.validation_report or {}).get("parser") == "tally_xml"
-        and not _has_canonical_records(session, batch.id)
-    )
+def _canonical_replay_complete(
+    session: Session,
+    *,
+    batch_id: int,
+    entity_id: int,
+    period_start: date,
+    period_end: date,
+    ledgers: list[dict[str, Any]],
+    vouchers: list[dict[str, Any]],
+    canonical_entries: tuple[JournalEntryRecord, ...],
+    account_plans: dict[str, LedgerAccount | None],
+) -> bool:
+    """Verify every canonical and compatibility child before a replay no-op."""
+    if any(account_plans.get(ledger["name"]) is None for ledger in ledgers):
+        return False
+    accounts = {name: account for name, account in account_plans.items() if account is not None}
+
+    existing_entries = session.execute(
+        select(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
+    ).scalars().all()
+    expected_entries = {entry.source_document_id: entry for entry in canonical_entries}
+    actual_entries = {entry.source_document_id: entry for entry in existing_entries}
+    if len(actual_entries) != len(existing_entries) or actual_entries.keys() != expected_entries.keys():
+        return False
+    for source_id, expected in expected_entries.items():
+        actual = actual_entries[source_id]
+        if (
+            actual.entity_id != entity_id
+            or actual.posting_date != expected.posting_date
+            or actual.document_date != expected.document_date
+            or actual.document_type != expected.document_type
+            or actual.narration != expected.narration
+        ):
+            return False
+
+    expected_lines = {
+        (entry.source_document_id, line.source_row_number): (entry, line)
+        for entry in canonical_entries
+        for line in entry.lines
+    }
+    actual_lines = session.execute(
+        select(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
+    ).scalars().all()
+    actual_line_map = {
+        (line.journal_entry.source_document_id, line.source_row_number): line
+        for line in actual_lines
+    }
+    if len(actual_line_map) != len(actual_lines) or actual_line_map.keys() != expected_lines.keys():
+        return False
+    for key, (_, expected) in expected_lines.items():
+        actual = actual_line_map[key]
+        expected_account = accounts[expected.source_metadata["tally_ledger_name"]]
+        if (
+            actual.ledger_account_id != expected_account.id
+            or actual.amount != expected.amount
+            or actual.side != expected.side.value
+            or actual.dimensions != dict(expected.dimensions)
+            or actual.source_metadata != dict(expected.source_metadata)
+        ):
+            return False
+
+    expected_checkpoints: dict[tuple[int, date], tuple[Decimal, str]] = {}
+    for ledger in ledgers:
+        account_id = accounts[ledger["name"]].id
+        closing = ledger["closing_balance"]
+        if period_start == period_end:
+            values = ((period_start, ledger["opening_balance"], "opening_closing"),)
+        else:
+            values = (
+                (period_start, ledger["opening_balance"], "opening"),
+                (period_end, closing, "closing"),
+            )
+        expected_checkpoints.update({(account_id, when): (balance, kind) for when, balance, kind in values})
+    actual_checkpoints = session.execute(
+        select(BalanceCheckpoint).where(BalanceCheckpoint.import_batch_id == batch_id)
+    ).scalars().all()
+    actual_checkpoint_map = {
+        (checkpoint.ledger_account_id, checkpoint.balance_date): checkpoint
+        for checkpoint in actual_checkpoints
+    }
+    if len(actual_checkpoint_map) != len(actual_checkpoints) or actual_checkpoint_map.keys() != expected_checkpoints.keys():
+        return False
+    for key, (expected_balance, expected_type) in expected_checkpoints.items():
+        actual = actual_checkpoint_map[key]
+        if (
+            actual.entity_id != entity_id
+            or actual.balance != expected_balance
+            or (actual.source_metadata or {}).get("balance_type") != expected_type
+        ):
+            return False
+
+    movements = {
+        ledger["name"]: {
+            "debits": sum(
+                (
+                    entry["amount"]
+                    for voucher in vouchers
+                    if period_start <= voucher["date"] <= period_end
+                    for entry in voucher["entries"]
+                    if entry["ledger_name"] == ledger["name"] and entry["type"] == "debit"
+                ),
+                Decimal("0"),
+            ),
+            "credits": sum(
+                (
+                    entry["amount"]
+                    for voucher in vouchers
+                    if period_start <= voucher["date"] <= period_end
+                    for entry in voucher["entries"]
+                    if entry["ledger_name"] == ledger["name"] and entry["type"] == "credit"
+                ),
+                Decimal("0"),
+            ),
+        }
+        for ledger in ledgers
+    }
+    expected_snapshots = {
+        accounts[ledger["name"]].id: (
+            ledger["opening_balance"],
+            movements[ledger["name"]]["debits"],
+            movements[ledger["name"]]["credits"],
+            ledger["closing_balance"],
+        )
+        for ledger in ledgers
+    }
+    actual_snapshots = session.execute(
+        select(TrialBalanceSnapshot).where(TrialBalanceSnapshot.import_batch_id == batch_id)
+    ).scalars().all()
+    actual_snapshot_map = {snapshot.ledger_account_id: snapshot for snapshot in actual_snapshots}
+    if len(actual_snapshot_map) != len(actual_snapshots) or actual_snapshot_map.keys() != expected_snapshots.keys():
+        return False
+    for account_id, expected in expected_snapshots.items():
+        actual = actual_snapshot_map[account_id]
+        if (
+            actual.entity_id != entity_id
+            or actual.period_start != period_start
+            or actual.period_end != period_end
+            or (
+                actual.opening_balance,
+                actual.total_debits,
+                actual.total_credits,
+                actual.closing_balance,
+            ) != expected
+        ):
+            return False
+
+    expected_transactions = [
+        (
+            spec["date"],
+            accounts[spec["debit_ledger"]].id,
+            accounts[spec["credit_ledger"]].id,
+            spec["amount"],
+            spec["narration"],
+            spec["voucher_type"],
+            spec["source_voucher_id"],
+        )
+        for spec in _transaction_specs(vouchers, period_start, period_end)
+    ]
+    actual_transactions = session.execute(
+        select(Transaction).where(Transaction.import_batch_id == batch_id)
+    ).scalars().all()
+    actual_transaction_values = [
+        (
+            transaction.date,
+            transaction.debit_account_id,
+            transaction.credit_account_id,
+            transaction.amount,
+            transaction.narration,
+            transaction.voucher_type,
+            transaction.source_voucher_id,
+        )
+        for transaction in actual_transactions
+    ]
+    return sorted(actual_transaction_values, key=repr) == sorted(expected_transactions, key=repr)
 
 
 def normalize_tally_data(
@@ -525,9 +704,9 @@ def normalize_tally_data(
         target_period_end=target_period_end,
         import_batch_id=import_batch_id,
     )
-    # ponytail: the legacy XML upload auto-activates before normalization; keep its old rows until Task 8 stages it.
-    allow_legacy_missing_closing = _is_legacy_compatibility_batch(session, batch)
     canonical = import_batch_id is not None
+    # Only direct, no-batch fixture callers retain the historical derived-close behavior.
+    allow_legacy_missing_closing = not canonical
     ledgers, vouchers, canonical_entries = _prepare_records(
         parsed_data,
         period_start=period_start,
@@ -535,11 +714,12 @@ def normalize_tally_data(
         canonical=canonical,
         allow_legacy_missing_closing=allow_legacy_missing_closing,
     )
-    account_plans = None
+    if canonical and not vouchers:
+        raise TallyConnectorError("Tally canonical imports require at least one voucher.")
     entity = _resolve_entity(
         parsed_data,
         session,
-        entity_id=entity_id,
+        entity_id=entity_id if entity_id is not None else (batch.entity_id if batch is not None else None),
         organization_id=organization_id,
         materiality_threshold=materiality_threshold,
     )
@@ -547,6 +727,38 @@ def normalize_tally_data(
         raise ValueError(f"Import batch {batch.id} does not belong to entity {entity.id}.")
 
     account_plans = _account_map(session, entity, ledgers)
+    if canonical:
+        existing_entries = session.scalar(
+            select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == import_batch_id)
+        )
+        existing_lines = session.scalar(
+            select(func.count()).select_from(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == import_batch_id)
+        )
+        existing_checkpoints = session.scalar(
+            select(func.count()).select_from(BalanceCheckpoint).where(BalanceCheckpoint.import_batch_id == import_batch_id)
+        )
+        existing_snapshots = session.scalar(
+            select(func.count()).select_from(TrialBalanceSnapshot).where(
+                TrialBalanceSnapshot.import_batch_id == import_batch_id
+            )
+        )
+        existing_transactions = session.scalar(
+            select(func.count()).select_from(Transaction).where(Transaction.import_batch_id == import_batch_id)
+        )
+        if existing_entries or existing_lines or existing_checkpoints or existing_snapshots or existing_transactions:
+            if _canonical_replay_complete(
+                session,
+                batch_id=import_batch_id,
+                entity_id=entity.id,
+                period_start=period_start,
+                period_end=period_end,
+                ledgers=ledgers,
+                vouchers=vouchers,
+                canonical_entries=canonical_entries,
+                account_plans=account_plans,
+            ):
+                return entity
+            raise TallyConnectorError(f"Import batch {import_batch_id} already contains partial canonical records.")
     period = session.execute(select(FinancialPeriod).where(
         FinancialPeriod.entity_id == entity.id,
         FinancialPeriod.period_start == period_start,
@@ -559,21 +771,6 @@ def normalize_tally_data(
             period_end=period_end,
             source="tally_xml",
         ))
-    if canonical:
-        existing_entries = session.scalar(
-            select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == import_batch_id)
-        )
-        existing_lines = session.scalar(
-            select(func.count()).select_from(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == import_batch_id)
-        )
-        existing_checkpoints = session.scalar(
-            select(func.count()).select_from(BalanceCheckpoint).where(BalanceCheckpoint.import_batch_id == import_batch_id)
-        )
-        expected_lines = sum(len(entry.lines) for entry in canonical_entries)
-        if existing_entries or existing_lines or existing_checkpoints:
-            if existing_entries == len(canonical_entries) and existing_lines == expected_lines:
-                return entity
-            raise TallyConnectorError(f"Import batch {import_batch_id} already contains partial canonical records.")
     with session.begin_nested():
         accounts = _upsert_accounts(session, entity, ledgers, account_plans or {})
         if canonical:
@@ -657,23 +854,18 @@ def normalize_tally_data(
                     total_credits=credits,
                     closing_balance=closing,
                 ))
-            for voucher in vouchers:
-                if not period_start <= voucher["date"] <= period_end:
-                    continue
-                debits = [entry for entry in voucher["entries"] if entry["type"] == "debit"]
-                credits = [entry for entry in voucher["entries"] if entry["type"] == "credit"]
-                for pair in decompose_entries(debits, credits):
-                    session.add(Transaction(
-                        import_batch_id=batch.id,
-                        entity_id=entity.id,
-                        date=voucher["date"],
-                        debit_account_id=accounts[pair["debit_ledger"]].id,
-                        credit_account_id=accounts[pair["credit_ledger"]].id,
-                        amount=pair["amount"],
-                        narration=voucher.get("narration"),
-                        voucher_type=voucher["voucher_type"],
-                        source_voucher_id=_legacy_source_voucher_id(voucher),
-                    ))
+            for spec in _transaction_specs(vouchers, period_start, period_end):
+                session.add(Transaction(
+                    import_batch_id=batch.id,
+                    entity_id=entity.id,
+                    date=spec["date"],
+                    debit_account_id=accounts[spec["debit_ledger"]].id,
+                    credit_account_id=accounts[spec["credit_ledger"]].id,
+                    amount=spec["amount"],
+                    narration=spec["narration"],
+                    voucher_type=spec["voucher_type"],
+                    source_voucher_id=spec["source_voucher_id"],
+                ))
             batch.validation_report = {**(batch.validation_report or {}), **report}
             batch.source_metadata = {
                 **(batch.source_metadata or {}),
@@ -719,22 +911,17 @@ def normalize_tally_data(
                     total_credits=credits,
                     closing_balance=closing,
                 ))
-            for voucher in vouchers:
-                if not period_start <= voucher["date"] <= period_end:
-                    continue
-                debits = [entry for entry in voucher["entries"] if entry["type"] == "debit"]
-                credits = [entry for entry in voucher["entries"] if entry["type"] == "credit"]
-                for pair in decompose_entries(debits, credits):
-                    session.add(Transaction(
-                        import_batch_id=None,
-                        entity_id=entity.id,
-                        date=voucher["date"],
-                        debit_account_id=accounts[pair["debit_ledger"]].id,
-                        credit_account_id=accounts[pair["credit_ledger"]].id,
-                        amount=pair["amount"],
-                        narration=voucher.get("narration"),
-                        voucher_type=voucher["voucher_type"],
-                        source_voucher_id=_legacy_source_voucher_id(voucher),
-                    ))
+            for spec in _transaction_specs(vouchers, period_start, period_end):
+                session.add(Transaction(
+                    import_batch_id=None,
+                    entity_id=entity.id,
+                    date=spec["date"],
+                    debit_account_id=accounts[spec["debit_ledger"]].id,
+                    credit_account_id=accounts[spec["credit_ledger"]].id,
+                    amount=spec["amount"],
+                    narration=spec["narration"],
+                    voucher_type=spec["voucher_type"],
+                    source_voucher_id=spec["source_voucher_id"],
+                ))
         session.flush()
     return entity
