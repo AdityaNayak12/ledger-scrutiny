@@ -28,6 +28,15 @@ Authorization: Bearer <token>
 request. The adapter sends a read-only XML request and retains the raw response
 as source provenance. It must not log request bodies, credentials, or raw XML.
 
+## Endpoint safety
+
+The connector accepts global IP literals. Hostnames must be listed exactly in
+the comma-separated `TALLY_ALLOWED_HOSTS` deployment setting; validation does
+not perform DNS lookups. Loopback endpoints, including the route default
+`http://localhost:9000`, require the explicit local-development setting
+`TALLY_ALLOW_LOCAL_ENDPOINTS=1`. Private, link-local, reserved, and other
+non-global IP literals remain blocked, and HTTP redirects are not followed.
+
 ## Normalized response contract
 
 The adapter returns `(parsed_data, raw_xml)`. `parsed_data` uses this shape:

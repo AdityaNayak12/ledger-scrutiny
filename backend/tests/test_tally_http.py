@@ -18,6 +18,8 @@ RESPONSE = b"""<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA>
 </VOUCHER>
 </DATA></BODY></ENVELOPE>"""
 
+PUBLIC_ENDPOINT = "http://8.8.8.8:9000"
+
 
 def test_tally_http_connector_maps_ledger_balances(monkeypatch):
     def fake_post(*args, **kwargs):
@@ -25,7 +27,7 @@ def test_tally_http_connector_maps_ledger_balances(monkeypatch):
 
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
     parsed, raw = fetch_trial_balance(
-        endpoint="http://localhost:9000",
+        endpoint=PUBLIC_ENDPOINT,
         company_name="Example Company",
         period_start=date(2025, 4, 1),
         period_end=date(2026, 3, 31),
@@ -52,7 +54,7 @@ def test_tally_http_connector_rejects_account_export_without_vouchers(monkeypatc
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
     with pytest.raises(TallyConnectorError, match="no vouchers"):
         fetch_trial_balance(
-            endpoint="http://localhost:9000",
+            endpoint=PUBLIC_ENDPOINT,
             company_name="Example Company",
             period_start=date(2025, 4, 1),
             period_end=date(2026, 3, 31),
@@ -66,7 +68,7 @@ def test_tally_http_connector_fails_loudly_on_empty_response(monkeypatch):
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
     with pytest.raises(TallyConnectorError, match="returned no ledgers"):
         fetch_trial_balance(
-            endpoint="http://localhost:9000",
+            endpoint=PUBLIC_ENDPOINT,
             company_name="Example Company",
             period_start=date(2025, 4, 1),
             period_end=date(2026, 3, 31),
@@ -102,7 +104,7 @@ def test_tally_connector_normalizes_connector_failures(monkeypatch, content, mat
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
     with pytest.raises(TallyConnectorError, match=match):
         fetch_trial_balance(
-            endpoint="http://localhost:9000",
+            endpoint=PUBLIC_ENDPOINT,
             company_name="Example Company",
             period_start=date(2025, 4, 1),
             period_end=date(2026, 3, 31),
@@ -118,7 +120,7 @@ def test_tally_connector_does_not_expose_endpoint_credentials_or_raw_xml(monkeyp
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
     with pytest.raises(TallyConnectorError) as exc_info:
         fetch_trial_balance(
-            endpoint="http://user:super-secret@example.test:9000",
+            endpoint="http://user:super-secret@8.8.8.8:9000",
             company_name="Example Company",
             period_start=date(2025, 4, 1),
             period_end=date(2026, 3, 31),
@@ -135,7 +137,7 @@ def test_tally_connector_maps_http_status_failure_without_response_body(monkeypa
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
     with pytest.raises(TallyConnectorError, match="status 503") as exc_info:
         fetch_trial_balance(
-            endpoint="http://localhost:9000",
+            endpoint=PUBLIC_ENDPOINT,
             company_name="Example Company",
             period_start=date(2025, 4, 1),
             period_end=date(2026, 3, 31),
@@ -168,7 +170,7 @@ def test_tally_connector_does_not_expose_status_detail_secrets(monkeypatch):
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
     with pytest.raises(TallyConnectorError) as exc_info:
         fetch_trial_balance(
-            endpoint="http://localhost:9000",
+            endpoint=PUBLIC_ENDPOINT,
             company_name="Example Company",
             period_start=date(2025, 4, 1),
             period_end=date(2026, 3, 31),
@@ -185,7 +187,7 @@ def test_tally_connector_does_not_expose_opaque_malformed_amount(monkeypatch):
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
     with pytest.raises(TallyConnectorError) as exc_info:
         fetch_trial_balance(
-            endpoint="http://localhost:9000",
+            endpoint=PUBLIC_ENDPOINT,
             company_name="Example Company",
             period_start=date(2025, 4, 1),
             period_end=date(2026, 3, 31),
@@ -204,7 +206,7 @@ def test_tally_connector_rejects_response_without_status(monkeypatch):
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
     with pytest.raises(TallyConnectorError, match="omitted status"):
         fetch_trial_balance(
-            endpoint="http://localhost:9000",
+            endpoint=PUBLIC_ENDPOINT,
             company_name="Example Company",
             period_start=date(2025, 4, 1),
             period_end=date(2026, 3, 31),
@@ -218,9 +220,123 @@ def test_tally_connector_maps_timeout_without_leaking_exception(monkeypatch):
     monkeypatch.setattr("app.ingestion.tally_http.httpx.post", timeout)
     with pytest.raises(TallyConnectorError, match="Could not reach TallyPrime") as exc_info:
         fetch_trial_balance(
-            endpoint="http://localhost:9000",
+            endpoint=PUBLIC_ENDPOINT,
             company_name="Example Company",
             period_start=date(2025, 4, 1),
             period_end=date(2026, 3, 31),
         )
     assert "secret timeout detail" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("exception_kind", ["status", "http", "type", "value"])
+def test_tally_connector_does_not_retain_http_exception_context(monkeypatch, exception_kind):
+    def fake_post(*args, **kwargs):
+        request = httpx.Request("POST", args[0])
+        if exception_kind == "status":
+            response = httpx.Response(503, request=request)
+            raise httpx.HTTPStatusError("authorization=secret", request=request, response=response)
+        if exception_kind == "http":
+            raise httpx.ConnectError("authorization=secret", request=request)
+        if exception_kind == "type":
+            raise TypeError("authorization=secret")
+        raise ValueError("authorization=secret")
+
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    with pytest.raises(TallyConnectorError) as exc_info:
+        fetch_trial_balance(
+            endpoint="http://user:secret@8.8.8.8:9000",
+            company_name="Example Company",
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+        )
+
+    error = exc_info.value
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert "secret" not in str(error)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://localhost:9000",
+        "http://127.0.0.1:9000",
+        "http://10.0.0.1:9000",
+        "http://169.254.169.254/latest/meta-data",
+        "http://0.0.0.0:9000",
+        "http://192.0.2.1:9000",
+        "http://[::1]:9000",
+        "http://[fe80::1]:9000",
+        "http://[fd00::1]:9000",
+        "http://metadata.google.internal:80",
+    ],
+)
+def test_tally_connector_rejects_non_global_endpoint_without_posting(monkeypatch, endpoint):
+    monkeypatch.delenv("TALLY_ALLOW_LOCAL_ENDPOINTS", raising=False)
+    monkeypatch.delenv("TALLY_ALLOWED_HOSTS", raising=False)
+
+    def unexpected_post(*args, **kwargs):
+        raise AssertionError("non-global endpoints must be rejected before HTTP")
+
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", unexpected_post)
+    with pytest.raises(TallyConnectorError, match="endpoint"):
+        fetch_trial_balance(
+            endpoint=endpoint,
+            company_name="Example Company",
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+        )
+
+
+def test_tally_connector_allows_localhost_only_with_explicit_opt_in(monkeypatch):
+    monkeypatch.setenv("TALLY_ALLOW_LOCAL_ENDPOINTS", "1")
+
+    def fake_post(*args, **kwargs):
+        return httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0]))
+
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    parsed, raw = fetch_trial_balance(
+        endpoint="http://localhost:9000",
+        company_name="Example Company",
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+    )
+
+    assert parsed["entity"]["name"] == "Example Company"
+    assert raw == RESPONSE
+
+
+def test_tally_connector_allows_exactly_configured_hostname(monkeypatch):
+    monkeypatch.setenv("TALLY_ALLOWED_HOSTS", "tally.example.test")
+
+    def fake_post(*args, **kwargs):
+        return httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0]))
+
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    parsed, raw = fetch_trial_balance(
+        endpoint="http://tally.example.test:9000",
+        company_name="Example Company",
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+    )
+
+    assert parsed["entity"]["name"] == "Example Company"
+    assert raw == RESPONSE
+
+
+def test_tally_connector_disables_redirects(monkeypatch):
+    captured = {}
+
+    def fake_post(*args, **kwargs):
+        captured.update(kwargs)
+        return httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0]))
+
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    fetch_trial_balance(
+        endpoint=PUBLIC_ENDPOINT,
+        company_name="Example Company",
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+    )
+
+    assert captured["follow_redirects"] is False

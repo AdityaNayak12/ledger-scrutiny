@@ -1,6 +1,8 @@
 """Supported TallyPrime HTTP/XML connector."""
 
 from datetime import date
+from ipaddress import ip_address
+import os
 from urllib.parse import urlsplit, urlunsplit
 from xml.sax.saxutils import escape
 
@@ -43,6 +45,29 @@ def _validate_endpoint(endpoint: str) -> None:
         parsed.port
     except ValueError:
         raise TallyConnectorError("Tally endpoint must include a valid port.") from None
+
+    hostname = parsed.hostname.rstrip(".").lower()
+    local_opt_in = os.getenv("TALLY_ALLOW_LOCAL_ENDPOINTS") == "1"
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        if local_opt_in:
+            return
+        raise TallyConnectorError("Tally endpoint must not target a non-global address.")
+
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        allowed_hosts = {
+            value.strip().lower().rstrip(".")
+            for value in os.getenv("TALLY_ALLOWED_HOSTS", "").split(",")
+            if value.strip()
+        }
+        if hostname not in allowed_hosts:
+            raise TallyConnectorError("Tally endpoint host must be explicitly allowed.")
+        return
+
+    if address.is_global or (local_opt_in and address.is_loopback):
+        return
+    raise TallyConnectorError("Tally endpoint must not target a non-global address.")
 
 
 def build_ledger_request(company_name: str, period_start: date, period_end: date) -> bytes:
@@ -90,21 +115,26 @@ def fetch_trial_balance(
     _validate_endpoint(endpoint)
     request_body = build_ledger_request(company_name, period_start, period_end)
     safe_endpoint = _safe_endpoint(endpoint)
+    connector_error = None
     try:
         response = httpx.post(
             endpoint,
             content=request_body,
             headers={"Content-Type": "text/xml; charset=utf-8"},
             timeout=timeout_seconds,
+            follow_redirects=False,
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code if exc.response is not None else "unknown"
-        raise TallyConnectorError(
+        connector_error = (
             f"TallyPrime HTTP request to {safe_endpoint} failed with status {status_code}."
-        ) from exc
-    except (httpx.HTTPError, TypeError, ValueError) as exc:
-        raise TallyConnectorError(f"Could not reach TallyPrime at {safe_endpoint}.") from exc
+        )
+    except (httpx.HTTPError, TypeError, ValueError):
+        connector_error = f"Could not reach TallyPrime at {safe_endpoint}."
+
+    if connector_error is not None:
+        raise TallyConnectorError(connector_error) from None
 
     raw_xml = response.content
     parsed_data = parse_tally_xml(
