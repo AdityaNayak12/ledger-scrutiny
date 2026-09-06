@@ -1,22 +1,137 @@
 import os
+import io
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from decimal import Decimal
 from datetime import date
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
+import openpyxl
 
 from app.main import app
-from app.db.models import ImportBatch, Transaction, TrialBalanceSnapshot
+from app.db.models import (
+    BalanceCheckpoint,
+    ImportBatch,
+    JournalEntry,
+    JournalLine,
+    ScrutinyRun,
+    Transaction,
+    TrialBalanceSnapshot,
+)
+from app.ingestion.tally_parser import TallyConnectorError, parse_tally_xml
 from conftest import TestingSessionLocal
 
 client = TestClient(app)
 
 
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1].upper()
+
+
+def _canonical_tally_xml(contents: bytes, *, add_voucher_if_missing: bool = False) -> bytes:
+    """Make legacy test exports satisfy the strict canonical Tally contract."""
+    root = ET.fromstring(contents)
+    ledgers = [node for node in root.iter() if _local_name(node.tag) == "LEDGER"]
+    ledger_names = {node.attrib.get("NAME") or next(
+        (child.text.strip() for child in node if _local_name(child.tag) == "NAME" and child.text), ""
+    ) for node in ledgers}
+    movements = {name: Decimal("0") for name in ledger_names}
+    vouchers = [node for node in root.iter() if _local_name(node.tag) == "VOUCHER"]
+    for voucher in vouchers:
+        for entry in voucher.iter():
+            if _local_name(entry.tag) not in {"ALLLEDGERENTRIES.LIST", "LEDGERENTRIES.LIST"}:
+                continue
+            ledger_name = next(
+                (child.text.strip() for child in entry if _local_name(child.tag) in {"LEDGERNAME", "LEDGER"} and child.text),
+                "",
+            )
+            amount_text = next(
+                (child.text.strip() for child in entry if _local_name(child.tag) == "AMOUNT" and child.text),
+                "0",
+            )
+            amount = abs(Decimal(amount_text.replace(",", "")))
+            deemed = next(
+                (child.text.strip().lower() for child in entry if _local_name(child.tag) == "ISDEEMEDPOSITIVE" and child.text),
+                "yes" if Decimal(amount_text) >= 0 else "no",
+            )
+            movements[ledger_name] = movements.get(ledger_name, Decimal("0")) + (amount if deemed in {"yes", "y", "true", "1"} else -amount)
+
+    opening_by_name: dict[str, Decimal] = {}
+    closing_by_name: dict[str, Decimal] = {}
+    for ledger in ledgers:
+        name = ledger.attrib.get("NAME") or next(
+            (child.text.strip() for child in ledger if _local_name(child.tag) == "NAME" and child.text), ""
+        )
+        opening = Decimal(next(
+            (child.text.strip() for child in ledger if _local_name(child.tag) == "OPENINGBALANCE" and child.text), "0"
+        ).replace(",", ""))
+        opening_by_name[name] = opening
+        closing_node = next((child for child in ledger if _local_name(child.tag) == "CLOSINGBALANCE"), None)
+        if closing_node is None:
+            closing = opening + movements.get(name, Decimal("0"))
+            closing_node = ET.SubElement(ledger, "CLOSINGBALANCE")
+            closing_node.text = format(closing, "f")
+        else:
+            closing = Decimal((closing_node.text or "0").replace(",", ""))
+        closing_by_name[name] = closing
+
+    if add_voucher_if_missing and not vouchers:
+        request_data = next((node for node in root.iter() if _local_name(node.tag) == "REQUESTDATA"), root)
+        message = ET.SubElement(request_data, "TALLYMESSAGE")
+        voucher = ET.SubElement(message, "VOUCHER", {"VCHTYPE": "Journal"})
+        ET.SubElement(voucher, "DATE").text = next(
+            (child.text.strip() for node in root.iter() if _local_name(node.tag) in {"COMPANY", "STATICVARIABLES"}
+             for child in node if _local_name(child.tag) in {"BOOKSFROM", "SVFROMDATE"} and child.text),
+            "20250401",
+        )
+        ET.SubElement(voucher, "VOUCHERNUMBER").text = "compatibility-balancing-entry"
+        ET.SubElement(voucher, "NARRATION").text = "Compatibility fixture balancing entry"
+        deltas = {name: closing_by_name[name] - opening_by_name[name] for name in ledger_names}
+        imbalance = sum(deltas.values(), Decimal("0"))
+        if imbalance:
+            first_name = next(iter(ledger_names), None)
+            if first_name is not None:
+                deltas[first_name] -= imbalance
+        has_entries = False
+        for name, delta in deltas.items():
+            if not delta:
+                continue
+            has_entries = True
+            entry = ET.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
+            ET.SubElement(entry, "LEDGERNAME").text = name
+            ET.SubElement(entry, "ISDEEMEDPOSITIVE").text = "Yes" if delta > 0 else "No"
+            ET.SubElement(entry, "AMOUNT").text = format(abs(delta), "f")
+        if not has_entries:
+            name = next(iter(ledger_names), "compatibility-zero")
+            entry = ET.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
+            ET.SubElement(entry, "LEDGERNAME").text = name
+            ET.SubElement(entry, "ISDEEMEDPOSITIVE").text = "Yes"
+            ET.SubElement(entry, "AMOUNT").text = "0"
+
+    return ET.tostring(root, encoding="utf-8")
+
+
+def _strict_fixture_bytes(filename: str, *, add_voucher_if_missing: bool = False) -> bytes:
+    path = Path(__file__).with_name(filename)
+    return _canonical_tally_xml(path.read_bytes(), add_voucher_if_missing=add_voucher_if_missing)
+
+
+def _gl_bytes() -> bytes:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(["Document Number", "G/L Account", "Posting Date", "Amount in local currency"])
+    worksheet.append(["GL-1", "1000", date(2025, 4, 1), 100])
+    worksheet.append(["GL-1", "2000", date(2025, 4, 1), -100])
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
 def get_auth_headers():
     res = client.post("/auth/register", json={
         "organization_name": "Integration Test Firm",
-        "email": "test@integration.com",
+        "email": f"test.{os.urandom(4).hex()}@integration.com",
         "password": "Password123"
     })
     token = res.json()["access_token"]
@@ -71,13 +186,13 @@ def test_manufacturing_pitch_files_produce_five_expected_findings(monkeypatch):
         ("meridian_fy2024_25.xml", "2024-04-01", "2025-03-31"),
         ("meridian_fy2025_26.xml", "2025-04-01", "2026-03-31"),
     ):
-        with (fixture_dir / filename).open("rb") as file_handle:
-            response = client.post(
-                f"/entities/{entity['id']}/upload",
-                params={"clear_only_period": "true", "target_period_start": start, "target_period_end": end},
-                files={"file": (filename, file_handle, "text/xml")},
-                headers=headers,
-            )
+        contents = _canonical_tally_xml((fixture_dir / filename).read_bytes(), add_voucher_if_missing=True)
+        response = client.post(
+            f"/entities/{entity['id']}/upload",
+            params={"clear_only_period": "true", "target_period_start": start, "target_period_end": end},
+            files={"file": (filename, contents, "text/xml")},
+            headers=headers,
+        )
         assert response.status_code == 200, response.text
 
     run = client.post(
@@ -128,18 +243,23 @@ def test_api_entities_lifecycle_flow():
     assert list_entities_res.json()[0]["id"] == entity_id
 
     # 3. Upload Clean Sample Tally XML
-    xml_path = os.path.join(os.path.dirname(__file__), "sample_tally_export.xml")
-    with open(xml_path, "rb") as f:
-        upload_res = client.post(
-            f"/entities/{entity_id}/upload",
-            files={"file": ("sample_tally_export.xml", f, "text/xml")},
-            headers=headers
-        )
+    contents = _strict_fixture_bytes("sample_tally_export.xml")
+    upload_res = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("sample_tally_export.xml", contents, "text/xml")},
+        headers=headers
+    )
 
     assert upload_res.status_code == 200
     res_data = upload_res.json()
     assert res_data["message"] == "Ingestion successful"
     assert res_data["entity_id"] == entity_id
+    assert res_data["status"] == "ACTIVE"
+    assert res_data["readiness"] == "READY"
+    assert res_data["validation_report"]["document_count"] == 2
+    assert res_data["active_batch_ids"] == [res_data["import_batch_id"]]
+    assert res_data["source_batch_ids"] == [res_data["import_batch_id"]]
+    assert res_data["dataset_fingerprint"]
 
     # 4. Trigger Scrutiny Run
     run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
@@ -171,26 +291,29 @@ def test_duplicate_tally_upload_is_idempotent_for_child_records():
     )
     assert entity.status_code == 201
     entity_id = entity.json()["id"]
-    xml_path = os.path.join(os.path.dirname(__file__), "sample_tally_export.xml")
+    contents = _strict_fixture_bytes("sample_tally_export.xml")
 
-    with open(xml_path, "rb") as file_handle:
-        first = client.post(
-            f"/entities/{entity_id}/upload",
-            files={"file": ("sample_tally_export.xml", file_handle, "text/xml")},
-            headers=headers,
-        )
-    with open(xml_path, "rb") as file_handle:
-        duplicate = client.post(
-            f"/entities/{entity_id}/upload",
-            files={"file": ("sample_tally_export.xml", file_handle, "text/xml")},
-            headers=headers,
-        )
+    first = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("sample_tally_export.xml", contents, "text/xml")},
+        headers=headers,
+    )
+    duplicate = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("sample_tally_export.xml", contents, "text/xml")},
+        headers=headers,
+    )
 
     assert first.status_code == 200, first.text
     assert duplicate.status_code == 200, duplicate.text
     batch_id = first.json()["import_batch_id"]
     assert duplicate.json()["import_batch_id"] == batch_id
+    assert duplicate.json()["dataset_fingerprint"] == first.json()["dataset_fingerprint"]
+    assert duplicate.json()["source_batch_ids"] == first.json()["source_batch_ids"]
     with TestingSessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == batch_id)) == 2
+        assert session.scalar(select(func.count()).select_from(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == batch_id)) == 4
+        assert session.scalar(select(func.count()).select_from(BalanceCheckpoint).where(BalanceCheckpoint.import_batch_id == batch_id)) == 10
         assert session.scalar(
             select(func.count()).select_from(Transaction).where(Transaction.import_batch_id == batch_id)
         ) == 2
@@ -218,14 +341,13 @@ def test_duplicate_tally_upload_of_failed_batch_is_rejected_without_new_rows():
         headers=headers,
     )
     entity_id = entity.json()["id"]
-    xml_path = os.path.join(os.path.dirname(__file__), "sample_tally_export.xml")
+    contents = _strict_fixture_bytes("sample_tally_export.xml")
 
-    with open(xml_path, "rb") as file_handle:
-        first = client.post(
-            f"/entities/{entity_id}/upload",
-            files={"file": ("sample_tally_export.xml", file_handle, "text/xml")},
-            headers=headers,
-        )
+    first = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("sample_tally_export.xml", contents, "text/xml")},
+        headers=headers,
+    )
     assert first.status_code == 200, first.text
     batch_id = first.json()["import_batch_id"]
     with TestingSessionLocal() as session:
@@ -233,12 +355,11 @@ def test_duplicate_tally_upload_of_failed_batch_is_rejected_without_new_rows():
         batch.status = "FAILED"
         session.commit()
 
-    with open(xml_path, "rb") as file_handle:
-        duplicate = client.post(
-            f"/entities/{entity_id}/upload",
-            files={"file": ("sample_tally_export.xml", file_handle, "text/xml")},
-            headers=headers,
-        )
+    duplicate = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("sample_tally_export.xml", contents, "text/xml")},
+        headers=headers,
+    )
 
     assert duplicate.status_code == 400
     assert "no active import" in duplicate.json()["detail"]
@@ -307,7 +428,7 @@ def test_api_scrutiny_with_violations():
     # 3. Upload the violating XML
     upload_res = client.post(
         f"/entities/{entity_id}/upload",
-        files={"file": ("violating_export.xml", violating_xml.encode("utf-8"), "text/xml")},
+        files={"file": ("violating_export.xml", _canonical_tally_xml(violating_xml.encode("utf-8")), "text/xml")},
         headers=headers
     )
     assert upload_res.status_code == 200
@@ -411,7 +532,7 @@ def test_api_exception_review_workflow():
     """
     upload_res = client.post(
         f"/entities/{entity_id}/upload",
-        files={"file": ("violating_export.xml", violating_xml.encode("utf-8"), "text/xml")},
+        files={"file": ("violating_export.xml", _canonical_tally_xml(violating_xml.encode("utf-8")), "text/xml")},
         headers=headers
     )
     assert upload_res.status_code == 200
@@ -587,3 +708,210 @@ def test_api_preserve_notes_multiple_exceptions_for_same_account(monkeypatch):
     assert exc_1_after["auditor_notes"] == "Notes for first exception"
     assert exc_2_after["status"] == "PENDING"
     assert exc_2_after["auditor_notes"] is None
+
+
+def test_tally_connector_response_is_complete_and_endpoint_metadata_is_safe(monkeypatch):
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities",
+        json={"name": "Connector Contract Entity", "materiality_threshold": "0.00"},
+        headers=headers,
+    ).json()
+    contents = _strict_fixture_bytes("sample_tally_export.xml")
+    parsed = parse_tally_xml(contents)
+    monkeypatch.setattr(
+        "app.routers.scrutiny.fetch_trial_balance",
+        lambda **_kwargs: (parsed, contents),
+    )
+
+    response = client.post(
+        f"/entities/{entity['id']}/import-from-tally",
+        json={
+            "endpoint": "http://user:secret@example.test:9001/private/export?token=hidden#fragment",
+            "company_name": "Acme Audited Corp",
+            "period_start": "2025-04-01",
+            "period_end": "2026-03-31",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "ACTIVE"
+    assert body["readiness"] == "READY"
+    assert body["validation_report"]["document_count"] == 2
+    assert body["active_batch_ids"] == [body["import_batch_id"]]
+    assert body["source_batch_ids"] == [body["import_batch_id"]]
+    assert body["dataset_fingerprint"]
+    with TestingSessionLocal() as session:
+        batch = session.get(ImportBatch, body["import_batch_id"])
+        assert batch.source_metadata == {
+            "connector": "tally_http",
+            "endpoint": {"scheme": "http", "host": "example.test", "port": 9001},
+            "parser": "tally_xml",
+            "ledger_count": 5,
+            "voucher_count": 2,
+        }
+        assert "secret" not in str(batch.validation_report)
+        assert "private" not in str(batch.validation_report)
+
+
+def test_tally_connector_failure_does_not_echo_endpoint_or_credentials(monkeypatch):
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities",
+        json={"name": "Connector Failure Entity", "materiality_threshold": "0.00"},
+        headers=headers,
+    ).json()
+    monkeypatch.setattr(
+        "app.routers.scrutiny.fetch_trial_balance",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            TallyConnectorError(
+                "request failed http://user:secret@example.test:9001/private?token=hidden#fragment"
+            )
+        ),
+    )
+
+    response = client.post(
+        f"/entities/{entity['id']}/import-from-tally",
+        json={
+            "endpoint": "http://user:secret@example.test:9001/private?token=hidden#fragment",
+            "company_name": "Connector Failure Entity",
+            "period_start": "2025-04-01",
+            "period_end": "2026-03-31",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 400
+    assert "secret" not in response.text
+    assert "private" not in response.text
+    assert "hidden" not in response.text
+    assert "Tally" in response.json()["detail"]
+
+
+def test_tally_and_gl_canonical_reports_have_matching_journal_totals():
+    tally_xml = b"""<ENVELOPE><COMPANY><RENAME>Parity Tally</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
+      <TALLYMESSAGE><LEDGER NAME="1000"><PARENT>Fixed Assets</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>100</CLOSINGBALANCE></LEDGER></TALLYMESSAGE>
+      <TALLYMESSAGE><LEDGER NAME="2000"><PARENT>Capital Account</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>-100</CLOSINGBALANCE></LEDGER></TALLYMESSAGE>
+      <TALLYMESSAGE><VOUCHER VCHTYPE="Journal"><DATE>20250401</DATE><VOUCHERNUMBER>PARITY-1</VOUCHERNUMBER>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>1000</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>100</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>2000</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>100</AMOUNT></ALLLEDGERENTRIES.LIST>
+      </VOUCHER></TALLYMESSAGE></ENVELOPE>"""
+    tally_headers = get_auth_headers()
+    tally_entity = client.post(
+        "/entities", json={"name": "Parity Tally", "materiality_threshold": "0.00"}, headers=tally_headers
+    ).json()
+    tally_response = client.post(
+        f"/entities/{tally_entity['id']}/upload",
+        files={"file": ("parity.xml", tally_xml, "text/xml")},
+        headers=tally_headers,
+    )
+    assert tally_response.status_code == 200, tally_response.text
+
+    gl_headers = get_auth_headers()
+    gl_entity = client.post(
+        "/entities", json={"name": "Parity GL", "materiality_threshold": "0.00"}, headers=gl_headers
+    ).json()
+    gl_response = client.post(
+        f"/entities/{gl_entity['id']}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("parity.xlsx", io.BytesIO(_gl_bytes()), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=gl_headers,
+    )
+    assert gl_response.status_code == 200, gl_response.text
+
+    tally_report = tally_response.json()["validation_report"]
+    gl_report = gl_response.json()["validation_report"]
+    for key in ("accepted_rows", "document_count", "debit_total", "credit_total", "net_total"):
+        assert tally_report[key] == gl_report[key]
+    assert tally_response.json()["readiness"] == "READY"
+    assert gl_response.json()["readiness"] == "PARTIAL"
+
+
+def test_malformed_tally_replacement_retains_previous_active_dataset():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities", json={"name": "Tally Replacement Entity", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    valid = _strict_fixture_bytes("sample_tally_export.xml")
+    first = client.post(
+        f"/entities/{entity['id']}/upload",
+        params={"clear_only_period": "true", "target_period_start": "2025-04-01", "target_period_end": "2026-03-31"},
+        files={"file": ("valid.xml", valid, "text/xml")},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    first_body = first.json()
+    malformed = valid.replace(b"<LEDGERNAME>Sales Account</LEDGERNAME>", b"<LEDGERNAME>Unknown Account</LEDGERNAME>", 1)
+    replacement = client.post(
+        f"/entities/{entity['id']}/upload",
+        params={"clear_only_period": "true", "target_period_start": "2025-04-01", "target_period_end": "2026-03-31"},
+        files={"file": ("malformed.xml", malformed, "text/xml")},
+        headers=headers,
+    )
+    assert replacement.status_code == 400
+
+    with TestingSessionLocal() as session:
+        batches = session.scalars(
+            select(ImportBatch).where(ImportBatch.entity_id == entity["id"]).order_by(ImportBatch.id)
+        ).all()
+        assert [batch.status for batch in batches] == ["ACTIVE", "FAILED"]
+        assert batches[0].id == first_body["import_batch_id"]
+        assert batches[0].validation_report["dataset_fingerprint"] == first_body["dataset_fingerprint"]
+        assert batches[1].raw_source_bytes == malformed
+        assert batches[1].validation_report["readiness"] == "INVALID"
+        assert batches[1].validation_report["errors"]
+        assert session.scalar(select(func.count()).select_from(JournalLine)) == 4
+
+
+def test_scrutiny_reports_readiness_block_and_persists_ready_dataset_lineage():
+    headers = get_auth_headers()
+    partial_entity = client.post(
+        "/entities", json={"name": "Partial Scrutiny Entity", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    partial_upload = client.post(
+        f"/entities/{partial_entity['id']}/upload-xlsx/confirm",
+        data={"column_mapping": "{}", "target_period_start": "2025-04-01", "target_period_end": "2026-03-31"},
+        files={"file": ("partial.xlsx", io.BytesIO(_gl_bytes()), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert partial_upload.status_code == 200
+    assert partial_upload.json()["readiness"] == "PARTIAL"
+    blocked = client.post(
+        f"/entities/{partial_entity['id']}/scrutiny-run",
+        params={"period_start": "2025-04-01", "period_end": "2026-03-31"},
+        headers=headers,
+    )
+    assert blocked.status_code == 409
+    blocked_detail = blocked.json()["detail"]
+    assert blocked_detail["readiness"] == "PARTIAL"
+    assert blocked_detail["baseline_coverage"]["complete"] is False
+    assert "baseline" in blocked_detail["message"].lower()
+
+    ready_entity = client.post(
+        "/entities", json={"name": "Ready Scrutiny Entity", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    ready_contents = _strict_fixture_bytes("sample_tally_export.xml")
+    ready_upload = client.post(
+        f"/entities/{ready_entity['id']}/upload",
+        files={"file": ("ready.xml", ready_contents, "text/xml")},
+        headers=headers,
+    )
+    assert ready_upload.status_code == 200, ready_upload.text
+    ready_body = ready_upload.json()
+    run = client.post(
+        f"/entities/{ready_entity['id']}/scrutiny-run",
+        params={"period_start": "2025-04-01", "period_end": "2026-03-31"},
+        headers=headers,
+    )
+    assert run.status_code == 200, run.text
+    with TestingSessionLocal() as session:
+        scrutiny_run = session.get(ScrutinyRun, run.json()["scrutiny_run_id"])
+        assert scrutiny_run.dataset_fingerprint == ready_body["dataset_fingerprint"]
+        assert scrutiny_run.source_batch_ids == ready_body["source_batch_ids"]
+        assert scrutiny_run.import_batch_id == ready_body["import_batch_id"]

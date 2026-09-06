@@ -36,11 +36,34 @@ interface GSTProfile {
   simulated: boolean;
 }
 
+interface IngestionResult {
+  status?: string;
+  readiness?: string;
+  validation_report?: Record<string, unknown>;
+  baseline_coverage?: { present?: boolean; complete?: boolean; reason?: string; account_count?: number };
+  gaps?: Array<{ start?: string; end?: string }>;
+  warnings?: unknown[];
+  errors?: unknown[];
+  dataset_fingerprint?: string;
+  active_batch_ids?: number[];
+  source_batch_ids?: number[];
+  source_lineage?: { source_family?: string; selected_batch_ids?: number[] };
+}
+
 const ruleLabel = (ruleName: string) => RULE_LABELS[ruleName] || ruleName.replaceAll("_", " ");
 
 const responseError = async (response: Response, fallback: string) => {
   const body = await response.json().catch(() => null);
-  return new Error(body?.detail || `${fallback} (HTTP ${response.status})`);
+  const detail = body?.detail;
+  if (detail && typeof detail === "object") {
+    const parts = [detail.message, detail.baseline_requirement?.reason];
+    if (Array.isArray(detail.gaps) && detail.gaps.length) {
+      parts.push(`Coverage gaps: ${detail.gaps.map((gap: { start?: string; end?: string }) => `${gap.start || "?"}–${gap.end || "?"}`).join(", ")}`);
+    }
+    if (Array.isArray(detail.errors) && detail.errors.length) parts.push(`Validation errors: ${detail.errors.slice(0, 2).join("; ")}`);
+    return new Error(parts.filter(Boolean).join(" ") || `${fallback} (HTTP ${response.status})`);
+  }
+  return new Error(typeof detail === "string" ? detail : `${fallback} (HTTP ${response.status})`);
 };
 
 const requestErrorMessage = (error: unknown) => {
@@ -515,6 +538,7 @@ export default function App() {
     setSelectedPeriod(null);
     setExceptions([]);
     setSelectedException(null);
+    setIngestionResult(null);
   }, []);
 
   const handleAuthSuccess = (newToken: string, userInfo: { email: string; organization_name: string }) => {
@@ -583,6 +607,7 @@ export default function App() {
   const [uploadSource, setUploadSource] = useState<"tally_xml" | "xlsx" | null>(null);
   const [showXlsxModal, setShowXlsxModal] = useState<boolean>(false);
   const [xlsxInitialPeriod, setXlsxInitialPeriod] = useState<{start: string, end: string} | null>(null);
+  const [ingestionResult, setIngestionResult] = useState<IngestionResult | null>(null);
   const [newPeriodDates, setNewPeriodDates] = useState({
     start: "2026-04-01",
     end: "2027-03-31"
@@ -595,6 +620,7 @@ export default function App() {
     setSelectedPeriod(null);
     setExceptions([]);
     setErrorMsg(null);
+    setIngestionResult(null);
     setIsMock(mock);
   };
 
@@ -610,6 +636,7 @@ export default function App() {
     setSelectedEntityId(null);
     setExceptions([]);
     setErrorMsg(null);
+    setIngestionResult(null);
   }, [isMock]);
 
 
@@ -778,6 +805,7 @@ export default function App() {
     if (isMock) {
       setTimeout(() => {
         setIsUploading(false);
+        setIngestionResult({ status: "ACTIVE", readiness: "READY", active_batch_ids: [1], source_batch_ids: [1], dataset_fingerprint: "demo-dataset" });
         if (fileInputRef.current) fileInputRef.current.value = "";
       }, 1500);
     } else {
@@ -791,7 +819,8 @@ export default function App() {
         if (!res.ok) {
           throw await responseError(res, "Failed to upload XML file");
         }
-        
+        const body = await res.json() as IngestionResult;
+        setIngestionResult(body);
         await fetchPeriods(selectedEntityId);
         if (fileInputRef.current) fileInputRef.current.value = "";
       } catch (err: unknown) {
@@ -816,6 +845,7 @@ export default function App() {
         const updatedPeriods = [...periods, newP];
         setPeriods(updatedPeriods);
         setSelectedPeriod(newP);
+        setIngestionResult({ status: "ACTIVE", readiness: "READY", active_batch_ids: [1], source_batch_ids: [1], dataset_fingerprint: "demo-dataset" });
       }, 1500);
     } else {
       const formData = new FormData();
@@ -828,7 +858,8 @@ export default function App() {
         if (!res.ok) {
           throw await responseError(res, "Failed to upload XML file");
         }
-        
+        const body = await res.json() as IngestionResult;
+        setIngestionResult(body);
         setShowAddPeriodModal(false);
         setUploadSource(null);
         await fetchPeriods(selectedEntityId);
@@ -842,13 +873,18 @@ export default function App() {
     }
   };
 
-  const handleXlsxSuccess = async (periodStart: string, periodEnd: string) => {
+  const handleXlsxSuccess = async (periodStart: string, periodEnd: string, result: IngestionResult) => {
     if (selectedEntityId === null) return;
     setErrorMsg(null);
+    setIngestionResult(result);
     await fetchPeriods(selectedEntityId);
     const newP = { period_start: periodStart, period_end: periodEnd };
     setSelectedPeriod(newP);
-    fetchExceptions(selectedEntityId, periodStart, periodEnd);
+    if (result.readiness === "READY" || result.readiness === "READY_WITH_WARNINGS") {
+      fetchExceptions(selectedEntityId, periodStart, periodEnd);
+    } else {
+      setExceptions([]);
+    }
   };
 
   const handleTriggerScrutiny = async () => {
@@ -969,11 +1005,14 @@ export default function App() {
   // Fetch exceptions when selected period changes
   useEffect(() => {
     if (selectedEntityId !== null && selectedPeriod !== null) {
-      fetchExceptions(selectedEntityId, selectedPeriod.period_start, selectedPeriod.period_end);
+      const samePeriod = ingestionResult && selectedPeriod.period_start === ingestionResult.validation_report?.coverage_start && selectedPeriod.period_end === ingestionResult.validation_report?.coverage_end;
+      const notReady = samePeriod && ingestionResult.readiness && !["READY", "READY_WITH_WARNINGS"].includes(ingestionResult.readiness);
+      if (notReady) setExceptions([]);
+      else fetchExceptions(selectedEntityId, selectedPeriod.period_start, selectedPeriod.period_end);
     } else {
       setExceptions([]);
     }
-  }, [selectedEntityId, selectedPeriod, isMock, fetchExceptions]);
+  }, [selectedEntityId, selectedPeriod, isMock, fetchExceptions, ingestionResult]);
 
   const updateExceptionStatus = async (exceptionId: number, status: string, notes: string | null) => {
     if (selectedEntityId === null) return;
@@ -1317,7 +1356,7 @@ export default function App() {
                         return (
                           <button
                             key={idx}
-                            onClick={() => setSelectedPeriod(p)}
+                            onClick={() => { setSelectedPeriod(p); setIngestionResult(null); }}
                             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                               isSelected
                                 ? "bg-indigo-600 text-white shadow-md shadow-indigo-900/50"
@@ -1396,6 +1435,30 @@ export default function App() {
                   )}
                 </div>
               </div>
+
+              {ingestionResult && (() => {
+                const report = ingestionResult.validation_report || {};
+                const baseline = ingestionResult.baseline_coverage;
+                const readiness = ingestionResult.readiness || "UNKNOWN";
+                const ready = readiness === "READY" || readiness === "READY_WITH_WARNINGS";
+                return (
+                  <div className={`rounded-2xl border p-4 text-xs space-y-2 ${ready ? "bg-emerald-950/30 border-emerald-800/60" : "bg-amber-950/30 border-amber-800/60"}`} role="status" aria-live="polite">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold uppercase tracking-wider text-slate-200">Latest import: {ingestionResult.status || "reported"}</span>
+                      <span className={`font-bold uppercase tracking-wider ${ready ? "text-emerald-300" : "text-amber-300"}`}>Readiness: {readiness}</span>
+                    </div>
+                    <div className="text-slate-300">{String(report.accepted_rows ?? report.accepted ?? 0)} accepted rows · {String(report.document_count ?? 0)} documents · {ingestionResult.warnings?.length || 0} warnings · {ingestionResult.errors?.length || 0} errors</div>
+                    <div className="text-slate-400">Baseline: {baseline?.complete ? "complete" : baseline?.present ? "present but incomplete" : "required and not present"}{baseline?.account_count !== undefined ? ` · ${baseline.account_count} accounts` : ""}</div>
+                    {ingestionResult.gaps && ingestionResult.gaps.length > 0 && <div className="text-amber-200">Coverage gaps: {ingestionResult.gaps.map((gap) => `${gap.start || "?"}–${gap.end || "?"}`).join(", ")}</div>}
+                    {ingestionResult.errors && ingestionResult.errors.length > 0 && <div className="text-rose-200">Validation errors: {ingestionResult.errors.slice(0, 2).map(String).join("; ")}</div>}
+                    <div className="flex flex-wrap gap-x-4 gap-y-1 text-xxs text-slate-500 font-mono break-all">
+                      {ingestionResult.dataset_fingerprint && <span>Fingerprint: {ingestionResult.dataset_fingerprint}</span>}
+                      {ingestionResult.source_batch_ids && <span>Source lineage: {ingestionResult.source_lineage?.source_family || "canonical"} · batches {ingestionResult.source_batch_ids.join(", ") || "none"}</span>}
+                    </div>
+                    {!ready && <div className="font-semibold text-amber-200">Resolve the baseline, coverage gaps, or validation errors before running scrutiny.</div>}
+                  </div>
+                );
+              })()}
 
               {/* SCRUTINY SUMMARY */}
               {selectedPeriod && (
