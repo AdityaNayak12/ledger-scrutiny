@@ -1320,6 +1320,42 @@ def test_fixed_gl_api_persists_complete_golden_file_rows_and_documents():
         assert all(line.journal_entry.entity_id == entity["id"] for line in lines)
 
 
+@pytest.mark.parametrize("sign_convention", ["positive_is_credit", "separate_dr_cr_columns"])
+def test_xlsx_confirm_rejects_unsupported_sign_convention_before_staging(sign_convention):
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities", json={"name": "Unsupported Sign Entity", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    response = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "sign_convention": sign_convention,
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("unsupported-sign.xlsx", io.BytesIO(_gl_bytes()), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "signed amounts" in detail["message"]
+    assert detail["readiness"] == "INVALID"
+    assert detail["active_batch_ids"] == []
+    assert detail["errors"]
+    with TestingSessionLocal() as session:
+        assert session.scalar(
+            select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity["id"])
+        ) == 0
+        assert session.scalar(
+            select(func.count()).select_from(JournalEntry).where(JournalEntry.entity_id == entity["id"])
+        ) == 0
+        assert session.scalar(
+            select(func.count()).select_from(JournalLine).join(JournalEntry).where(JournalEntry.entity_id == entity["id"])
+        ) == 0
+
+
 def test_scrutiny_reports_readiness_block_and_persists_ready_dataset_lineage():
     headers = get_auth_headers()
     partial_entity = client.post(

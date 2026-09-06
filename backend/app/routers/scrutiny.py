@@ -937,7 +937,7 @@ async def upload_tally_export(
 async def upload_xlsx_confirm(
     entity_id: int,
     column_mapping: str = Form(..., description="JSON string mapping field names to exact spreadsheet column headers"),
-    sign_convention: str = Form("negative_is_credit", description="Sign convention: 'negative_is_credit', 'positive_is_credit', or 'separate_dr_cr_columns'"),
+    sign_convention: str = Form("negative_is_credit", description="Fixed canonical GL sign convention: positive amounts are debits and negative amounts are credits"),
     target_period_start: date = Form(...),
     target_period_end: date = Form(...),
     clear_only_period: bool = Form(True),
@@ -1003,6 +1003,19 @@ async def upload_xlsx_confirm(
                 message=message,
                 period_start=target_period_start,
                 errors=[f"{message} Use exact headers: {', '.join(GL_REQUIRED_HEADERS)}."],
+            ),
+        )
+    if sign_convention != "negative_is_credit":
+        message = "Fixed canonical GL imports require signed amounts: positive values are debits and negative values are credits."
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message=message,
+                period_start=target_period_start,
+                errors=[message],
             ),
         )
 

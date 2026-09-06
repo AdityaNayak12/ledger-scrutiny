@@ -12,7 +12,7 @@ from app.main import app
 from app.db.base import Base
 from app.db.models import Entity, ImportBatch, JournalEntry, JournalLine, LedgerAccount, Organization
 from app.ingestion.batches import stage_import_batch
-from app.ingestion.xlsx_normalizer import normalize_gl_xlsx, parse_gl_xlsx
+from app.ingestion.xlsx_normalizer import normalize_gl_xlsx, normalize_xlsx_confirm, parse_gl_xlsx
 from conftest import TestingSessionLocal
 
 client = TestClient(app)
@@ -445,6 +445,31 @@ def test_fixed_gl_normalizer_records_structured_report_for_staged_failure(canoni
     assert batch.validation_report["rejected_rows"] == 1
     assert batch.validation_report["skip_reasons"][0]["row"] == 2
     assert batch.validation_report["reject_reasons"][0]["row"] == 3
+
+
+@pytest.mark.parametrize("sign_convention", ["positive_is_credit", "separate_dr_cr_columns"])
+def test_fixed_gl_confirm_rejects_unsupported_sign_convention(canonical_session, sign_convention):
+    session, entity_id = canonical_session
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [["DOC-1", "1000", date(2025, 4, 1), 100], ["DOC-1", "2000", date(2025, 4, 1), -100]],
+    )
+    batch = _stage_gl_batch(session, entity_id, contents)
+
+    with pytest.raises(ValueError, match="signed amounts"):
+        normalize_xlsx_confirm(
+            contents,
+            {},
+            sign_convention,
+            date(2025, 4, 1),
+            date(2026, 3, 31),
+            entity_id,
+            session,
+            import_batch_id=batch.id,
+        )
+
+    assert session.scalar(select(func.count()).select_from(JournalLine)) == 0
+    assert session.scalar(select(func.count()).select_from(JournalEntry)) == 0
 
 
 def test_fixed_gl_parser_aggregates_uncached_formula_warnings_for_unknown_columns(canonical_session):

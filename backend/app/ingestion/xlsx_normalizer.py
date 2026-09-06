@@ -986,6 +986,10 @@ def normalize_xlsx_confirm(
             "Only the fixed canonical GL profile is supported for XLSX ingestion. "
             f"Use exact headers: {', '.join(GL_REQUIRED_HEADERS)}."
         )
+    if sign_convention != "negative_is_credit":
+        raise ValueError(
+            "Fixed canonical GL imports require signed amounts: positive values are debits and negative values are credits."
+        )
     normalize_gl_xlsx(
         file_bytes,
         target_period_start,
