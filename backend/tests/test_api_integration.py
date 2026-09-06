@@ -172,6 +172,23 @@ def test_demo_gst_profile_selects_manufacturing_pack(monkeypatch):
     assert created.json()["rule_pack"] == "manufacturing_v1"
 
 
+@pytest.mark.parametrize("pack, sector, expected", [
+    ("compliance_v1", None, 201),
+    (None, None, 201),
+    ("manufacturing_v1", "manufacturing", 201),
+    ("manufacturing_v1", None, 400),
+    ("unknown", None, 400),
+])
+def test_entity_rule_pack_contract(pack, sector, expected):
+    response = client.post("/entities", headers=get_auth_headers(), json={
+        "name": "Pack contract", "materiality_threshold": "100.00",
+        "rule_pack": pack, "sector": sector,
+    })
+    assert response.status_code == expected, response.text
+    if expected == 201:
+        assert response.json()["rule_pack"] == pack
+
+
 def test_manufacturing_pitch_files_produce_five_expected_findings(monkeypatch):
     headers = get_auth_headers()
     monkeypatch.setenv("GST_LOOKUP_MODE", "demo")
