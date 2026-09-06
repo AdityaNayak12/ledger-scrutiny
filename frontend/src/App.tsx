@@ -615,6 +615,7 @@ export default function App() {
   const [showAddPeriodModal, setShowAddPeriodModal] = useState<boolean>(false);
   const [uploadSource, setUploadSource] = useState<"tally_xml" | "xlsx" | null>(null);
   const [showXlsxModal, setShowXlsxModal] = useState<boolean>(false);
+  const [xlsxOpener, setXlsxOpener] = useState<HTMLElement | null>(null);
   const [xlsxInitialPeriod, setXlsxInitialPeriod] = useState<{start: string, end: string} | null>(null);
   const [ingestionResult, setIngestionResult] = useState<IngestionResult | null>(null);
   const [newPeriodDates, setNewPeriodDates] = useState({
@@ -1380,7 +1381,7 @@ export default function App() {
                   )}
 
                   <button
-                    onClick={() => setShowAddPeriodModal(true)}
+                    onClick={(event) => { setXlsxOpener(event.currentTarget); setShowAddPeriodModal(true); }}
                     className="text-xs font-semibold text-indigo-400 hover:text-indigo-300 bg-indigo-950/40 hover:bg-indigo-900/60 border border-indigo-800/50 px-2.5 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1"
                   >
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1395,7 +1396,7 @@ export default function App() {
                     <>
                       {selectedPeriod.source === "xlsx_gl" || selectedPeriod.source === "xlsx_trial_balance" ? (
                         <button
-                          onClick={() => { setXlsxInitialPeriod({ start: selectedPeriod.period_start, end: selectedPeriod.period_end }); setShowXlsxModal(true); }}
+                          onClick={(event) => { setXlsxOpener(event.currentTarget); setXlsxInitialPeriod({ start: selectedPeriod.period_start, end: selectedPeriod.period_end }); setShowXlsxModal(true); }}
                           className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer border border-slate-700/60 flex items-center gap-1.5"
                         >
                           <svg className="w-3.5 h-3.5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -2058,13 +2059,14 @@ export default function App() {
       {/* XLSX UPLOAD MODAL */}
       <XlsxUploadModal
         isOpen={showXlsxModal}
-        onClose={() => setShowXlsxModal(false)}
+        onClose={() => { setShowXlsxModal(false); setXlsxOpener(null); }}
         entityId={selectedEntityId}
         entityName={selectedEntity?.name || ""}
         baseUrl={BASE_URL}
         authFetch={authFetch}
         onSuccess={handleXlsxSuccess}
         isMock={isMock}
+        opener={xlsxOpener}
         initialPeriodStart={xlsxInitialPeriod?.start}
         initialPeriodEnd={xlsxInitialPeriod?.end}
       />

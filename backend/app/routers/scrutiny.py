@@ -387,9 +387,8 @@ def _ingest_tally_batch(
                 errors=[safe_error],
                 validation_report=failure_report,
             )
-            ingestion_error = _BatchIngestionError(batch, safe_error)
             db.commit()
-        raise ingestion_error from error
+        raise _BatchIngestionError(batch, safe_error) from error
     except Exception as error:
         failure_report = dict(batch.validation_report or {})
         savepoint.rollback()
@@ -401,9 +400,8 @@ def _ingest_tally_batch(
                 errors=[safe_error],
                 validation_report=failure_report,
             )
-            ingestion_error = _BatchIngestionError(batch, safe_error)
             db.commit()
-        raise ingestion_error from error
+        raise _BatchIngestionError(batch, safe_error) from error
     else:
         savepoint.commit()
     db.commit()
@@ -885,7 +883,7 @@ async def upload_xlsx_confirm(
 ):
     """Confirm a fixed canonical GL workbook and stage its source-preserving journal."""
     fn_lower = file.filename.lower()
-    if not (fn_lower.endswith(".xlsx") or fn_lower.endswith(".xls")):
+    if not fn_lower.endswith(".xlsx"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only XLSX files are supported."

@@ -25,9 +25,10 @@ interface XlsxUploadModalProps {
   isMock: boolean;
   initialPeriodStart?: string;
   initialPeriodEnd?: string;
+  opener?: HTMLElement | null;
 }
 
-export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName, baseUrl, authFetch, onSuccess, isMock, initialPeriodStart, initialPeriodEnd }: XlsxUploadModalProps) {
+export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName, baseUrl, authFetch, onSuccess, isMock, initialPeriodStart, initialPeriodEnd, opener }: XlsxUploadModalProps) {
   const [file, setFile] = useState<File | null>(null);
   const [periodStart, setPeriodStart] = useState(initialPeriodStart || "2026-04-01");
   const [periodEnd, setPeriodEnd] = useState(initialPeriodEnd || "2027-03-31");
@@ -35,6 +36,18 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<IngestionResult | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const openerRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const submittingRef = useRef(submitting);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    submittingRef.current = submitting;
+  }, [submitting]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -46,14 +59,38 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
   }, [isOpen, initialPeriodStart, initialPeriodEnd]);
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      const opener = openerRef.current;
+      if (opener?.isConnected) opener.focus();
+      openerRef.current = null;
+      return;
+    }
+    const activeElement = document.activeElement;
+    openerRef.current = opener || (activeElement instanceof HTMLElement ? activeElement : null);
     closeButtonRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !submitting) onClose();
+      if (event.key === "Escape" && !submittingRef.current) {
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])'
+      ) || []);
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isOpen, onClose, submitting]);
+  }, [isOpen, opener]);
 
   if (!isOpen) return null;
 
@@ -116,7 +153,7 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="xlsx-upload-title">
+    <div ref={dialogRef} className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="xlsx-upload-title">
       <form onSubmit={submit} className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl shadow-2xl overflow-y-auto max-h-[90vh]">
         <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
           <div><h3 id="xlsx-upload-title" className="text-base font-bold text-slate-100">Import Excel General Ledger</h3><p className="text-xs text-slate-400">Entity: <span className="text-slate-200">{entityName}</span></p></div>
@@ -153,8 +190,8 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
             );
           })()}
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1">Excel file (.xlsx or .xls)</label>
-            <input type="file" accept=".xlsx,.xls,.XLSX,.XLS" required onChange={(event) => { const selected = event.target.files?.[0]; if (selected && !/\.xlsx?$/i.test(selected.name)) { setFile(null); setError("Please select an Excel spreadsheet (.xlsx or .xls)."); event.currentTarget.value = ""; } else { setFile(selected || null); setError(null); } }} className="block w-full text-xs text-slate-300" />
+            <label className="block text-xs font-semibold text-slate-300 mb-1">Excel file (.xlsx)</label>
+            <input type="file" accept=".xlsx,.XLSX" required onChange={(event) => { const selected = event.target.files?.[0]; if (selected && !/\.xlsx$/i.test(selected.name)) { setFile(null); setError("Please select an XLSX spreadsheet (.xlsx)."); event.currentTarget.value = ""; } else { setFile(selected || null); setError(null); } }} className="block w-full text-xs text-slate-300" />
             {file && <p className="mt-2 text-xs text-slate-400">{file.name}</p>}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><label className="text-xxs font-bold uppercase tracking-wider text-slate-400">Period start<input type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} disabled={!!initialPeriodStart} required className="mt-1 w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2" /></label><label className="text-xxs font-bold uppercase tracking-wider text-slate-400">Period end<input type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} disabled={!!initialPeriodEnd} required className="mt-1 w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2" /></label></div>

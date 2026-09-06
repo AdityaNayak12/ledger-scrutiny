@@ -747,7 +747,14 @@ def normalize_tally_data(
         existing_transactions = session.scalar(
             select(func.count()).select_from(Transaction).where(Transaction.import_batch_id == import_batch_id)
         )
-        if existing_entries or existing_lines or existing_checkpoints or existing_snapshots or existing_transactions:
+        if (
+            (batch is not None and batch.status == "ACTIVE")
+            or existing_entries
+            or existing_lines
+            or existing_checkpoints
+            or existing_snapshots
+            or existing_transactions
+        ):
             if _canonical_replay_complete(
                 session,
                 batch_id=import_batch_id,
