@@ -3,13 +3,18 @@ from decimal import Decimal
 from typing import List
 
 from app.db.models import AuditException, Entity, LedgerAccount, TrialBalanceSnapshot
+from app.rules.compliance import run_compliance_checks, tds_liability_check
 from app.rules.manufacturing import manufacturing_gross_margin_shift, manufacturing_low_inventory_movement
 
 CORE_RULE_SET_VERSION = "core-v1"
 
 
 def rule_set_version(rule_pack: str | None) -> str:
-    return f"{CORE_RULE_SET_VERSION}+manufacturing-v1" if rule_pack == "manufacturing_v1" else CORE_RULE_SET_VERSION
+    if rule_pack == "manufacturing_v1":
+        return f"{CORE_RULE_SET_VERSION}+compliance-v1+manufacturing-v1"
+    if rule_pack == "compliance_v1":
+        return f"{CORE_RULE_SET_VERSION}+compliance-v1"
+    return CORE_RULE_SET_VERSION
 
 
 def check_normal_balance(entity: Entity, accounts: List[LedgerAccount], snapshots: List[TrialBalanceSnapshot], period_start: date, period_end: date) -> List[AuditException]:
@@ -137,38 +142,6 @@ def debtor_credit_balance(entity: Entity, accounts: List[LedgerAccount], snapsho
             exceptions.append(exception)
     return exceptions
 
-def tds_liability_check(entity: Entity, accounts: List[LedgerAccount], snapshots: List[TrialBalanceSnapshot], period_start: date, period_end: date) -> List[AuditException]:
-    snapshots_by_account = {s.ledger_account_id: s for s in snapshots if s.entity_id == entity.id and s.period_start == period_start}
-    
-    total_creditor_balance = Decimal("0.00")
-    has_tds_payable = False
-    
-    for account in accounts:
-        snapshot = snapshots_by_account.get(account.id)
-        if not snapshot:
-            continue
-            
-        if account.group_name == "Sundry Creditors" and snapshot.closing_balance < 0:
-            total_creditor_balance += abs(snapshot.closing_balance)
-            
-        if "tds" in account.name.lower() and account.group_name in {"Duties & Taxes", "Current Liabilities"} and snapshot.closing_balance < 0:
-            has_tds_payable = True
-
-    if total_creditor_balance >= entity.materiality_threshold and not has_tds_payable:
-        exception = AuditException(
-            entity_id=entity.id, 
-            period_start=period_start, 
-            period_end=period_end, 
-            rule_name="tds_liability_check", 
-            severity="warning", 
-            message=f"Total Sundry Creditors balance is {total_creditor_balance:.2f} (exceeds materiality), but no TDS liability account with a payable balance was found. Verify if TDS is applicable and has been deducted."
-        )
-        exception.variance = total_creditor_balance
-        return [exception]
-        
-    return []
-
-
 def filter_by_materiality(entity: Entity, exceptions: List[AuditException]) -> List[AuditException]:
     return [exception for exception in exceptions if exception.severity == "critical" or not getattr(exception, "apply_materiality", False) or getattr(exception, "variance", Decimal("0.00")) >= entity.materiality_threshold]
 
@@ -179,7 +152,11 @@ def run_scrutiny(entity: Entity, accounts: List[LedgerAccount], snapshots: List[
         + current_account_credit_balance(entity, accounts, snapshots, period_start, period_end)
         + creditor_debit_balance(entity, accounts, snapshots, period_start, period_end)
         + debtor_credit_balance(entity, accounts, snapshots, period_start, period_end)
-        + tds_liability_check(entity, accounts, snapshots, period_start, period_end)
+        + (
+            run_compliance_checks(entity, accounts, snapshots, period_start, period_end)
+            if rule_pack in {"compliance_v1", "manufacturing_v1"}
+            else tds_liability_check(entity, accounts, snapshots, period_start, period_end)
+        )
         + check_opening_balance_continuity(entity, accounts, snapshots, period_start, period_end)
         + trial_balance_balances(entity, accounts, snapshots, period_start, period_end)
         + negative_cash_balance(entity, accounts, snapshots, period_start, period_end)
