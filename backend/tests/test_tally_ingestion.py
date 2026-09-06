@@ -656,9 +656,11 @@ def test_tally_xml_upload_rejects_empty_vouchers_before_batch_activation():
         headers=headers,
     )
     assert response.status_code == 400
-    assert "voucher" in response.json()["detail"].lower()
+    detail = response.json()["detail"]
+    assert "voucher" in detail["message"].lower()
+    assert detail["failed_batch_status"] == "FAILED"
     with TestingSessionLocal() as session:
-        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)) == 0
+        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)) == 1
 
 
 def test_tally_xml_upload_rejects_missing_closing_without_legacy_synthesis():
@@ -677,9 +679,11 @@ def test_tally_xml_upload_rejects_missing_closing_without_legacy_synthesis():
         headers=headers,
     )
     assert response.status_code == 400
-    assert "closing balance" in response.json()["detail"].lower()
+    detail = response.json()["detail"]
+    assert "closing balance" in detail["message"].lower()
+    assert detail["failed_batch_status"] == "FAILED"
     with TestingSessionLocal() as session:
-        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)) == 0
+        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)) == 1
         assert session.scalar(select(func.count()).select_from(LedgerAccount).where(LedgerAccount.entity_id == entity_id)) == 0
 
 

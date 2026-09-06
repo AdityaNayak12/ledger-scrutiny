@@ -56,11 +56,20 @@ const responseError = async (response: Response, fallback: string) => {
   const body = await response.json().catch(() => null);
   const detail = body?.detail;
   if (detail && typeof detail === "object") {
-    const parts = [detail.message, detail.baseline_requirement?.reason];
+    const parts = [
+      detail.message,
+      detail.failed_batch_status && `Batch: ${detail.failed_batch_status}`,
+      detail.readiness && `Readiness: ${detail.readiness}`,
+      detail.baseline_requirement?.reason,
+    ];
     if (Array.isArray(detail.gaps) && detail.gaps.length) {
       parts.push(`Coverage gaps: ${detail.gaps.map((gap: { start?: string; end?: string }) => `${gap.start || "?"}–${gap.end || "?"}`).join(", ")}`);
     }
     if (Array.isArray(detail.errors) && detail.errors.length) parts.push(`Validation errors: ${detail.errors.slice(0, 2).join("; ")}`);
+    if (Array.isArray(detail.source_batch_ids) && detail.source_batch_ids.length) {
+      parts.push(`Source batches: ${detail.source_batch_ids.join(", ")}`);
+    }
+    if (detail.dataset_fingerprint) parts.push(`Dataset fingerprint: ${detail.dataset_fingerprint}`);
     return new Error(parts.filter(Boolean).join(" ") || `${fallback} (HTTP ${response.status})`);
   }
   return new Error(typeof detail === "string" ? detail : `${fallback} (HTTP ${response.status})`);
@@ -1347,7 +1356,7 @@ export default function App() {
                   
                   {periods.length === 0 ? (
                     <span className="text-xs text-amber-400 bg-amber-950/50 border border-amber-800/60 px-3 py-1 rounded-lg">
-                      No trial balance data uploaded yet
+                      No general-ledger data uploaded yet
                     </span>
                   ) : (
                     <div className="flex items-center gap-2">
@@ -1384,7 +1393,7 @@ export default function App() {
                 <div className="flex items-center gap-3">
                   {selectedPeriod && (
                     <>
-                      {selectedPeriod.source === "xlsx_trial_balance" ? (
+                      {selectedPeriod.source === "xlsx_gl" || selectedPeriod.source === "xlsx_trial_balance" ? (
                         <button
                           onClick={() => { setXlsxInitialPeriod({ start: selectedPeriod.period_start, end: selectedPeriod.period_end }); setShowXlsxModal(true); }}
                           className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer border border-slate-700/60 flex items-center gap-1.5"
@@ -1823,7 +1832,7 @@ export default function App() {
 
             {uploadSource === null ? (
               <div className="space-y-3">
-                <p className="text-xs text-slate-400 mb-3">Select the data source to import a trial balance:</p>
+                <p className="text-xs text-slate-400 mb-3">Select the data source to import ledger data:</p>
                 
                 <button
                   onClick={() => setUploadSource("tally_xml")}
@@ -1855,8 +1864,8 @@ export default function App() {
                     </svg>
                   </div>
                   <div>
-                    <div className="font-bold text-slate-200 text-sm">Excel Trial Balance (XLSX)</div>
-                    <div className="text-xs text-slate-500">Import a generic trial balance spreadsheet</div>
+                    <div className="font-bold text-slate-200 text-sm">Excel General Ledger (XLSX)</div>
+                    <div className="text-xs text-slate-500">Import a fixed canonical general-ledger spreadsheet</div>
                   </div>
                 </button>
                 

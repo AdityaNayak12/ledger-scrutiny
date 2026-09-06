@@ -8,18 +8,18 @@ from datetime import datetime, date, timezone
 from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, Form, status
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, select, delete
+from sqlalchemy import func, inspect, select, delete
 from pydantic import BaseModel, ConfigDict
 
 from app.db.session import get_db
 from app.db.models import AuditException, Entity, FinancialPeriod, ImportBatch, JournalEntry, JournalLine, LedgerAccount, ReviewAction, ScrutinyRun, TrialBalanceSnapshot, User
 from app.ingestion.batches import activate_import_batch, create_import_batch, fail_import_batch, is_duplicate_import_batch
 from app.ingestion.datasets import resolve_active_dataset
-from app.ingestion.schema import SourceFamily
+from app.ingestion.schema import GL_REQUIRED_HEADERS, SourceFamily
 from app.ingestion.tally_parser import parse_tally_xml
 from app.ingestion.tally_http import TallyConnectorError, fetch_trial_balance
 from app.ingestion.tally_normalizer import normalize_tally_data
-from app.ingestion.xlsx_normalizer import normalize_xlsx_confirm
+from app.ingestion.xlsx_normalizer import normalize_xlsx_confirm, safe_xlsx_error, validate_gl_xlsx_replay
 from app.rules.engine import rule_set_version, run_scrutiny
 from app.auth.security import get_current_user
 
@@ -162,10 +162,109 @@ def _safe_tally_error(error: Exception) -> str:
     """Keep connector and source failures free of URLs, credentials, and payloads."""
     if isinstance(error, TallyConnectorError):
         return "Tally import failed validation: a complete export with closing balances and balanced vouchers is required."
-    detail = str(error)
-    if re.search(r"https?://|ftp://|<[^>]+>|password|passwd|secret|token|authorization|bearer|@[A-Za-z0-9.-]+", detail, re.I):
-        return "Tally import failed. Verify the endpoint and export configuration."
-    return detail or "Tally import failed."
+    return "Tally import failed validation: a complete export with closing balances and balanced vouchers is required."
+
+
+class _BatchIngestionError(ValueError):
+    """Safe route-facing error that retains the failed batch for response metadata."""
+
+    def __init__(self, batch: ImportBatch, message: str) -> None:
+        super().__init__(message)
+        self.batch = batch
+        self.safe_message = message
+        self.batch_id = batch.id
+        self.batch_status = batch.status
+        self.batch_report = dict(batch.validation_report or {})
+
+
+def _existing_import_batch(db: Session, entity_id: int, contents: bytes) -> ImportBatch | None:
+    content_sha256 = hashlib.sha256(contents).hexdigest()
+    return db.execute(
+        select(ImportBatch).where(
+            ImportBatch.entity_id == entity_id,
+            ImportBatch.content_sha256 == content_sha256,
+        ).order_by(ImportBatch.id.desc())
+    ).scalars().first()
+
+
+def _failure_error(error: BaseException, source_family: str) -> str:
+    if source_family == SourceFamily.GL_UPLOAD.value:
+        return safe_xlsx_error(error)
+    return _safe_tally_error(error if isinstance(error, Exception) else Exception())
+
+
+def _ingestion_failure_detail(
+    db: Session,
+    entity: Entity,
+    *,
+    source_family: str,
+    message: str,
+    period_start: date | None = None,
+    batch: ImportBatch | None = None,
+    failed_batch_id: int | None = None,
+    failed_batch_status: str | None = None,
+    failed_batch_report: dict[str, Any] | None = None,
+    errors: list[str] | tuple[str, ...] = (),
+) -> dict[str, Any]:
+    entity_state = inspect(entity)
+    resolved_entity_id = entity_state.identity[0] if entity_state.identity else entity.id
+    try:
+        resolved_entity_name = entity.name
+    except Exception:
+        resolved_entity_name = ""
+    financial_year = None
+    if period_start is not None:
+        financial_year = period_start.year if period_start.month >= 4 else period_start.year - 1
+    dataset = resolve_active_dataset(db, resolved_entity_id, financial_year=financial_year)
+    safe_errors = [
+        _failure_error(Exception(str(error)), source_family)
+        for error in errors
+        if error
+    ]
+    report = (
+        dict(failed_batch_report or {})
+        if failed_batch_report is not None
+        else dict(batch.validation_report or {}) if batch is not None else {}
+    )
+    report_errors = [
+        _failure_error(error, source_family)
+        for error in report.get("errors", ())
+        if error
+    ]
+    report["errors"] = list(dict.fromkeys(report_errors + safe_errors))
+    report["readiness"] = "INVALID"
+    active_batch_ids = list(dataset["active_batch_ids"])
+    source_batch_ids = list(dataset["source_batch_ids"])
+    resolved_source_family = dataset["source_family"] or (
+        batch.source_family if batch is not None else source_family
+    )
+    return _json_safe({
+        "message": message,
+        "entity_id": resolved_entity_id,
+        "entity_name": resolved_entity_name,
+        "failed_batch_id": failed_batch_id if failed_batch_id is not None else batch.id if batch is not None else None,
+        "failed_batch_status": failed_batch_status if failed_batch_status is not None else batch.status if batch is not None else None,
+        "status": failed_batch_status if failed_batch_status is not None else batch.status if batch is not None else "FAILED",
+        "validation_report": report,
+        "readiness": dataset["readiness"] if active_batch_ids else "INVALID",
+        "source_family": resolved_source_family,
+        "active_batch_ids": active_batch_ids,
+        "source_batch_ids": source_batch_ids,
+        "source_lineage": {
+            "source_family": resolved_source_family,
+            "active_batch_ids": active_batch_ids,
+            "baseline_batch_ids": dataset["baseline_batch_ids"],
+            "selected_batch_ids": dataset["selected_batch_ids"],
+            "coverage": dataset["coverage"],
+            "replaced_batch_ids": dataset["replaced_batch_ids"],
+            "excluded_batch_ids": dataset["excluded_batch_ids"],
+        },
+        "baseline_coverage": dataset["baseline_coverage"],
+        "gaps": dataset["gaps"],
+        "warnings": dataset["warnings"],
+        "errors": list(dict.fromkeys(dataset["errors"] + safe_errors)),
+        "dataset_fingerprint": dataset["dataset_fingerprint"],
+    })
 
 
 def _ingestion_response(
@@ -234,14 +333,12 @@ def _ingest_tally_batch(
     original_filename: str,
     source_metadata: dict[str, Any] | None = None,
 ) -> ImportBatch:
-    had_active_batch = db.scalar(
-        select(func.count()).select_from(ImportBatch).where(
-            ImportBatch.entity_id == entity.id,
-            ImportBatch.status == "ACTIVE",
-            ImportBatch.coverage_start == period_start,
-            ImportBatch.coverage_end == period_end,
+    existing = _existing_import_batch(db, entity.id, contents)
+    if existing is not None and existing.status != "ACTIVE":
+        raise _BatchIngestionError(
+            existing,
+            f"Exact duplicate batch {existing.id} is {existing.status}; no active import exists.",
         )
-    ) > 0
     batch = create_import_batch(
         db,
         entity_id=entity.id,
@@ -281,22 +378,32 @@ def _ingest_tally_batch(
             batch = activate_import_batch(db, batch, replace=True)
     except ValueError as error:
         failure_report = dict(batch.validation_report or {})
+        safe_error = _safe_tally_error(error)
         savepoint.rollback()
         if not duplicate:
-            if had_active_batch:
-                fail_import_batch(
-                    db,
-                    batch,
-                    errors=[_safe_tally_error(error)],
-                    validation_report=failure_report,
-                )
-            else:
-                db.delete(batch)
+            fail_import_batch(
+                db,
+                batch,
+                errors=[safe_error],
+                validation_report=failure_report,
+            )
+            ingestion_error = _BatchIngestionError(batch, safe_error)
             db.commit()
-        raise
-    except Exception:
+        raise ingestion_error from error
+    except Exception as error:
+        failure_report = dict(batch.validation_report or {})
         savepoint.rollback()
-        raise
+        safe_error = _safe_tally_error(error)
+        if not duplicate:
+            fail_import_batch(
+                db,
+                batch,
+                errors=[safe_error],
+                validation_report=failure_report,
+            )
+            ingestion_error = _BatchIngestionError(batch, safe_error)
+            db.commit()
+        raise ingestion_error from error
     else:
         savepoint.commit()
     db.commit()
@@ -400,37 +507,6 @@ def _canonical_period_snapshots(
         ))
     return snapshots
 
-
-def _legacy_trial_balance_compatibility(
-    db: Session,
-    entity_id: int,
-    period_start: date,
-    period_end: date,
-) -> tuple[ImportBatch | None, list[TrialBalanceSnapshot]]:
-    """Keep the pre-canonical explicit trial-balance upload contract working."""
-    batch = db.execute(
-        select(ImportBatch).where(
-            ImportBatch.entity_id == entity_id,
-            ImportBatch.status == "ACTIVE",
-            ImportBatch.source == "xlsx_trial_balance",
-            ImportBatch.coverage_start == period_start,
-            ImportBatch.coverage_end == period_end,
-        ).order_by(ImportBatch.id.desc())
-    ).scalars().first()
-    if batch is None:
-        return None, []
-    has_canonical_rows = db.scalar(
-        select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == batch.id)
-    )
-    if has_canonical_rows:
-        return None, []
-    snapshots = db.execute(
-        select(TrialBalanceSnapshot).where(
-            TrialBalanceSnapshot.entity_id == entity_id,
-            TrialBalanceSnapshot.import_batch_id == batch.id,
-        ).order_by(TrialBalanceSnapshot.id)
-    ).scalars().all()
-    return (batch, snapshots) if snapshots else (None, [])
 
 
 # --- Entity management endpoints ---
@@ -547,10 +623,14 @@ def list_periods(
             detail=f"Entity with ID {entity_id} not found."
         )
 
-    # Fetch from FinancialPeriod
-    from app.db.models import FinancialPeriod
     periods = db.execute(
-        select(FinancialPeriod).where(FinancialPeriod.entity_id == entity_id)
+        select(FinancialPeriod)
+        .join(ImportBatch, ImportBatch.financial_period_id == FinancialPeriod.id)
+        .where(
+            FinancialPeriod.entity_id == entity_id,
+            ImportBatch.status == "ACTIVE",
+        )
+        .distinct()
     ).scalars().all()
     
     # If a period is missing from FinancialPeriod (legacy), fallback to distinct TrialBalanceSnapshots
@@ -614,15 +694,60 @@ def import_from_tally_connector(
             },
         )
         return _ingestion_response(db, entity, batch, message="TallyPrime import successful")
+    except _BatchIngestionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.TALLY.value,
+                message=exc.safe_message,
+                period_start=request.period_start,
+                failed_batch_id=exc.batch_id,
+                failed_batch_status=exc.batch_status,
+                failed_batch_report=exc.batch_report,
+                errors=[exc.safe_message],
+            ),
+        )
     except TallyConnectorError as exc:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_safe_tally_error(exc))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.TALLY.value,
+                message=_safe_tally_error(exc),
+                period_start=request.period_start,
+                errors=[_safe_tally_error(exc)],
+            ),
+        )
     except ValueError as exc:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_safe_tally_error(exc))
-    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.TALLY.value,
+                message=_safe_tally_error(exc),
+                period_start=request.period_start,
+                errors=[_safe_tally_error(exc)],
+            ),
+        )
+    except Exception as exc:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to import from TallyPrime.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.TALLY.value,
+                message="Failed to import from TallyPrime.",
+                period_start=request.period_start,
+                errors=[_safe_tally_error(exc)],
+            ),
+        )
 
 @router.post("/entities/{entity_id}/upload", response_model=IngestionResponse)
 async def upload_tally_export(
@@ -656,13 +781,22 @@ async def upload_tally_export(
             detail=f"Entity with ID {entity_id} not found."
         )
 
+    period_start = target_period_start
+    period_end = target_period_end
     try:
         contents = await file.read()
         parsed_data = parse_tally_xml(contents)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_safe_tally_error(e)
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.TALLY.value,
+                message=_safe_tally_error(e),
+                period_start=target_period_start,
+                errors=[_safe_tally_error(e)],
+            ),
         )
 
     try:
@@ -681,20 +815,59 @@ async def upload_tally_export(
             source_metadata={"parser": "tally_xml"},
         )
         return _ingestion_response(db, entity, batch, message="Ingestion successful")
+    except _BatchIngestionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.TALLY.value,
+                message=e.safe_message,
+                period_start=period_start,
+                failed_batch_id=e.batch_id,
+                failed_batch_status=e.batch_status,
+                failed_batch_report=e.batch_report,
+                errors=[e.safe_message],
+            ),
+        )
     except TallyConnectorError as e:
         db.rollback()
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=_safe_tally_error(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.TALLY.value,
+                message=_safe_tally_error(e),
+                period_start=period_start,
+                errors=[_safe_tally_error(e)],
+            ),
+        )
     except ValueError as e:
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=_safe_tally_error(e)
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.TALLY.value,
+                message=_safe_tally_error(e),
+                period_start=period_start,
+                errors=[_safe_tally_error(e)],
+            ),
         )
-    except Exception:
+    except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to normalize and save ledger data."
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.TALLY.value,
+                message="Failed to normalize and save ledger data.",
+                period_start=period_start,
+                errors=[_safe_tally_error(e)],
+            ),
         )
 
 
@@ -710,9 +883,7 @@ async def upload_xlsx_confirm(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """
-    Confirms XLSX upload using user-approved column_mapping and sign_convention, writing trial balance to DB.
-    """
+    """Confirm a fixed canonical GL workbook and stage its source-preserving journal."""
     fn_lower = file.filename.lower()
     if not (fn_lower.endswith(".xlsx") or fn_lower.endswith(".xls")):
         raise HTTPException(
@@ -734,27 +905,94 @@ async def upload_xlsx_confirm(
 
     try:
         mapping_dict = json.loads(column_mapping)
-    except Exception as e:
+    except Exception:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid JSON string provided for column_mapping: {str(e)}"
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message="Invalid JSON string provided for column_mapping.",
+                period_start=target_period_start,
+                errors=["Invalid JSON string provided for column_mapping."],
+            ),
+        )
+    if not isinstance(mapping_dict, dict):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message="column_mapping must be a JSON object.",
+                period_start=target_period_start,
+                errors=["column_mapping must be a JSON object."],
+            ),
+        )
+    mapped_headers = {str(value).strip() for value in mapping_dict.values()}
+    if mapping_dict and not set(GL_REQUIRED_HEADERS).issubset(mapped_headers):
+        message = "Only the fixed canonical GL profile is supported for XLSX ingestion."
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message=message,
+                period_start=target_period_start,
+                errors=[f"{message} Use exact headers: {', '.join(GL_REQUIRED_HEADERS)}."],
+            ),
         )
 
+    batch: ImportBatch | None = None
     try:
         contents = await file.read()
+        existing = _existing_import_batch(db, entity.id, contents)
+        if existing is not None and existing.status != "ACTIVE":
+            raise _BatchIngestionError(
+                existing,
+                f"Exact duplicate batch {existing.id} is {existing.status}; no active import exists.",
+            )
         batch = create_import_batch(
             db,
             entity_id=entity.id,
             period_start=target_period_start,
             period_end=target_period_end,
-            source="xlsx_trial_balance",
+            source="xlsx_gl",
+            source_family=SourceFamily.GL_UPLOAD.value,
+            coverage_start=target_period_start,
+            coverage_end=target_period_end,
             original_filename=file.filename,
             contents=contents,
             uploaded_by_user_id=current_user.id,
-            validation_report={"parser": "xlsx_trial_balance", "sign_convention": sign_convention},
+            validation_report={"parser": "xlsx_gl", "sign_convention": sign_convention},
             activate=False,
         )
-        if not is_duplicate_import_batch(batch):
+        if is_duplicate_import_batch(batch):
+            try:
+                validate_gl_xlsx_replay(
+                    contents,
+                    target_period_start,
+                    target_period_end,
+                    entity.id,
+                    db,
+                    import_batch_id=batch.id,
+                )
+            except ValueError as error:
+                safe_error = safe_xlsx_error(error)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=_ingestion_failure_detail(
+                        db,
+                        entity,
+                        source_family=SourceFamily.GL_UPLOAD.value,
+                        message=safe_error,
+                        period_start=target_period_start,
+                        batch=batch,
+                        errors=[safe_error],
+                    ),
+                ) from error
+        else:
             savepoint = db.begin_nested()
             try:
                 normalize_xlsx_confirm(
@@ -771,36 +1009,80 @@ async def upload_xlsx_confirm(
                 batch = activate_import_batch(db, batch, replace=True)
             except ValueError as val_err:
                 failure_report = dict(batch.validation_report or {})
-                failed_by_normalizer = batch.status == "FAILED"
+                safe_error = safe_xlsx_error(val_err)
                 savepoint.rollback()
-                if failed_by_normalizer:
-                    fail_import_batch(
-                        db,
-                        batch,
-                        errors=[str(val_err)],
-                        validation_report=failure_report,
-                    )
-                    db.commit()
-                else:
-                    db.rollback()
-                raise
-            except Exception:
+                fail_import_batch(
+                    db,
+                    batch,
+                    errors=[safe_error],
+                    validation_report=failure_report,
+                )
+                ingestion_error = _BatchIngestionError(batch, safe_error)
+                db.commit()
+                raise ingestion_error from val_err
+            except Exception as error:
+                failure_report = dict(batch.validation_report or {})
                 savepoint.rollback()
-                raise
+                safe_error = safe_xlsx_error(error)
+                fail_import_batch(
+                    db,
+                    batch,
+                    errors=[safe_error],
+                    validation_report=failure_report,
+                )
+                ingestion_error = _BatchIngestionError(batch, safe_error)
+                db.commit()
+                raise ingestion_error from error
             else:
                 savepoint.commit()
         db.commit()
         return _ingestion_response(db, entity, batch, message="XLSX ingestion successful")
-    except ValueError as val_err:
+    except _BatchIngestionError as error:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(val_err)
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message=error.safe_message,
+                period_start=target_period_start,
+                failed_batch_id=error.batch_id,
+                failed_batch_status=error.batch_status,
+                failed_batch_report=error.batch_report,
+                errors=[error.safe_message],
+            ),
         )
-    except Exception:
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as val_err:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message=safe_xlsx_error(val_err),
+                period_start=target_period_start,
+                batch=batch,
+                errors=[safe_xlsx_error(val_err)],
+            ),
+        )
+    except Exception as error:
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to ingest XLSX file."
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message="Failed to ingest XLSX file.",
+                period_start=target_period_start,
+                batch=batch,
+                errors=[safe_xlsx_error(error)],
+            ),
         )
 
 
@@ -829,11 +1111,22 @@ def trigger_scrutiny_run(
 
     financial_year = period_start.year if period_start.month >= 4 else period_start.year - 1
     dataset = resolve_active_dataset(db, entity_id, financial_year=financial_year)
-    legacy_batch, legacy_snapshots = _legacy_trial_balance_compatibility(
-        db, entity_id, period_start, period_end
-    )
-    legacy_compatibility = legacy_batch is not None
-    if dataset["readiness"] not in {"READY", "READY_WITH_WARNINGS"} and not legacy_compatibility:
+    active_ids = set(dataset["active_batch_ids"])
+    canonical_ids = set(db.scalars(
+        select(JournalEntry.import_batch_id).where(JournalEntry.import_batch_id.in_(active_ids or {-1}))
+    ).all())
+    legacy_snapshot_ids = set(db.scalars(
+        select(ImportBatch.id).where(
+            ImportBatch.id.in_(active_ids or {-1}),
+            ImportBatch.source == "xlsx_trial_balance",
+        )
+    ).all())
+    if (active_ids - canonical_ids) or legacy_snapshot_ids:
+        dataset["readiness"] = "INVALID"
+        dataset["errors"].append(
+            "Active scrutiny datasets require canonical journal entries; legacy trial-balance snapshots are not supported."
+        )
+    if dataset["readiness"] not in {"READY", "READY_WITH_WARNINGS"}:
         baseline = dataset["baseline_coverage"]
         if not baseline.get("complete"):
             message = "Dataset is not ready for scrutiny: a complete account-level opening baseline is required."
@@ -858,6 +1151,15 @@ def trigger_scrutiny_run(
                 "warnings": dataset["warnings"],
                 "active_batch_ids": dataset["active_batch_ids"],
                 "source_batch_ids": dataset["source_batch_ids"],
+                "source_lineage": {
+                    "source_family": dataset["source_family"],
+                    "active_batch_ids": dataset["active_batch_ids"],
+                    "baseline_batch_ids": dataset["baseline_batch_ids"],
+                    "selected_batch_ids": dataset["selected_batch_ids"],
+                    "coverage": dataset["coverage"],
+                    "replaced_batch_ids": dataset["replaced_batch_ids"],
+                    "excluded_batch_ids": dataset["excluded_batch_ids"],
+                },
                 "dataset_fingerprint": dataset["dataset_fingerprint"],
             }),
         )
@@ -888,7 +1190,7 @@ def trigger_scrutiny_run(
     if not active_batch and not dataset["active_batch_ids"]:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This period has no active import batch.")
 
-    snapshots = legacy_snapshots if legacy_compatibility else _canonical_period_snapshots(
+    snapshots = _canonical_period_snapshots(
         db, entity, dataset, accounts, period_start, period_end
     )
 
@@ -911,9 +1213,7 @@ def trigger_scrutiny_run(
     scrutiny_run = ScrutinyRun(
         entity_id=entity_id,
         financial_period_id=financial_period.id,
-        import_batch_id=(active_batch.id if active_batch else (
-            legacy_batch.id if legacy_batch else dataset["active_batch_ids"][0]
-        )),
+        import_batch_id=(active_batch.id if active_batch else dataset["active_batch_ids"][0]),
         triggered_by_user_id=current_user.id,
         rule_set_version=rule_set_version(entity.rule_pack),
         status="RUNNING",

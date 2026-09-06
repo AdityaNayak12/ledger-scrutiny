@@ -1,4 +1,4 @@
-"""Fixed GL XLSX ingestion plus the legacy trial-balance compatibility path."""
+"""Fixed canonical GL XLSX ingestion and replay validation."""
 
 import io
 import re
@@ -8,17 +8,15 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Mapping, Optional
 
 import openpyxl
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
     Entity,
-    FinancialPeriod,
     ImportBatch,
     JournalEntry,
     JournalLine,
     LedgerAccount,
-    TrialBalanceSnapshot,
 )
 from app.ingestion.batches import fail_import_batch
 from app.ingestion.reconciliation import build_reconciliation_report
@@ -30,7 +28,6 @@ from app.ingestion.schema import (
     JournalLineSide,
     SourceFamily,
 )
-from app.rules.account_groups import UnrecognizedAccountGroupError, get_normal_balance
 
 
 _OPTIONAL_ALIASES = {
@@ -52,15 +49,6 @@ _OPTIONAL_ALIASES = {
     "quantity": ("Quantity",),
     "currency": ("Currency", "Currency Code"),
 }
-_FIXED_MAPPING_KEYS = {
-    "document_number",
-    "gl_account",
-    "posting_date",
-    "amount",
-    "amount_in_local_currency",
-}
-
-
 class _ParsedGL:
     __slots__ = ("entries", "input_rows", "skipped_rows", "skip_reasons", "warnings", "coverage_start", "coverage_end")
 
@@ -354,11 +342,12 @@ def _failure_reconciliation_report(file_bytes: bytes, error: ValueError) -> dict
             pass
 
     row_match = re.search(r"Row (\d+):", str(error))
-    reject_reason: dict[str, Any] = {"reason": str(error)}
+    safe_error = safe_xlsx_error(error)
+    reject_reason: dict[str, Any] = {"reason": safe_error}
     if row_match:
         reject_reason["row"] = int(row_match.group(1))
     report = build_reconciliation_report(
-        (), input_rows=input_rows, rejected=1, errors=[str(error)], coverage_complete=False,
+        (), input_rows=input_rows, rejected=1, errors=[safe_error], coverage_complete=False,
     )
     report.update({
         "parser": "xlsx_gl",
@@ -629,6 +618,194 @@ def _entity(session: Session, entity_id: int) -> Entity:
     return entity
 
 
+def safe_xlsx_error(error: BaseException) -> str:
+    """Keep workbook/parser failures actionable without exposing library details."""
+    detail = str(error)
+    row_match = re.fullmatch(r"(Row \d+): (.+)", detail)
+    if row_match:
+        row_label, row_detail = row_match.groups()
+        if row_detail.endswith("is a required value."):
+            return f"{row_label}: {row_detail}"
+        valid_value = re.match(r"(.+?) must be a valid (date|decimal)", row_detail)
+        if valid_value:
+            return f"{row_label}: {valid_value.group(1)} must be a valid {valid_value.group(2)}."
+        if "outside declared coverage" in row_detail:
+            return f"{row_label}: posting date is outside declared coverage."
+        if "numeric capacity" in row_detail:
+            return f"{row_label}: amount exceeds canonical numeric capacity."
+        return f"{row_label}: invalid canonical row data."
+    if detail.startswith((
+        "Could not locate the exact required GL headers",
+        "Workbook has no active sheet",
+        "Document ",
+        "Declared coverage ",
+        "Only the fixed canonical GL profile is supported",
+        "Exact duplicate XLSX import",
+    )):
+        return detail
+    return "XLSX import failed validation. Verify the canonical GL headers, dates, amounts, and balanced documents."
+
+
+def _canonical_replay_complete(
+    session: Session,
+    *,
+    batch_id: int,
+    entity_id: int,
+    period_start: date,
+    period_end: date,
+    entries: tuple[JournalEntryRecord, ...],
+    accounts_by_code: Mapping[str, LedgerAccount],
+) -> bool:
+    """Verify canonical document/line identity before treating a replay as idempotent."""
+    expected_entries = {entry.source_document_id: entry for entry in entries}
+    if len(expected_entries) != len(entries):
+        return False
+    actual_entries = session.scalars(
+        select(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
+    ).all()
+    actual_entry_map = {entry.source_document_id: entry for entry in actual_entries}
+    if len(actual_entry_map) != len(actual_entries) or actual_entry_map.keys() != expected_entries.keys():
+        return False
+    for source_document_id, expected in expected_entries.items():
+        actual = actual_entry_map[source_document_id]
+        if (
+            actual.entity_id != entity_id
+            or not period_start <= actual.posting_date <= period_end
+            or actual.posting_date != expected.posting_date
+            or actual.document_date != expected.document_date
+            or actual.document_type != expected.document_type
+            or actual.narration != expected.narration
+        ):
+            return False
+
+    line_rows = session.execute(
+        select(JournalLine, JournalEntry)
+        .join(JournalEntry, JournalEntry.id == JournalLine.journal_entry_id)
+        .where(JournalEntry.import_batch_id == batch_id)
+    ).all()
+    actual_line_map = {
+        (entry.source_document_id, line.source_row_number): (line, entry)
+        for line, entry in line_rows
+    }
+    if len(actual_line_map) != len(line_rows):
+        return False
+
+    expected_line_map: dict[tuple[str, int], JournalLineRecord] = {}
+    expected_accounts: dict[str, LedgerAccount] = {}
+    for entry in entries:
+        for line in entry.lines:
+            account = accounts_by_code.get(line.ledger_account_code)
+            if account is None or account.entity_id != entity_id:
+                return False
+            key = (entry.source_document_id, line.source_row_number)
+            if key in expected_line_map:
+                return False
+            expected_line_map[key] = line
+            expected_accounts[line.ledger_account_code] = account
+    if actual_line_map.keys() != expected_line_map.keys():
+        return False
+
+    actual_account_ids = {line.ledger_account_id for line, _entry in line_rows}
+    actual_accounts = session.scalars(
+        select(LedgerAccount).where(LedgerAccount.id.in_(actual_account_ids or {-1}))
+    ).all()
+    accounts_by_id = {account.id: account for account in actual_accounts}
+    if len(accounts_by_id) != len(actual_account_ids) or any(
+        account.entity_id != entity_id for account in actual_accounts
+    ):
+        return False
+
+    def line_facts(line: JournalLine) -> tuple[Any, ...]:
+        return (
+            line.source_row_number,
+            line.ledger_account_id,
+            Decimal(str(line.amount)),
+            line.side,
+            line.posting_key,
+            Decimal(str(line.quantity)) if line.quantity is not None else None,
+            line.currency,
+            line.reference,
+            line.clearing_document,
+            line.profit_center,
+            line.cost_center,
+            line.text,
+            line.supplier,
+            line.wbs,
+            line.purchasing_document,
+            line.customer,
+            dict(line.dimensions or {}),
+            dict(line.source_metadata or {}),
+        )
+
+    def expected_line_facts(line: JournalLineRecord) -> tuple[Any, ...]:
+        account = expected_accounts[line.ledger_account_code]
+        return (
+            line.source_row_number,
+            account.id,
+            line.amount,
+            line.side.value,
+            line.posting_key,
+            line.quantity,
+            line.currency,
+            line.reference,
+            line.clearing_document,
+            line.profit_center,
+            line.cost_center,
+            line.text,
+            line.supplier,
+            line.wbs,
+            line.purchasing_document,
+            line.customer,
+            dict(line.dimensions),
+            dict(line.source_metadata),
+        )
+
+    for key, expected in expected_line_map.items():
+        actual, entry = actual_line_map[key]
+        if entry.entity_id != entity_id or not period_start <= entry.posting_date <= period_end:
+            return False
+        if line_facts(actual) != expected_line_facts(expected):
+            return False
+    return True
+
+
+def validate_gl_xlsx_replay(
+    file_bytes: bytes,
+    target_period_start: Any,
+    target_period_end: Any,
+    entity_id: int,
+    session: Session,
+    *,
+    import_batch_id: int,
+) -> dict[str, Any]:
+    """Validate an exact active GL replay without writing another canonical row."""
+    batch = session.get(ImportBatch, import_batch_id)
+    if batch is None or batch.entity_id != entity_id or batch.status != "ACTIVE":
+        raise ValueError("Exact duplicate XLSX import has no active canonical batch.")
+    if batch.source_family not in (None, SourceFamily.GL_UPLOAD.value):
+        raise ValueError("Exact duplicate XLSX import is not a canonical GL batch.")
+    period_start, period_end = _effective_coverage(target_period_start, target_period_end)
+    if (batch.coverage_start, batch.coverage_end) != (period_start, period_end):
+        raise ValueError("Exact duplicate XLSX import does not match the active batch period.")
+    parsed = _parse_fixed_gl_xlsx(file_bytes, period_start, period_end)
+    accounts = {
+        account.external_code: account
+        for account in session.scalars(select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)).all()
+        if account.external_code
+    }
+    if not _canonical_replay_complete(
+        session,
+        batch_id=import_batch_id,
+        entity_id=entity_id,
+        period_start=period_start,
+        period_end=period_end,
+        entries=parsed.entries,
+        accounts_by_code=accounts,
+    ):
+        raise ValueError("Exact duplicate XLSX import contains missing or altered canonical journal children.")
+    return dict(batch.validation_report or {})
+
+
 def normalize_gl_xlsx(
     file_bytes: bytes,
     target_period_start: Any,
@@ -683,7 +860,7 @@ def normalize_gl_xlsx(
         fail_import_batch(
             session,
             batch,
-            errors=[str(error)],
+            errors=[safe_xlsx_error(error)],
             validation_report=_failure_reconciliation_report(file_bytes, error),
         )
         raise
@@ -782,9 +959,8 @@ def normalize_gl_xlsx(
 def _uses_fixed_gl_profile(column_mapping: Optional[Dict[str, str]]) -> bool:
     if not column_mapping:
         return True
-    keys = {str(key).strip().lower() for key in column_mapping}
     values = {str(value).strip() for value in column_mapping.values()}
-    return bool(keys & _FIXED_MAPPING_KEYS) or set(GL_REQUIRED_HEADERS).issubset(values)
+    return set(GL_REQUIRED_HEADERS).issubset(values)
 
 
 def normalize_xlsx_confirm(
@@ -798,222 +974,19 @@ def normalize_xlsx_confirm(
     clear_only_period: bool = True,
     import_batch_id: Optional[int] = None,
 ) -> Entity:
-    """Dispatch fixed GL uploads while preserving the explicit legacy mapping path."""
+    """Dispatch only the fixed canonical GL profile."""
     entity = _entity(session, entity_id)
-    if _uses_fixed_gl_profile(column_mapping):
-        normalize_gl_xlsx(
-            file_bytes,
-            target_period_start,
-            target_period_end,
-            entity_id,
-            session,
-            import_batch_id=import_batch_id,
+    if not _uses_fixed_gl_profile(column_mapping):
+        raise ValueError(
+            "Only the fixed canonical GL profile is supported for XLSX ingestion. "
+            f"Use exact headers: {', '.join(GL_REQUIRED_HEADERS)}."
         )
-        return entity
-    return _normalize_legacy_trial_balance(
-        file_bytes=file_bytes,
-        column_mapping=column_mapping,
-        sign_convention=sign_convention,
-        target_period_start=target_period_start,
-        target_period_end=target_period_end,
-        entity_id=entity_id,
-        session=session,
-        clear_only_period=clear_only_period,
+    normalize_gl_xlsx(
+        file_bytes,
+        target_period_start,
+        target_period_end,
+        entity_id,
+        session,
         import_batch_id=import_batch_id,
     )
-
-
-def _normalize_legacy_trial_balance(
-    file_bytes: bytes,
-    column_mapping: Dict[str, str],
-    sign_convention: str,
-    target_period_start: str,
-    target_period_end: str,
-    entity_id: int,
-    session: Session,
-    clear_only_period: bool = True,
-    import_batch_id: Optional[int] = None,
-) -> Entity:
-    """Legacy explicit trial-balance behavior retained for existing callers."""
-    if sign_convention not in ("negative_is_credit", "positive_is_credit", "separate_dr_cr_columns"):
-        raise ValueError(
-            f"Invalid sign_convention '{sign_convention}'. "
-            "Must be one of 'negative_is_credit', 'positive_is_credit', or 'separate_dr_cr_columns'."
-        )
-
-    entity = _entity(session, entity_id)
-
-    try:
-        wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
-    except Exception as e:
-        raise ValueError(f"Failed to parse Excel file: {str(e)}")
-
-    ws = wb.active
-    if not ws:
-        raise ValueError("Workbook has no active sheet.")
-
-    rows_data = list(ws.iter_rows(values_only=True))
-    if not rows_data:
-        raise ValueError("Excel sheet is empty.")
-
-    header_row_idx = -1
-    col_index_map: Dict[str, int] = {}
-
-    scan_limit = min(15, len(rows_data))
-    for r_idx in range(scan_limit):
-        row_vals = rows_data[r_idx]
-        if not row_vals:
-            continue
-
-        clean_row = [str(v).strip() if v is not None else "" for v in row_vals]
-
-        temp_map: Dict[str, int] = {}
-        for field_name, expected_header in column_mapping.items():
-            exp_clean = str(expected_header).strip().lower()
-            for c_idx, cell_str in enumerate(clean_row):
-                if cell_str.lower() == exp_clean:
-                    temp_map[field_name] = c_idx
-                    break
-
-        if len(temp_map) > len(col_index_map):
-            col_index_map = temp_map
-            header_row_idx = r_idx
-
-    if header_row_idx == -1 or not col_index_map:
-        raise ValueError(
-            "Could not locate the specified header row matching the provided column_mapping in the first 15 rows."
-        )
-
-    if "ledger_name" not in col_index_map:
-        raise ValueError("Provided column_mapping must contain a mapping for 'ledger_name'.")
-    if "group_name" not in col_index_map:
-        raise ValueError("Provided column_mapping must contain a mapping for 'group_name'.")
-
-    p_start = date.fromisoformat(target_period_start) if isinstance(target_period_start, str) else target_period_start
-    p_end = date.fromisoformat(target_period_end) if isinstance(target_period_end, str) else target_period_end
-
-    fp = session.execute(select(FinancialPeriod).where(
-        FinancialPeriod.entity_id == entity.id,
-        FinancialPeriod.period_start == p_start,
-        FinancialPeriod.period_end == p_end,
-    ).order_by(FinancialPeriod.id.desc())).scalars().first()
-    if fp is None:
-        session.add(FinancialPeriod(
-            entity_id=entity.id,
-            period_start=p_start,
-            period_end=p_end,
-            source="xlsx_trial_balance",
-        ))
-
-    if import_batch_id is None:
-        session.execute(delete(TrialBalanceSnapshot).where(
-            TrialBalanceSnapshot.entity_id == entity.id,
-            TrialBalanceSnapshot.period_start == p_start,
-            TrialBalanceSnapshot.period_end == p_end,
-        ))
-
-    ledger_map: Dict[str, LedgerAccount] = {}
-    existing_ledgers = session.execute(
-        select(LedgerAccount).where(LedgerAccount.entity_id == entity.id)
-    ).scalars().all()
-    for l in existing_ledgers:
-        ledger_map[l.name] = l
-
-    row_offset = header_row_idx + 1
-    for r_idx in range(row_offset, len(rows_data)):
-        row_vals = rows_data[r_idx]
-        actual_row_num = r_idx + 1
-
-        if not row_vals or all(v is None or str(v).strip() == "" for v in row_vals):
-            continue
-
-        l_idx = col_index_map["ledger_name"]
-        raw_ledger = row_vals[l_idx] if l_idx < len(row_vals) else None
-        ledger_name = str(raw_ledger).strip() if raw_ledger is not None else ""
-
-        g_idx = col_index_map.get("group_name", l_idx)
-        raw_group = row_vals[g_idx] if g_idx < len(row_vals) else None
-        group_name = str(raw_group).strip() if raw_group is not None else ledger_name
-
-        name_upper = ledger_name.upper()
-        group_upper = group_name.upper()
-        if (
-            name_upper.endswith("TOTAL")
-            or name_upper.endswith("SUBTOTAL")
-            or name_upper == "GRAND TOTAL"
-            or group_upper.endswith("TOTAL")
-            or group_upper.endswith("SUBTOTAL")
-            or group_upper == "GRAND TOTAL"
-        ):
-            continue
-
-        if not ledger_name:
-            if not raw_group or str(raw_group).strip() == "":
-                continue
-            raise ValueError(f"Row {actual_row_num}: Ledger account name cannot be blank or empty.")
-
-        try:
-            normal_bal = get_normal_balance(group_name)
-        except UnrecognizedAccountGroupError as err:
-            raise ValueError(f"Row {actual_row_num}: {str(err)}")
-
-        def parse_decimal_field(field_key: str) -> Decimal:
-            if field_key not in col_index_map:
-                return Decimal("0.00")
-            col_idx = col_index_map[field_key]
-            val = row_vals[col_idx] if col_idx < len(row_vals) else None
-            if val is None or str(val).strip() == "":
-                return Decimal("0.00")
-
-            clean_str = str(val).replace(",", "").strip()
-            try:
-                return Decimal(clean_str)
-            except (InvalidOperation, TypeError):
-                raise ValueError(
-                    f"Row {actual_row_num}: Non-numeric balance value '{val}' for field '{field_key}' in ledger '{ledger_name}'."
-                )
-
-        if sign_convention == "separate_dr_cr_columns":
-            op_dr = parse_decimal_field("opening_debit")
-            op_cr = parse_decimal_field("opening_credit")
-            op_bal = op_dr - op_cr
-
-            cl_dr = parse_decimal_field("closing_debit")
-            cl_cr = parse_decimal_field("closing_credit")
-            cl_bal = cl_dr - cl_cr
-        elif sign_convention == "positive_is_credit":
-            raw_op = parse_decimal_field("opening_balance")
-            raw_cl = parse_decimal_field("closing_balance")
-            op_bal = -raw_op
-            cl_bal = -raw_cl
-        else:
-            op_bal = parse_decimal_field("opening_balance")
-            cl_bal = parse_decimal_field("closing_balance")
-
-        if ledger_name not in ledger_map:
-            l_account = LedgerAccount(
-                entity_id=entity.id,
-                name=ledger_name,
-                group_name=group_name,
-                normal_balance=normal_bal,
-            )
-            session.add(l_account)
-            session.flush()
-            ledger_map[ledger_name] = l_account
-        else:
-            l_account = ledger_map[ledger_name]
-
-        session.add(TrialBalanceSnapshot(
-            import_batch_id=import_batch_id,
-            entity_id=entity.id,
-            ledger_account_id=l_account.id,
-            period_start=p_start,
-            period_end=p_end,
-            opening_balance=op_bal,
-            total_debits=Decimal("0.00"),
-            total_credits=Decimal("0.00"),
-            closing_balance=cl_bal,
-        ))
-
-    session.flush()
     return entity

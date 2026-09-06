@@ -12,9 +12,11 @@ import openpyxl
 from app.main import app
 from app.db.models import (
     BalanceCheckpoint,
+    FinancialPeriod,
     ImportBatch,
     JournalEntry,
     JournalLine,
+    LedgerAccount,
     ScrutinyRun,
     Transaction,
     TrialBalanceSnapshot,
@@ -362,7 +364,10 @@ def test_duplicate_tally_upload_of_failed_batch_is_rejected_without_new_rows():
     )
 
     assert duplicate.status_code == 400
-    assert "no active import" in duplicate.json()["detail"]
+    detail = duplicate.json()["detail"]
+    assert detail["failed_batch_status"] == "FAILED"
+    assert detail["validation_report"]["errors"]
+    assert detail["active_batch_ids"] == []
 
 
 def test_api_scrutiny_with_violations():
@@ -611,11 +616,10 @@ def test_api_entity_delete():
     assert not any(e["id"] == entity_id for e in list_res_after.json())
 
 
-def test_api_preserve_notes_multiple_exceptions_for_same_account(monkeypatch):
+def test_api_rejects_legacy_trial_balance_mapping_before_scrutiny():
     headers = get_auth_headers()
 
-    # Create entity
-    res = client.post("/entities", json={"name": "Preserve Test Inc", "materiality_threshold": "0.0"}, headers=headers)
+    res = client.post("/entities", json={"name": "Legacy Mapping Entity", "materiality_threshold": "0.0"}, headers=headers)
     assert res.status_code == 201
     entity_id = res.json()["id"]
 
@@ -647,67 +651,129 @@ def test_api_preserve_notes_multiple_exceptions_for_same_account(monkeypatch):
         files={"file": ("dummy.xlsx", buf, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
         headers=headers
     )
-    assert upload_res.status_code == 200
+    assert upload_res.status_code == 409
+    detail = upload_res.json()["detail"]
+    assert detail["message"] == "Only the fixed canonical GL profile is supported for XLSX ingestion."
+    assert detail["readiness"] == "INVALID"
+    assert detail["errors"]
+    assert "fixed canonical GL" in detail["errors"][0]
 
-    from app.db.models import AuditException
-
-    def mock_run_scrutiny(entity, accounts, snapshots, period_start, period_end, rule_pack=None):
-        del snapshots, period_start, period_end, rule_pack
-        cash_acc = next(a for a in accounts if a.name == "Cash")
-        return [
-            AuditException(
-                entity_id=entity.id,
-                rule_name="rule_a",
-                ledger_account_id=cash_acc.id,
-                severity="error",
-                message="First exception message"
-            ),
-            AuditException(
-                entity_id=entity.id,
-                rule_name="rule_a",
-                ledger_account_id=cash_acc.id,
-                severity="error",
-                message="Second exception message"
-            )
-        ]
-
-    monkeypatch.setattr("app.routers.scrutiny.run_scrutiny", mock_run_scrutiny)
-
-    # Trigger scrutiny run
-    run_res = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
-    assert run_res.status_code == 200
-    assert run_res.json()["exceptions_count"] == 2
-
-    # Get exceptions list
-    list_res = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"}, headers=headers)
-    exceptions = list_res.json()
-    assert len(exceptions) == 2
-
-    exc_1 = next(e for e in exceptions if e["message"] == "First exception message")
-
-    # Update exception 1 to CLEARED with notes
-    patch_res = client.patch(
-        f"/entities/{entity_id}/exceptions/{exc_1['id']}",
-        json={"status": "CLEARED", "auditor_notes": "Notes for first exception"},
-        headers=headers
+    scrutiny = client.post(
+        f"/entities/{entity_id}/scrutiny-run",
+        params={"period_start": "2025-04-01", "period_end": "2026-03-31"},
+        headers=headers,
     )
-    assert patch_res.status_code == 200
+    assert scrutiny.status_code == 409
+    assert scrutiny.json()["detail"]["readiness"] == "PARTIAL"
 
-    # Re-run scrutiny run to verify status preservation
-    run_res_2 = client.post(f"/entities/{entity_id}/scrutiny-run?period_start=2025-04-01&period_end=2026-03-31", headers=headers)
-    assert run_res_2.status_code == 200
 
-    # List exceptions again and verify exception 1 is CLEARED (with notes), and exception 2 is still PENDING
-    list_res_2 = client.get(f"/entities/{entity_id}/exceptions", params={"period_start": "2025-04-01", "period_end": "2026-03-31"}, headers=headers)
-    exceptions_2 = list_res_2.json()
+def test_scrutiny_rejects_legacy_snapshot_only_active_batch():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities", json={"name": "Legacy Snapshot Entity", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    with TestingSessionLocal() as session:
+        period = FinancialPeriod(
+            entity_id=entity["id"],
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            source="xlsx_trial_balance",
+        )
+        account = LedgerAccount(entity_id=entity["id"], name="Legacy Cash")
+        session.add_all([period, account])
+        session.flush()
+        batch = ImportBatch(
+            entity_id=entity["id"],
+            financial_period_id=period.id,
+            source="xlsx_trial_balance",
+            source_family="gl_upload",
+            original_filename="legacy.xlsx",
+            content_sha256="legacy-snapshot-only",
+            parser_version="1",
+            status="ACTIVE",
+            raw_source_bytes=b"legacy",
+            coverage_start=date(2025, 4, 1),
+            coverage_end=date(2026, 3, 31),
+            source_metadata={},
+            validation_report={"parser": "xlsx_trial_balance", "coverage_complete": True},
+        )
+        session.add(batch)
+        session.flush()
+        batch_id = batch.id
+        session.add(TrialBalanceSnapshot(
+            import_batch_id=batch.id,
+            entity_id=entity["id"],
+            ledger_account_id=account.id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            opening_balance=Decimal("0"),
+            total_debits=Decimal("100"),
+            total_credits=Decimal("0"),
+            closing_balance=Decimal("100"),
+        ))
+        session.commit()
 
-    exc_1_after = next(e for e in exceptions_2 if e["message"] == "First exception message")
-    exc_2_after = next(e for e in exceptions_2 if e["message"] == "Second exception message")
+    response = client.post(
+        f"/entities/{entity['id']}/scrutiny-run",
+        params={"period_start": "2025-04-01", "period_end": "2026-03-31"},
+        headers=headers,
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["readiness"] == "INVALID"
+    assert "legacy trial-balance snapshots" in " ".join(detail["errors"])
+    assert detail["active_batch_ids"] == [batch_id]
 
-    assert exc_1_after["status"] == "CLEARED"
-    assert exc_1_after["auditor_notes"] == "Notes for first exception"
-    assert exc_2_after["status"] == "PENDING"
-    assert exc_2_after["auditor_notes"] is None
+
+@pytest.mark.parametrize("mutation", ["missing", "altered"])
+def test_fixed_gl_duplicate_replay_validates_canonical_children(mutation):
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities", json={"name": f"GL Replay {mutation}", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    contents = _gl_bytes()
+    first = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={"column_mapping": "{}", "target_period_start": "2025-04-01", "target_period_end": "2026-03-31"},
+        files={"file": ("replay.xlsx", io.BytesIO(contents), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    batch_id = first.json()["import_batch_id"]
+    valid_duplicate = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={"column_mapping": "{}", "target_period_start": "2025-04-01", "target_period_end": "2026-03-31"},
+        files={"file": ("replay.xlsx", io.BytesIO(contents), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert valid_duplicate.status_code == 200, valid_duplicate.text
+    assert valid_duplicate.json()["import_batch_id"] == batch_id
+    assert valid_duplicate.json()["dataset_fingerprint"] == first.json()["dataset_fingerprint"]
+
+    with TestingSessionLocal() as session:
+        line = session.scalars(
+            select(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
+        ).first()
+        assert line is not None
+        if mutation == "missing":
+            session.delete(line)
+        else:
+            line.amount = Decimal("999.00")
+        session.commit()
+
+    invalid_duplicate = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={"column_mapping": "{}", "target_period_start": "2025-04-01", "target_period_end": "2026-03-31"},
+        files={"file": ("replay.xlsx", io.BytesIO(contents), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert invalid_duplicate.status_code == 409
+    detail = invalid_duplicate.json()["detail"]
+    assert detail["failed_batch_id"] == batch_id
+    assert detail["failed_batch_status"] == "ACTIVE"
+    assert detail["errors"]
+    assert detail["active_batch_ids"] == [batch_id]
+    assert detail["dataset_fingerprint"] == first.json()["dataset_fingerprint"]
 
 
 def test_tally_connector_response_is_complete_and_endpoint_metadata_is_safe(monkeypatch):
@@ -787,7 +853,28 @@ def test_tally_connector_failure_does_not_echo_endpoint_or_credentials(monkeypat
     assert "secret" not in response.text
     assert "private" not in response.text
     assert "hidden" not in response.text
-    assert "Tally" in response.json()["detail"]
+    assert "Tally" in response.json()["detail"]["message"]
+    assert response.json()["detail"]["failed_batch_id"] is None
+    assert response.json()["detail"]["active_batch_ids"] == []
+
+
+def test_malformed_tally_parse_failure_returns_safe_structured_detail():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities", json={"name": "Malformed Tally Entity", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    raw_xml = b"<ENVELOPE><BROKEN password='do-not-echo'>"
+    response = client.post(
+        f"/entities/{entity['id']}/upload",
+        files={"file": ("malformed.xml", raw_xml, "text/xml")},
+        headers=headers,
+    )
+    assert response.status_code == 400
+    assert raw_xml.decode() not in response.text
+    detail = response.json()["detail"]
+    assert detail["failed_batch_id"] is None
+    assert detail["validation_report"]["errors"]
+    assert detail["active_batch_ids"] == []
 
 
 def test_tally_and_gl_canonical_reports_have_matching_journal_totals():
@@ -832,6 +919,81 @@ def test_tally_and_gl_canonical_reports_have_matching_journal_totals():
     assert tally_response.json()["readiness"] == "READY"
     assert gl_response.json()["readiness"] == "PARTIAL"
 
+    with TestingSessionLocal() as session:
+        tally_entries = session.scalars(
+            select(JournalEntry).where(JournalEntry.import_batch_id == tally_response.json()["import_batch_id"])
+        ).all()
+        gl_entries = session.scalars(
+            select(JournalEntry).where(JournalEntry.import_batch_id == gl_response.json()["import_batch_id"])
+        ).all()
+        assert [entry.source_document_id for entry in tally_entries] == ["PARITY-1"]
+        assert [entry.source_document_id for entry in gl_entries] == ["GL-1"]
+        assert all(entry.entity_id == tally_entity["id"] for entry in tally_entries)
+        assert all(entry.entity_id == gl_entity["id"] for entry in gl_entries)
+
+        def child_facts(entries):
+            lines = [line for entry in entries for line in entry.lines]
+            return sorted(
+                (
+                    line.source_row_number,
+                    line.ledger_account.external_code or line.ledger_account.name,
+                    line.ledger_account.entity_id,
+                    Decimal(str(line.amount)),
+                    line.side,
+                )
+                for line in lines
+            )
+
+        tally_facts = child_facts(tally_entries)
+        gl_facts = child_facts(gl_entries)
+        assert len(tally_facts) == len(gl_facts) == 2
+        assert [(fact[3], fact[4]) for fact in tally_facts] == [
+            (Decimal("100.00"), "debit"),
+            (Decimal("-100.00"), "credit"),
+        ]
+        assert [(fact[3], fact[4]) for fact in gl_facts] == [
+            (Decimal("100.00"), "debit"),
+            (Decimal("-100.00"), "credit"),
+        ]
+        assert {fact[1] for fact in tally_facts} == {"1000", "2000"}
+        assert {fact[1] for fact in gl_facts} == {"1000", "2000"}
+        assert all(fact[2] == tally_entity["id"] for fact in tally_facts)
+        assert all(fact[2] == gl_entity["id"] for fact in gl_facts)
+        assert {fact[0] for fact in tally_facts} == {1, 2}
+        assert {fact[0] for fact in gl_facts} == {2, 3}
+
+
+def test_first_failed_tally_batch_is_retained_without_exposing_an_orphan_period():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities", json={"name": "Initial Tally Failure Entity", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    valid = _strict_fixture_bytes("sample_tally_export.xml")
+    malformed = valid.replace(b"<LEDGERNAME>Sales Account</LEDGERNAME>", b"<LEDGERNAME>Unknown Account</LEDGERNAME>", 1)
+    response = client.post(
+        f"/entities/{entity['id']}/upload",
+        params={"clear_only_period": "true", "target_period_start": "2025-04-01", "target_period_end": "2026-03-31"},
+        files={"file": ("malformed.xml", malformed, "text/xml")},
+        headers=headers,
+    )
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail["failed_batch_id"] is not None
+    assert detail["failed_batch_status"] == "FAILED"
+    assert detail["validation_report"]["errors"]
+    assert detail["readiness"] in {"INVALID", "PARTIAL"}
+    assert detail["active_batch_ids"] == []
+    assert detail["source_batch_ids"] == []
+    with TestingSessionLocal() as session:
+        batch = session.get(ImportBatch, detail["failed_batch_id"])
+        assert batch is not None
+        assert batch.status == "FAILED"
+        assert batch.raw_source_bytes == malformed
+        assert session.scalar(select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == batch.id)) == 0
+    periods = client.get(f"/entities/{entity['id']}/periods", headers=headers)
+    assert periods.status_code == 200
+    assert periods.json() == []
+
 
 def test_malformed_tally_replacement_retains_previous_active_dataset():
     headers = get_auth_headers()
@@ -855,6 +1017,11 @@ def test_malformed_tally_replacement_retains_previous_active_dataset():
         headers=headers,
     )
     assert replacement.status_code == 400
+    replacement_detail = replacement.json()["detail"]
+    assert replacement_detail["failed_batch_status"] == "FAILED"
+    assert replacement_detail["validation_report"]["errors"]
+    assert replacement_detail["active_batch_ids"] == [first_body["import_batch_id"]]
+    assert replacement_detail["dataset_fingerprint"] == first_body["dataset_fingerprint"]
 
     with TestingSessionLocal() as session:
         batches = session.scalars(
@@ -867,6 +1034,39 @@ def test_malformed_tally_replacement_retains_previous_active_dataset():
         assert batches[1].validation_report["readiness"] == "INVALID"
         assert batches[1].validation_report["errors"]
         assert session.scalar(select(func.count()).select_from(JournalLine)) == 4
+
+
+def test_fixed_gl_api_persists_complete_golden_file_rows_and_documents():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities", json={"name": "Complete GL Fixture Entity", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    contents = (Path(__file__).parent / "fixtures" / "golden_gl.xlsx").read_bytes()
+    response = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={"column_mapping": "{}", "target_period_start": "2025-04-01", "target_period_end": "2026-03-31"},
+        files={"file": ("golden_gl.xlsx", io.BytesIO(contents), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["validation_report"]["accepted_rows"] == 6
+    assert body["validation_report"]["document_count"] == 3
+    with TestingSessionLocal() as session:
+        entries = session.scalars(
+            select(JournalEntry).where(JournalEntry.import_batch_id == body["import_batch_id"])
+        ).all()
+        lines = session.scalars(
+            select(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == body["import_batch_id"])
+        ).all()
+        assert len(entries) == 3
+        assert len(lines) == 6
+        assert {entry.source_document_id for entry in entries} == {"DOC-1001", "DOC-1002", "DOC-1003"}
+        assert {line.source_row_number for line in lines} == set(range(2, 8))
+        assert {line.ledger_account.external_code for line in lines} == {
+            "110000", "120000", "210000", "400000", "500000"
+        }
+        assert all(line.journal_entry.entity_id == entity["id"] for line in lines)
 
 
 def test_scrutiny_reports_readiness_block_and_persists_ready_dataset_lineage():
