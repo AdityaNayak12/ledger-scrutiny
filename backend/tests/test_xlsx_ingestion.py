@@ -676,6 +676,42 @@ def test_xlsx_fail_loud_validations_unbalanced_document(auth_headers, test_entit
     assert detail["validation_report"]["errors"]
 
 
+def test_xlsx_api_does_not_reflect_sensitive_document_number_in_errors(auth_headers, test_entity):
+    document_number = "https://user:pass@example.test/path?query=opaque#fragment"
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [
+            [document_number, "1000", date(2025, 4, 1), 100],
+            [document_number, "2000", date(2025, 4, 1), -99],
+        ],
+    )
+
+    response = client.post(
+        f"/entities/{test_entity}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={
+            "file": (
+                "sensitive-document.xlsx",
+                io.BytesIO(contents),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    for value in (document_number, "https://", "user:pass", "?query=opaque", "#fragment"):
+        assert value not in str(detail)
+        assert value not in str(detail["validation_report"])
+        assert value not in str(detail["errors"])
+    assert "balance" in detail["message"].lower()
+
+
 def test_xlsx_fixed_profile_preserves_signed_rows(auth_headers, test_entity):
     wb = openpyxl.Workbook()
     ws = wb.active

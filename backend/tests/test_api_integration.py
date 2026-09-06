@@ -434,6 +434,58 @@ def test_tally_duplicate_replay_with_no_children_rejects_without_repopulate():
         ) == 0
 
 
+def test_tally_duplicate_replay_rejects_foreign_account_child_without_mutating_active_data():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities", json={"name": "Tally Foreign Child Replay", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    foreign_entity = client.post(
+        "/entities", json={"name": "Tally Foreign Owner", "materiality_threshold": "0.00"}, headers=headers
+    ).json()
+    contents = _strict_fixture_bytes("sample_tally_export.xml")
+    first = client.post(
+        f"/entities/{entity['id']}/upload",
+        files={"file": ("sample_tally_export.xml", contents, "text/xml")},
+        headers=headers,
+    )
+    assert first.status_code == 200, first.text
+    batch_id = first.json()["import_batch_id"]
+
+    with TestingSessionLocal() as session:
+        foreign_account = LedgerAccount(entity_id=foreign_entity["id"], name="Foreign Replay Account")
+        session.add(foreign_account)
+        session.flush()
+        line = session.scalars(
+            select(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
+        ).first()
+        assert line is not None
+        line.ledger_account_id = foreign_account.id
+        session.commit()
+        foreign_account_id = foreign_account.id
+
+    duplicate = client.post(
+        f"/entities/{entity['id']}/upload",
+        files={"file": ("sample_tally_export.xml", contents, "text/xml")},
+        headers=headers,
+    )
+
+    assert duplicate.status_code == 400, duplicate.text
+    detail = duplicate.json()["detail"]
+    assert detail["failed_batch_id"] == batch_id
+    assert detail["failed_batch_status"] == "ACTIVE"
+    assert detail["status"] == "ACTIVE"
+    assert detail["active_batch_ids"] == [batch_id]
+    assert detail["validation_report"]["errors"]
+    with TestingSessionLocal() as session:
+        assert session.get(ImportBatch, batch_id).status == "ACTIVE"
+        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity["id"])) == 1
+        persisted_line = session.scalars(
+            select(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
+        ).first()
+        assert persisted_line is not None
+        assert persisted_line.ledger_account_id == foreign_account_id
+
+
 def test_duplicate_tally_upload_of_failed_batch_is_rejected_without_new_rows():
     registration = client.post("/auth/register", json={
         "organization_name": "Failed Duplicate Firm",

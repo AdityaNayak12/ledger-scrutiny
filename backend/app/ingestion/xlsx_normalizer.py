@@ -634,10 +634,15 @@ def safe_xlsx_error(error: BaseException) -> str:
         if "numeric capacity" in row_detail:
             return f"{row_label}: amount exceeds canonical numeric capacity."
         return f"{row_label}: invalid canonical row data."
+    if detail.startswith("Document "):
+        if "does not balance" in detail:
+            return "XLSX import failed validation: document is unbalanced."
+        if "inconsistent Posting Date" in detail:
+            return "XLSX import failed validation: document has inconsistent posting dates."
+        return "XLSX import failed validation: invalid document data."
     if detail.startswith((
         "Could not locate the exact required GL headers",
         "Workbook has no active sheet",
-        "Document ",
         "Declared coverage ",
         "Only the fixed canonical GL profile is supported",
         "Exact duplicate XLSX import",

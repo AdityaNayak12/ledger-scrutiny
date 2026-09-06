@@ -320,6 +320,51 @@ def _ingestion_response(
     )
 
 
+def _retain_tally_parse_failure(
+    db: Session,
+    *,
+    entity: Entity,
+    current_user: User,
+    contents: bytes,
+    period_start: date,
+    period_end: date,
+    original_filename: str,
+    error: Exception,
+) -> ImportBatch:
+    """Retain a safe raw Tally parse failure without changing active data."""
+    existing = _existing_import_batch(db, entity.id, contents)
+    if existing is not None:
+        return existing
+    safe_error = _safe_tally_error(error)
+    report = {
+        "parser": "tally_xml",
+        "source_family": SourceFamily.TALLY.value,
+        "parse_failure": True,
+        "errors": [safe_error],
+        "readiness": "INVALID",
+    }
+    batch = create_import_batch(
+        db,
+        entity_id=entity.id,
+        period_start=period_start,
+        period_end=period_end,
+        source="tally_xml",
+        source_family=SourceFamily.TALLY.value,
+        coverage_start=period_start,
+        coverage_end=period_end,
+        original_filename=original_filename,
+        contents=contents,
+        uploaded_by_user_id=current_user.id,
+        source_metadata={"parser": "tally_xml", "parse_failure": True},
+        validation_report=report,
+        activate=False,
+    )
+    if not is_duplicate_import_batch(batch):
+        fail_import_batch(db, batch, errors=[safe_error], validation_report=report)
+        db.commit()
+    return batch
+
+
 def _ingest_tally_batch(
     db: Session,
     *,
@@ -781,10 +826,28 @@ async def upload_tally_export(
 
     period_start = target_period_start
     period_end = target_period_end
+    contents: bytes | None = None
     try:
         contents = await file.read()
         parsed_data = parse_tally_xml(contents)
     except Exception as e:
+        failed_batch = None
+        if (
+            contents is not None
+            and target_period_start is not None
+            and target_period_end is not None
+            and target_period_start <= target_period_end
+        ):
+            failed_batch = _retain_tally_parse_failure(
+                db,
+                entity=entity,
+                current_user=current_user,
+                contents=contents,
+                period_start=target_period_start,
+                period_end=target_period_end,
+                original_filename=file.filename,
+                error=e,
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=_ingestion_failure_detail(
@@ -793,6 +856,7 @@ async def upload_tally_export(
                 source_family=SourceFamily.TALLY.value,
                 message=_safe_tally_error(e),
                 period_start=target_period_start,
+                batch=failed_batch,
                 errors=[_safe_tally_error(e)],
             ),
         )

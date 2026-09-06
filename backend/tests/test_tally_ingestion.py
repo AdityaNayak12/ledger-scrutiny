@@ -687,6 +687,96 @@ def test_tally_xml_upload_rejects_missing_closing_without_legacy_synthesis():
         assert session.scalar(select(func.count()).select_from(LedgerAccount).where(LedgerAccount.entity_id == entity_id)) == 0
 
 
+def test_malformed_tally_upload_with_target_period_retains_safe_failed_batch_and_preserves_active_data():
+    headers, entity_id = _create_upload_entity("Malformed Retention Corp")
+    valid_contents = b"""<ENVELOPE><COMPANY><RENAME>Malformed Retention Corp</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
+      <LEDGER NAME="Cash"><PARENT>Cash-in-hand</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>10</CLOSINGBALANCE></LEDGER>
+      <LEDGER NAME="Offset"><PARENT>Capital Account</PARENT><OPENINGBALANCE>0</OPENINGBALANCE><CLOSINGBALANCE>-10</CLOSINGBALANCE></LEDGER>
+      <VOUCHER GUID="VALID-UPLOAD" VCHTYPE="Journal"><DATE>20250401</DATE>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Cash</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>10</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Offset</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>10</AMOUNT></ALLLEDGERENTRIES.LIST>
+      </VOUCHER></ENVELOPE>"""
+    active = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("valid.xml", valid_contents, "text/xml")},
+        headers=headers,
+    )
+    assert active.status_code == 200, active.text
+    active_batch_id = active.json()["import_batch_id"]
+
+    sensitive_marker = b"https://user:pass@example.test/path?query=opaque#fragment"
+    malformed = b"<ENVELOPE><COMPANY><NOTE>" + sensitive_marker
+    params = {
+        "target_period_start": "2025-04-01",
+        "target_period_end": "2026-03-31",
+    }
+    first = client.post(
+        f"/entities/{entity_id}/upload",
+        params=params,
+        files={"file": ("malformed.xml", malformed, "text/xml")},
+        headers=headers,
+    )
+
+    assert first.status_code == 400, first.text
+    first_detail = first.json()["detail"]
+    assert first_detail["failed_batch_id"] is not None
+    assert first_detail["failed_batch_status"] == "FAILED"
+    assert first_detail["active_batch_ids"] == [active_batch_id]
+    assert first_detail["source_batch_ids"] == [active_batch_id]
+    assert first_detail["validation_report"]["parser"] == "tally_xml"
+    assert first_detail["validation_report"]["parse_failure"] is True
+    assert first_detail["validation_report"]["errors"]
+    for value in (sensitive_marker.decode(), "https://", "user:pass", "?query=opaque", "#fragment", "<ENVELOPE>"):
+        assert value not in str(first_detail)
+    assert "malformed.xml" not in str(first_detail)
+
+    with TestingSessionLocal() as session:
+        failed = session.get(ImportBatch, first_detail["failed_batch_id"])
+        assert failed is not None
+        assert failed.status == "FAILED"
+        assert failed.raw_source_bytes == malformed
+        assert failed.coverage_start == date(2025, 4, 1)
+        assert failed.coverage_end == date(2026, 3, 31)
+        assert session.get(ImportBatch, active_batch_id).status == "ACTIVE"
+        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)) == 2
+
+    duplicate = client.post(
+        f"/entities/{entity_id}/upload",
+        params=params,
+        files={"file": ("malformed-again.xml", malformed, "text/xml")},
+        headers=headers,
+    )
+
+    assert duplicate.status_code == 400, duplicate.text
+    duplicate_detail = duplicate.json()["detail"]
+    assert duplicate_detail["failed_batch_id"] == first_detail["failed_batch_id"]
+    assert duplicate_detail["failed_batch_status"] == "FAILED"
+    assert duplicate_detail["active_batch_ids"] == [active_batch_id]
+    with TestingSessionLocal() as session:
+        assert session.get(ImportBatch, active_batch_id).status == "ACTIVE"
+        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)) == 2
+
+
+def test_malformed_tally_upload_without_period_returns_unassociated_safe_failure():
+    headers, entity_id = _create_upload_entity("Unassociated Malformed Corp")
+    malformed = b"<ENVELOPE><COMPANY>"
+
+    response = client.post(
+        f"/entities/{entity_id}/upload",
+        files={"file": ("malformed.xml", malformed, "text/xml")},
+        headers=headers,
+    )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert detail["failed_batch_id"] is None
+    assert detail["failed_batch_status"] is None
+    assert detail["active_batch_ids"] == []
+    assert "<ENVELOPE>" not in str(detail)
+    with TestingSessionLocal() as session:
+        assert session.scalar(select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity_id)) == 0
+
+
 def test_tally_canonical_import_rejects_source_period_mismatch_before_writes():
     parsed = {
         "entity": {"name": "Period Corp", "financial_year_start": date(2024, 4, 1), "financial_year_end": date(2025, 3, 31)},
