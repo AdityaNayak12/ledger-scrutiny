@@ -11,6 +11,7 @@ import openpyxl
 
 from app.main import app
 from app.db.models import (
+    AuditException,
     BalanceCheckpoint,
     FinancialPeriod,
     ImportBatch,
@@ -221,6 +222,13 @@ def test_manufacturing_pitch_files_produce_five_expected_findings(monkeypatch):
     )
     assert run.status_code == 200, run.text
     assert run.json()["exceptions_count"] == 8
+    with TestingSessionLocal() as session:
+        stored_run = session.get(ScrutinyRun, run.json()["scrutiny_run_id"])
+        assert stored_run.rule_set_version == "core-v1+compliance-v1+manufacturing-v1"
+        stored_findings = session.scalars(select(AuditException).where(
+            AuditException.scrutiny_run_id == stored_run.id)).all()
+        assert all(finding.rule_version == stored_run.rule_set_version
+                   for finding in stored_findings)
 
     findings = client.get(
         f"/entities/{entity['id']}/exceptions",
@@ -239,6 +247,66 @@ def test_manufacturing_pitch_files_produce_five_expected_findings(monkeypatch):
     assert "10.2%" in margin["message"]
     inventory = next(finding for finding in findings if finding["rule_name"] == "manufacturing_low_inventory_movement")
     assert "1% of COGS" in inventory["message"]
+
+
+def test_compliance_versions_and_review_survive_rerun():
+    headers = get_auth_headers()
+    created = client.post("/entities", headers=headers, json={
+        "name": "Compliance history", "materiality_threshold": "100.00",
+        "rule_pack": "compliance_v1",
+    })
+    assert created.status_code == 201, created.text
+    entity_id = created.json()["id"]
+    fixture = (Path(__file__).parents[2] / "sample_data" /
+               "pitch_manufacturing_demo" / "meridian_fy2025_26.xml")
+    contents = _canonical_tally_xml(fixture.read_bytes(), add_voucher_if_missing=True)
+    upload = client.post(f"/entities/{entity_id}/upload", headers=headers,
+                         files={"file": ("ready.xml",
+                                contents,
+                                "text/xml")})
+    assert upload.status_code == 200, upload.text
+    params = {"period_start": "2025-04-01", "period_end": "2026-03-31"}
+    run_ids = []
+    fingerprint = None
+    for attempt in range(2):
+        response = client.post(f"/entities/{entity_id}/scrutiny-run",
+                               params=params, headers=headers)
+        assert response.status_code == 200, response.text
+        run_id = response.json()["scrutiny_run_id"]
+        run_ids.append(run_id)
+        with TestingSessionLocal() as session:
+            run = session.get(ScrutinyRun, run_id)
+            assert run.rule_set_version == "core-v1+compliance-v1"
+            assert run.dataset_fingerprint == upload.json()["dataset_fingerprint"]
+            assert run.source_batch_ids == upload.json()["source_batch_ids"]
+            rows = session.scalars(select(AuditException).where(
+                AuditException.scrutiny_run_id == run_id)).all()
+            assert rows
+            assert all(row.rule_version == run.rule_set_version for row in rows)
+            tds_rows = [row for row in rows if row.rule_name == "tds_liability_check"]
+            assert len(tds_rows) == 1
+            finding = tds_rows[0]
+            assert finding.fingerprint
+            finding_id = finding.id
+            if attempt == 0:
+                fingerprint = finding.fingerprint
+            else:
+                assert finding.fingerprint == fingerprint
+                assert finding.status == "CLEARED"
+                assert finding.auditor_notes == "TDS evidence reviewed."
+        if attempt == 0:
+            reviewed = client.patch(f"/entities/{entity_id}/exceptions/{finding_id}", headers=headers,
+                                    json={"status": "CLEARED",
+                                          "auditor_notes": "TDS evidence reviewed."})
+            assert reviewed.status_code == 200, reviewed.text
+    assert run_ids[0] != run_ids[1]
+    with TestingSessionLocal() as session:
+        assert session.get(ScrutinyRun, run_ids[0]) is not None
+        previous = session.scalars(select(AuditException).where(
+            AuditException.scrutiny_run_id == run_ids[0],
+            AuditException.rule_name == "tds_liability_check")).one()
+        assert previous.status == "CLEARED"
+        assert previous.auditor_notes == "TDS evidence reviewed."
 
 
 def test_api_entities_lifecycle_flow():
