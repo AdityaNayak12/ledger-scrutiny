@@ -318,6 +318,26 @@ def test_incomplete_period_coverage_remains_partial_after_complete_baseline(sess
     assert result["readiness"] == "PARTIAL"
 
 
+def test_omitted_period_coverage_remains_partial_after_complete_baseline(session):
+    db, entity_id = session
+    account_ids = _account_ids(db, entity_id)
+    _baseline(db, entity_id, account_ids)
+    annual = _active_batch(db, entity_id, FY_START, FY_END, b"omitted-period")
+    annual.validation_report = build_reconciliation_report(())
+    annual.validation_report.update({
+        "coverage_start": FY_START.isoformat(),
+        "coverage_end": FY_END.isoformat(),
+    })
+    _entry(db, annual, date(2025, 4, 10), "OMITTED-1", account_ids, Decimal("25.00"))
+    db.commit()
+
+    result = resolve_active_dataset(db, entity_id, financial_year=2025)
+
+    assert "coverage_complete" not in annual.validation_report
+    assert result["baseline_coverage"]["complete"] is True
+    assert result["readiness"] == "PARTIAL"
+
+
 def test_baseline_prefers_target_date_rows_over_newer_wrong_date_checkpoint(session):
     db, entity_id = session
     account_ids = _account_ids(db, entity_id)

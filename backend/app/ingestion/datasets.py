@@ -202,7 +202,7 @@ def _batch_report_state(
                 and batch_end is not None
                 and report.get("coverage_start") == batch_start.isoformat()
                 and report.get("coverage_end") == batch_end.isoformat()
-                and report.get("coverage_complete") is not False
+                and report.get("coverage_complete") is True
             )
             if not baseline_only:
                 partial = True
