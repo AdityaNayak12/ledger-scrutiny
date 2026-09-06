@@ -73,7 +73,7 @@ Run existing `backend/tests/test_manufacturing_rules.py` unchanged. Read models 
 
 The explicit argument remains authoritative; do not silently change omission to read `entity.rule_pack`.
 
-- [ ] Add a parameterized engine contract test with imports for `pytest` and `rule_set_version`:
+- [x] Add a parameterized engine contract test with imports for `pytest` and `rule_set_version`:
 
 ```python
 @pytest.mark.parametrize("pack, version", [
@@ -104,7 +104,7 @@ def test_pack_contract(pack, version):
     assert list(map(signature, findings)) == list(map(signature, repeated))
 ```
 
-- [ ] Create `test_compliance_rules.py` with the imports, dates, and TDS characterization test below:
+- [x] Create `test_compliance_rules.py` with the imports, dates, and TDS characterization test below:
 
 ```python
 from datetime import date
@@ -153,9 +153,9 @@ def test_compliance_preserves_tds_evidence(creditors, tds, threshold, expected):
         )
 ```
 
-- [ ] Run `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_compliance_rules.py tests/test_rules_engine.py` from `backend`; expect missing dispatcher and failed pack/version assertions.
-- [ ] Move the entire existing `tds_liability_check` definition from the engine into `compliance.py` unchanged, adding imports for `date`, `Decimal`, `List`, and the four model types `AuditException`, `Entity`, `LedgerAccount`, `TrialBalanceSnapshot`. Import it and `run_compliance_checks` into the engine. This creates one implementation with one-way module imports; do not have compliance import the engine.
-- [ ] Add this dispatcher:
+- [x] Run `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_compliance_rules.py tests/test_rules_engine.py` from `backend`; expect missing dispatcher and failed pack/version assertions.
+- [x] Move the entire existing `tds_liability_check` definition from the engine into `compliance.py` unchanged, adding imports for `date`, `Decimal`, `List`, and the four model types `AuditException`, `Entity`, `LedgerAccount`, `TrialBalanceSnapshot`. Import it and `run_compliance_checks` into the engine. This creates one implementation with one-way module imports; do not have compliance import the engine.
+- [x] Add this dispatcher:
 
 ```python
 def run_compliance_checks(
@@ -168,7 +168,7 @@ def run_compliance_checks(
     return tds_liability_check(entity, accounts, snapshots, period_start, period_end)
 ```
 
-- [ ] Replace `rule_set_version` with:
+- [x] Replace `rule_set_version` with:
 
 ```python
 def rule_set_version(rule_pack: str | None) -> str:
@@ -179,7 +179,7 @@ def rule_set_version(rule_pack: str | None) -> str:
     return CORE_RULE_SET_VERSION
 ```
 
-- [ ] Replace only the existing TDS summand in `run_scrutiny` with this conditional expression. Retain the other core checks, both manufacturing calls, and the final materiality filter:
+- [x] Replace only the existing TDS summand in `run_scrutiny` with this conditional expression. Retain the other core checks, both manufacturing calls, and the final materiality filter:
 
 ```python
 + (
@@ -189,7 +189,7 @@ def rule_set_version(rule_pack: str | None) -> str:
 )
 ```
 
-- [ ] Add this regression proving clean output and independence from GST data for every supported pack. No format is interpreted or validated:
+- [x] Add this regression proving clean output and independence from GST data for every supported pack. No format is interpreted or validated:
 
 ```python
 @pytest.mark.parametrize("pack", [None, "unknown", "compliance_v1", "manufacturing_v1"])
@@ -202,7 +202,7 @@ def test_clean_pack_does_not_depend_on_gst(pack, gstin):
     assert entity.gstin == gstin
 ```
 
-- [ ] Add a routing test, since output equality alone cannot prove the dispatcher is actually used. Add `from app.rules import engine` to `test_rules_engine.py`:
+- [x] Add a routing test, since output equality alone cannot prove the dispatcher is actually used. Add `from app.rules import engine` to `test_rules_engine.py`:
 
 ```python
 @pytest.mark.parametrize("pack, expected_calls", [
@@ -223,7 +223,7 @@ def test_compliance_dispatch_is_explicit(monkeypatch, pack, expected_calls):
         assert calls[0] == (entity, [], [], start, end)
 ```
 
-- [ ] Run focused tests including `tests/test_manufacturing_rules.py`, then the full backend suite. The current static-rules test must remain unchanged and pass. Record results, obtain fresh review, and commit `feat: add versioned compliance rule pack`.
+- [x] Run focused tests including `tests/test_manufacturing_rules.py`, then the full backend suite. The current static-rules test must remain unchanged and pass. Record results, obtain fresh review, and commit `feat: add versioned compliance rule pack`.
 
 **Acceptance:** Core fallback is preserved, TDS is reused once, compliance is included in manufacturing, warnings are deterministic, versions match the table, and existing manufacturing formulas are untouched.
 
@@ -233,7 +233,7 @@ def test_compliance_dispatch_is_explicit(monkeypatch, pack, expected_calls):
 
 **Interfaces:** Existing `POST /entities` request/response fields. `rule_pack="compliance_v1"` is accepted without a manufacturing-sector requirement. Unknown API pack values still return 400; engine fallback remains a separate compatibility behavior.
 
-- [ ] Add this test using the existing `client` and `get_auth_headers`:
+- [x] Add this test using the existing `client` and `get_auth_headers`:
 
 ```python
 @pytest.mark.parametrize("pack, sector, expected", [
@@ -253,14 +253,14 @@ def test_entity_rule_pack_contract(pack, sector, expected):
         assert response.json()["rule_pack"] == pack
 ```
 
-- [ ] Run `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_api_integration.py -k entity_rule_pack_contract` from `backend`; expect compliance creation to fail with 400.
-- [ ] Change the existing allowlist condition to:
+- [x] Run `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_api_integration.py -k entity_rule_pack_contract` from `backend`; expect compliance creation to fail with 400.
+- [x] Change the existing allowlist condition to:
 
 ```python
 if entity_in.rule_pack not in (None, "compliance_v1", "manufacturing_v1"):
 ```
 
-- [ ] Run the focused test and full backend suite; record results, obtain fresh review, and commit `feat: allow compliance pack on entities`.
+- [x] Run the focused test and full backend suite; record results, obtain fresh review, and commit `feat: allow compliance pack on entities`.
 
 **Acceptance:** Normal entity creation exposes the pack without weakening existing authentication or manufacturing validation. No new endpoint, schema, or UI is needed for this backend foundation.
 
@@ -366,7 +366,7 @@ with TestingSessionLocal() as session:
 - [x] Focused and full backend tests pass; frontend baseline outcomes are recorded.
 - [x] No dependency, schema, account alias, portal, or frontend expansion entered the diff.
 
-**Execution record (6 September 2026, Task 3):** Parent-provided phase baselines were 199 passed before Phase 1, 226 passed after Task 1, and 231 passed after Task 2; warnings remained the pre-existing deprecation warnings. The pre-edit focused selector returned exit 5 with `34 deselected, 3 warnings` because the new regression did not yet exist; this was test discovery, not a product failure. After the test-only changes:
+**Execution record (6 September 2026, Task 3):** Parent-provided phase baselines were 199 passed before Phase 1, 226 passed after Task 1, and 231 passed after Task 2; warnings remained the pre-existing deprecation warnings. The Task 2 focused command/result was `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_api_integration.py -k entity_rule_pack_contract` from `backend`: exit 0, `5 passed, 29 deselected, 3 warnings`. The pre-edit focused selector returned exit 5 with `34 deselected, 3 warnings` because the new regression did not yet exist; this was test discovery, not a product failure. The recorded plan change below is the Task 3 incremental diff. After the Task 3 test-only changes:
 
 - `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_api_integration.py -k compliance_versions_and_review`: exit 0, `1 passed, 34 deselected, 3 warnings`.
 - `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_api_integration.py -k 'compliance_versions_and_review or manufacturing_pitch or exception_review'`: exit 0, `3 passed, 32 deselected, 3 warnings`; manufacturing retained 8 findings and emitted no GST-related finding.

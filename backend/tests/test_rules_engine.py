@@ -5,7 +5,8 @@ import pytest
 
 from app.db.models import Entity, LedgerAccount, TrialBalanceSnapshot
 from app.rules import engine
-from app.rules.engine import rule_set_version, run_scrutiny
+from app.rules.compliance import tds_liability_check as compliance_tds_liability_check
+from app.rules.engine import rule_set_version, run_scrutiny, tds_liability_check
 
 
 def test_static_rules_use_explicit_period_dates():
@@ -26,6 +27,11 @@ def test_static_rules_use_explicit_period_dates():
 
     assert {exception.rule_name for exception in exceptions} == {"normal_balance_check", "trial_balance_balances", "negative_cash_balance", "suspense_account_nonzero", "tds_liability_check"}
     assert all(exception.period_start == period_start and exception.period_end == period_end for exception in exceptions)
+
+
+def test_engine_reexports_tds_liability_check():
+    assert tds_liability_check is engine.tds_liability_check
+    assert tds_liability_check is compliance_tds_liability_check
 
 
 @pytest.mark.parametrize("pack, version", [
