@@ -38,8 +38,17 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLElement | null>(null);
+  const isOpenRef = useRef(isOpen);
+  const modalGenerationRef = useRef(0);
+  const requestIdRef = useRef(0);
   const onCloseRef = useRef(onClose);
   const submittingRef = useRef(submitting);
+
+  if (isOpenRef.current !== isOpen) {
+    isOpenRef.current = isOpen;
+    modalGenerationRef.current += 1;
+    if (isOpen) submittingRef.current = false;
+  }
 
   useEffect(() => {
     onCloseRef.current = onClose;
@@ -56,6 +65,7 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
     setPeriodEnd(initialPeriodEnd || "2027-03-31");
     setError(null);
     setResult(null);
+    setSubmitting(false);
   }, [isOpen, initialPeriodStart, initialPeriodEnd]);
 
   useEffect(() => {
@@ -94,14 +104,24 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
 
   if (!isOpen) return null;
 
+  const closeModal = () => {
+    if (submittingRef.current) return;
+    onCloseRef.current();
+  };
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     if (!file || entityId === null) return;
+    const requestId = ++requestIdRef.current;
+    const modalGeneration = modalGenerationRef.current;
     setSubmitting(true);
+    submittingRef.current = true;
     setError(null);
     setResult(null);
+    const isCurrentRequest = () => requestIdRef.current === requestId && modalGenerationRef.current === modalGeneration && isOpenRef.current;
     if (isMock) {
       setTimeout(() => {
+        if (!isCurrentRequest()) return;
         const mockResult: IngestionResult = {
           status: "ACTIVE",
           readiness: "READY",
@@ -112,9 +132,10 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
           dataset_fingerprint: "demo-dataset",
         };
         setSubmitting(false);
+        submittingRef.current = false;
         setResult(mockResult);
         onSuccess(periodStart, periodEnd, mockResult);
-        onClose();
+        onCloseRef.current();
       }, 300);
       return;
     }
@@ -128,6 +149,7 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
     try {
       const response = await authFetch(`${baseUrl}/entities/${entityId}/upload-xlsx/confirm`, { method: "POST", body: formData });
       const body = await response.json().catch(() => ({})) as IngestionResult & { detail?: unknown };
+      if (!isCurrentRequest()) return;
       if (!response.ok) {
         const detail = body.detail;
         if (detail && typeof detail === "object") {
@@ -140,15 +162,23 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
       }
       setResult(body);
       onSuccess(periodStart, periodEnd, body);
-      if (body.readiness === "READY" || body.readiness === "READY_WITH_WARNINGS") onClose();
+      if ((body.readiness === "READY" || body.readiness === "READY_WITH_WARNINGS") && isCurrentRequest()) {
+        submittingRef.current = false;
+        setSubmitting(false);
+        onCloseRef.current();
+      }
     } catch (err: unknown) {
+      if (!isCurrentRequest()) return;
       setError(
         err instanceof TypeError && err.message === "Failed to fetch"
           ? `Cannot reach the CApex API at ${baseUrl}. Verify that the backend is running.`
           : err instanceof Error ? err.message : "XLSX general-ledger ingestion failed."
       );
     } finally {
-      setSubmitting(false);
+      if (isCurrentRequest()) {
+        submittingRef.current = false;
+        setSubmitting(false);
+      }
     }
   };
 
@@ -157,7 +187,7 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
       <form onSubmit={submit} className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl shadow-2xl overflow-y-auto max-h-[90vh]">
         <div className="px-6 py-4 border-b border-slate-800 flex items-center justify-between">
           <div><h3 id="xlsx-upload-title" className="text-base font-bold text-slate-100">Import Excel General Ledger</h3><p className="text-xs text-slate-400">Entity: <span className="text-slate-200">{entityName}</span></p></div>
-          <button ref={closeButtonRef} type="button" onClick={onClose} aria-label="Close Excel import" className="text-slate-400 hover:text-slate-200 text-xl">&times;</button>
+          <button ref={closeButtonRef} type="button" onClick={closeModal} disabled={submitting} aria-label="Close Excel import" className="text-slate-400 hover:text-slate-200 disabled:opacity-50 text-xl">&times;</button>
         </div>
         <div className="p-6 space-y-6">
           <div className="bg-indigo-950/40 border border-indigo-800/60 text-indigo-200 p-3 rounded-xl text-xs" role="note">
@@ -195,7 +225,7 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
             {file && <p className="mt-2 text-xs text-slate-400">{file.name}</p>}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><label className="text-xxs font-bold uppercase tracking-wider text-slate-400">Period start<input type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} disabled={!!initialPeriodStart} required className="mt-1 w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2" /></label><label className="text-xxs font-bold uppercase tracking-wider text-slate-400">Period end<input type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} disabled={!!initialPeriodEnd} required className="mt-1 w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2" /></label></div>
-          <div className="flex justify-end gap-3"><button type="button" onClick={onClose} className="px-4 py-2 text-xs text-slate-300 bg-slate-800 rounded-xl">Cancel</button><button type="submit" disabled={!file || submitting} className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 disabled:bg-emerald-900 rounded-xl">{submitting ? "Importing…" : "Import General Ledger"}</button></div>
+          <div className="flex justify-end gap-3"><button type="button" onClick={closeModal} disabled={submitting} className="px-4 py-2 text-xs text-slate-300 bg-slate-800 disabled:opacity-50 rounded-xl">Cancel</button><button type="submit" disabled={!file || submitting} className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 disabled:bg-emerald-900 rounded-xl">{submitting ? "Importing…" : "Import General Ledger"}</button></div>
         </div>
       </form>
     </div>

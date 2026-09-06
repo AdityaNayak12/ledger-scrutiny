@@ -787,6 +787,7 @@ export default function App() {
       const mockPeriods = MOCK_PERIODS[entityId] || [];
       setPeriods(mockPeriods);
       setSelectedPeriod(mockPeriods[0] || null);
+      return mockPeriods;
     } else {
       try {
         const res = await authFetch(`${BASE_URL}/entities/${entityId}/periods`);
@@ -798,10 +799,12 @@ export default function App() {
         } else {
           setSelectedPeriod(null);
         }
+        return data;
       } catch (err: unknown) {
         setErrorMsg(`Failed to load periods: ${requestErrorMessage(err)}`);
         setPeriods([]);
         setSelectedPeriod(null);
+        return [];
       }
     }
   }, [isMock, authFetch]);
@@ -887,9 +890,9 @@ export default function App() {
     if (selectedEntityId === null) return;
     setErrorMsg(null);
     setIngestionResult(result);
-    await fetchPeriods(selectedEntityId);
-    const newP = { period_start: periodStart, period_end: periodEnd };
-    setSelectedPeriod(newP);
+    const refreshedPeriods = await fetchPeriods(selectedEntityId);
+    const refreshedPeriod = refreshedPeriods.find((period: { period_start: string; period_end: string }) => period.period_start === periodStart && period.period_end === periodEnd);
+    setSelectedPeriod(refreshedPeriod || { period_start: periodStart, period_end: periodEnd, source: "xlsx_gl" });
     if (result.readiness === "READY" || result.readiness === "READY_WITH_WARNINGS") {
       fetchExceptions(selectedEntityId, periodStart, periodEnd);
     } else {
