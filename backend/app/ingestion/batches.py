@@ -119,6 +119,22 @@ def stage_import_batch(
     content_sha256 = sha256(contents).hexdigest()
     duplicate = _find_duplicate_import_batch(session, entity_id, content_sha256)
     if duplicate is not None:
+        requested_dates = (_as_date(period_start), _as_date(period_end))
+        if _batch_dates(duplicate) != requested_dates:
+            raise BatchConflictError(
+                f"Exact duplicate batch {duplicate.id} does not match the requested period."
+            )
+        requested_family = _source_family(source, source_family)
+        if _source_family(duplicate.source, duplicate.source_family) != requested_family:
+            raise BatchConflictError(
+                f"Exact duplicate batch {duplicate.id} does not match the requested source family."
+            )
+        requested_kind = _enum_value(batch_kind if batch_kind is not None else kind)
+        duplicate_kind = duplicate.kind or BatchKind.JOURNAL.value
+        if duplicate_kind != requested_kind:
+            raise BatchConflictError(
+                f"Exact duplicate batch {duplicate.id} does not match the requested batch kind."
+            )
         return _mark_duplicate(duplicate)
 
     try:

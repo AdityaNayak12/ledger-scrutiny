@@ -7,7 +7,14 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
-from app.db.models import Entity, ImportBatch, LedgerAccount, Organization, TrialBalanceSnapshot
+from app.db.models import (
+    Entity,
+    ImportBatch,
+    JournalEntry,
+    LedgerAccount,
+    Organization,
+    TrialBalanceSnapshot,
+)
 from app.ingestion.batches import (
     BatchConflictError,
     BatchLifecycleError,
@@ -178,6 +185,50 @@ def test_same_hash_remains_importable_for_another_entity(session):
 
     assert second.id != first.id
     assert not is_duplicate_import_batch(second)
+
+
+@pytest.mark.parametrize(
+    ("replay_start", "replay_end", "replay_family", "expected_error"),
+    [
+        (date(2025, 7, 1), date(2025, 9, 30), "gl_upload", "period"),
+        (date(2025, 4, 1), date(2025, 6, 30), "tally", "source family"),
+    ],
+)
+def test_exact_hash_replay_with_different_scope_is_rejected_without_mutation(
+    session, replay_start, replay_end, replay_family, expected_error
+):
+    active = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"scope-bound-replay",
+    )
+    activate_import_batch(session, active, validation_report={"readiness": "READY"})
+    session.commit()
+    original_report = dict(active.validation_report)
+
+    with pytest.raises(BatchConflictError, match=expected_error):
+        stage_import_batch(
+            session,
+            entity_id=_entity_id(session),
+            period_start=replay_start,
+            period_end=replay_end,
+            source="tally" if replay_family == "tally" else "gl_upload",
+            source_family=replay_family,
+            original_filename="replay.xlsx",
+            contents=b"scope-bound-replay",
+            uploaded_by_user_id=None,
+            coverage_start=replay_start,
+            coverage_end=replay_end,
+        )
+
+    session.commit()
+    session.expire_all()
+    persisted = session.get(ImportBatch, active.id)
+    assert persisted.status == "ACTIVE"
+    assert persisted.validation_report == original_report
+    assert persisted.raw_source_bytes == b"scope-bound-replay"
+    assert session.scalar(select(func.count()).select_from(ImportBatch)) == 1
 
 
 def test_activation_supersedes_only_replaced_active_coverage(session):
@@ -439,6 +490,59 @@ def test_activation_flush_failure_restores_candidate_report(session, monkeypatch
     assert active.status == "ACTIVE"
     assert candidate.status == "STAGED"
     assert candidate.validation_report == {"original": "report"}
+
+
+def test_activation_failure_after_supersession_preserves_active_dataset(session, monkeypatch):
+    entity_id = _entity_id(session)
+    active = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"atomic-active",
+    )
+    session.add(JournalEntry(
+        import_batch_id=active.id,
+        entity_id=entity_id,
+        source_document_id="KEEP-ME",
+        posting_date=date(2025, 4, 1),
+    ))
+    activate_import_batch(session, active, validation_report={"readiness": "READY"})
+    session.commit()
+    original_report = dict(active.validation_report)
+
+    replacement = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"atomic-replacement",
+    )
+
+    def fail_dataset_report(*args, **kwargs):
+        raise RuntimeError("dataset report failed")
+
+    monkeypatch.setattr("app.ingestion.batches._dataset_report", fail_dataset_report)
+    with pytest.raises(RuntimeError, match="dataset report failed"):
+        activate_import_batch(session, replacement, replace=True)
+
+    session.commit()
+    session.expire_all()
+    persisted_active = session.get(ImportBatch, active.id)
+    persisted_replacement = session.get(ImportBatch, replacement.id)
+    assert persisted_active.status == "ACTIVE"
+    assert persisted_replacement.status == "STAGED"
+    assert persisted_active.validation_report == original_report
+    assert session.scalar(
+        select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == active.id)
+    ) == 1
+    assert session.scalar(
+        select(JournalEntry.source_document_id).where(JournalEntry.import_batch_id == active.id)
+    ) == "KEEP-ME"
+    assert session.scalar(
+        select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == replacement.id)
+    ) == 0
+    assert session.scalar(
+        select(func.count()).select_from(ImportBatch).where(ImportBatch.status == "ACTIVE")
+    ) == 1
 
 
 def test_fail_import_batch_rejects_terminal_statuses(session):

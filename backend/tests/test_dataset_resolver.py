@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import openpyxl
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
@@ -197,7 +197,7 @@ def test_q1_q2_accumulate_signed_movement_and_report_gaps(session):
 def test_corrected_quarter_replaces_same_coverage_in_resolution(session):
     db, entity_id = session
     account_ids = _account_ids(db, entity_id)
-    _baseline(db, entity_id, account_ids, cash=Decimal("0.00"))
+    baseline = _baseline(db, entity_id, account_ids, cash=Decimal("0.00"))
     original = _active_batch(db, entity_id, FY_START, date(2025, 6, 30), b"q1-original")
     correction = _active_batch(db, entity_id, FY_START, date(2025, 6, 30), b"q1-corrected")
     q2 = _active_batch(db, entity_id, date(2025, 7, 1), date(2025, 9, 30), b"q2")
@@ -209,8 +209,15 @@ def test_corrected_quarter_replaces_same_coverage_in_resolution(session):
     result = resolve_active_dataset(db, entity_id, financial_year=2025)
 
     assert result["active_batch_ids"] == [correction.id, q2.id]
+    assert result["source_batch_ids"] == sorted([baseline.id, correction.id, q2.id])
     assert original.id in result["replaced_batch_ids"]
     assert result["account_movements"]["1000"] == "60.00"
+    assert db.scalar(
+        select(JournalEntry.source_document_id).where(JournalEntry.import_batch_id == original.id)
+    ) == "ORIGINAL"
+    assert db.scalar(
+        select(JournalEntry.source_document_id).where(JournalEntry.import_batch_id == q2.id)
+    ) == "Q2-1"
 
 
 def test_annual_coverage_excludes_quarterly_batches_for_same_family(session):
@@ -233,6 +240,62 @@ def test_annual_coverage_excludes_quarterly_batches_for_same_family(session):
     assert result["gaps"] == []
     assert result["readiness"] == "READY"
     assert result["account_movements"]["1000"] == "100.00"
+
+
+def test_dataset_resolution_isolated_by_entity_year_and_source_family(session):
+    db, entity_id = session
+    account_ids = _account_ids(db, entity_id)
+    organization_id = db.scalar(
+        select(Entity.organization_id).where(Entity.id == entity_id)
+    )
+    other_entity = Entity(
+        organization_id=organization_id,
+        name="Other Isolated Entity",
+        materiality_threshold=Decimal("0.00"),
+    )
+    db.add(other_entity)
+    db.flush()
+
+    gl_q1 = _active_batch(
+        db,
+        entity_id,
+        FY_START,
+        date(2025, 6, 30),
+        b"isolated-gl-q1",
+    )
+    tally_q1 = _active_batch(
+        db,
+        entity_id,
+        date(2026, 4, 1),
+        date(2026, 6, 30),
+        b"isolated-tally-q1",
+        source="tally_xml",
+        source_family="tally",
+    )
+    other_batch = _active_batch(
+        db,
+        other_entity.id,
+        FY_START,
+        date(2025, 6, 30),
+        b"isolated-other-entity",
+    )
+    _entry(db, gl_q1, date(2025, 4, 10), "ISOLATED-GL", account_ids, Decimal("10.00"))
+    _entry(db, tally_q1, date(2026, 4, 10), "ISOLATED-TALLY", account_ids, Decimal("20.00"))
+    db.commit()
+
+    fy_2025 = resolve_active_dataset(db, entity_id, financial_year=2025)
+    fy_2026 = resolve_active_dataset(db, entity_id, financial_year=2026)
+
+    assert fy_2025["source_family"] == "gl_upload"
+    assert fy_2025["active_batch_ids"] == [gl_q1.id]
+    assert fy_2025["source_batch_ids"] == [gl_q1.id]
+    assert fy_2025["account_movements"] == {"1000": "10.00", "2000": "-10.00"}
+    assert fy_2026["source_family"] == "tally"
+    assert fy_2026["active_batch_ids"] == [tally_q1.id]
+    assert fy_2026["source_batch_ids"] == [tally_q1.id]
+    assert fy_2026["account_movements"] == {"1000": "20.00", "2000": "-20.00"}
+    assert other_batch.id not in fy_2025["active_batch_ids"]
+    assert other_batch.id not in fy_2026["active_batch_ids"]
 
 
 def test_baseline_closing_seeds_account_opening_continuity(session):
@@ -296,6 +359,25 @@ def test_normalizer_partial_journal_becomes_ready_after_complete_baseline(sessio
     assert annual.validation_report["readiness"] == "PARTIAL"
     assert result["baseline_coverage"]["complete"] is True
     assert result["readiness"] == "READY"
+
+
+def test_missing_baseline_keeps_openings_unknown_and_dataset_partial(session):
+    db, entity_id = session
+    account_ids = _account_ids(db, entity_id)
+    annual = _active_batch(db, entity_id, FY_START, FY_END, b"missing-baseline")
+    _entry(db, annual, date(2025, 4, 10), "MISSING-BASELINE-1", account_ids, Decimal("25.00"))
+    db.commit()
+
+    result = resolve_active_dataset(db, entity_id, financial_year=2025)
+
+    assert result["readiness"] == "PARTIAL"
+    assert result["baseline_coverage"]["present"] is False
+    assert result["baseline_coverage"]["complete"] is False
+    assert result["baseline_coverage"]["balance_date"] is None
+    assert result["baseline_coverage"]["account_count"] == 0
+    assert result["baseline_coverage"]["missing_account_codes"] == ["1000", "2000"]
+    assert result["opening_balances"] == {}
+    assert result["closing_balances"] == {"1000": None, "2000": None}
 
 
 def test_incomplete_period_coverage_remains_partial_after_complete_baseline(session):

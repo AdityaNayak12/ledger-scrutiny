@@ -555,8 +555,57 @@ def normalize_baseline_xlsx(
         raise ValueError(
             "Baseline normalization requires a gl_upload source_family for balance checkpoints."
         )
+    accounts = session.execute(
+        select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)
+    ).scalars().all()
+    accounts_by_code = {
+        str(account.external_code).strip(): account
+        for account in accounts
+        if account.external_code is not None and str(account.external_code).strip()
+    }
     file_bytes = bytes(file_bytes)
     if batch.status == "ACTIVE" and sha256(file_bytes).hexdigest() == batch.content_sha256:
+        parsed = _parse_baseline_xlsx(
+            file_bytes,
+            expected_account_codes=set(accounts_by_code),
+            allowed_account_codes=set(accounts_by_code),
+            expected_currency=expected_currency,
+            expected_balance_date=expected_balance_date,
+        )
+        expected_checkpoints = {
+            (accounts_by_code[record.ledger_account_code].id, record.balance_date): (
+                record.balance,
+                record.currency,
+                {
+                    **dict(record.source_metadata),
+                    "source_filename": batch.original_filename,
+                    "source_sha256": batch.content_sha256,
+                },
+            )
+            for record in parsed.records
+        }
+        actual_checkpoints = session.execute(
+            select(BalanceCheckpoint).where(BalanceCheckpoint.import_batch_id == batch.id)
+        ).scalars().all()
+        actual_by_key = {
+            (checkpoint.ledger_account_id, checkpoint.balance_date): checkpoint
+            for checkpoint in actual_checkpoints
+        }
+        if (
+            len(actual_by_key) != len(actual_checkpoints)
+            or actual_by_key.keys() != expected_checkpoints.keys()
+            or any(
+                (
+                    checkpoint.balance,
+                    checkpoint.currency,
+                    dict(checkpoint.source_metadata or {}),
+                ) != expected_checkpoints[key]
+                for key, checkpoint in actual_by_key.items()
+            )
+        ):
+            raise ValueError(
+                "Exact duplicate baseline import contains missing or altered canonical baseline children."
+            )
         return json.loads(json.dumps(batch.validation_report or {}))
     if batch.status != "STAGED":
         raise ValueError(
@@ -568,14 +617,6 @@ def normalize_baseline_xlsx(
     if evidence_bytes:
         _retain_pdf_evidence(batch, evidence_bytes, signed_pdf_filename)
 
-    accounts = session.execute(
-        select(LedgerAccount).where(LedgerAccount.entity_id == entity_id)
-    ).scalars().all()
-    accounts_by_code = {
-        str(account.external_code).strip(): account
-        for account in accounts
-        if account.external_code is not None and str(account.external_code).strip()
-    }
     expected_codes = set(accounts_by_code)
 
     received_sha256 = sha256(file_bytes).hexdigest()

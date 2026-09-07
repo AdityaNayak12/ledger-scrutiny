@@ -393,10 +393,11 @@ def test_duplicate_tally_upload_is_idempotent_for_child_records():
 
     assert first.status_code == 200, first.text
     assert duplicate.status_code == 200, duplicate.text
-    batch_id = first.json()["import_batch_id"]
+    first_body = first.json()
+    batch_id = first_body["import_batch_id"]
     assert duplicate.json()["import_batch_id"] == batch_id
-    assert duplicate.json()["dataset_fingerprint"] == first.json()["dataset_fingerprint"]
-    assert duplicate.json()["source_batch_ids"] == first.json()["source_batch_ids"]
+    assert duplicate.json()["dataset_fingerprint"] == first_body["dataset_fingerprint"]
+    assert duplicate.json()["source_batch_ids"] == first_body["source_batch_ids"]
     with TestingSessionLocal() as session:
         assert session.scalar(select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == batch_id)) == 2
         assert session.scalar(select(func.count()).select_from(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == batch_id)) == 4
@@ -427,7 +428,8 @@ def test_tally_duplicate_replay_rejects_corrupt_canonical_children(mutation):
         headers=headers,
     )
     assert first.status_code == 200, first.text
-    batch_id = first.json()["import_batch_id"]
+    first_body = first.json()
+    batch_id = first_body["import_batch_id"]
 
     with TestingSessionLocal() as session:
         line = session.scalars(
@@ -456,7 +458,9 @@ def test_tally_duplicate_replay_rejects_corrupt_canonical_children(mutation):
     assert detail["source_batch_ids"] == [batch_id]
     assert detail["dataset_fingerprint"]
     with TestingSessionLocal() as session:
-        assert session.get(ImportBatch, batch_id).status == "ACTIVE"
+        active_batch = session.get(ImportBatch, batch_id)
+        assert active_batch.status == "ACTIVE"
+        assert active_batch.validation_report == first_body["validation_report"]
         assert session.scalar(
             select(func.count()).select_from(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
         ) == (3 if mutation == "missing" else 4)
@@ -1365,10 +1369,16 @@ def test_malformed_tally_replacement_retains_previous_active_dataset():
         ).all()
         assert [batch.status for batch in batches] == ["ACTIVE", "FAILED"]
         assert batches[0].id == first_body["import_batch_id"]
-        assert batches[0].validation_report["dataset_fingerprint"] == first_body["dataset_fingerprint"]
+        assert batches[0].validation_report == first_body["validation_report"]
         assert batches[1].raw_source_bytes == malformed
         assert batches[1].validation_report["readiness"] == "INVALID"
         assert batches[1].validation_report["errors"]
+        assert session.scalar(
+            select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == batches[0].id)
+        ) == 2
+        assert session.scalar(
+            select(func.count()).select_from(JournalEntry).where(JournalEntry.import_batch_id == batches[1].id)
+        ) == 0
         assert session.scalar(select(func.count()).select_from(JournalLine)) == 4
 
 

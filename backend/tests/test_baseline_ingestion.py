@@ -6,7 +6,7 @@ from decimal import Decimal
 
 import openpyxl
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
@@ -406,6 +406,50 @@ def test_active_exact_sha_duplicate_replay_is_idempotent(baseline_session):
     assert replayed_batch.status == "ACTIVE"
     assert replay_report == first_report
     assert [checkpoint.id for checkpoint in session.scalars(select(BalanceCheckpoint)).all()] == checkpoint_ids
+
+
+@pytest.mark.parametrize("mutation", ["missing", "altered"])
+def test_active_baseline_replay_rejects_corrupt_children_without_repopulation(
+    baseline_session, mutation
+):
+    session, entity_id = baseline_session
+    contents = _valid_bytes()
+    batch = _stage(session, entity_id, contents)
+    first_report = normalize_balance_checkpoint_xlsx(
+        contents, entity_id, session, import_batch_id=batch.id, expected_currency="INR"
+    )
+    session.commit()
+
+    checkpoint = session.scalars(
+        select(BalanceCheckpoint).where(BalanceCheckpoint.import_batch_id == batch.id)
+    ).first()
+    assert checkpoint is not None
+    if mutation == "missing":
+        session.delete(checkpoint)
+    else:
+        checkpoint.balance = Decimal("999.00")
+    session.commit()
+    corrupted_count = session.scalar(
+        select(func.count()).select_from(BalanceCheckpoint).where(
+            BalanceCheckpoint.import_batch_id == batch.id
+        )
+    )
+
+    duplicate = _stage(session, entity_id, contents)
+    assert duplicate.id == batch.id
+    with pytest.raises(ValueError, match="missing or altered"):
+        normalize_balance_checkpoint_xlsx(
+            contents, entity_id, session, import_batch_id=duplicate.id, expected_currency="INR"
+        )
+
+    session.commit()
+    assert session.get(ImportBatch, batch.id).status == "ACTIVE"
+    assert session.get(ImportBatch, batch.id).validation_report == first_report
+    assert session.scalar(
+        select(func.count()).select_from(BalanceCheckpoint).where(
+            BalanceCheckpoint.import_batch_id == batch.id
+        )
+    ) == corrupted_count
 
 
 def test_active_exact_sha_journal_batch_is_rejected_by_baseline_normalizer(baseline_session):
