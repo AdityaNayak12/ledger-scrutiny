@@ -24,6 +24,7 @@ from app.db.models import (
     Transaction,
     TrialBalanceSnapshot,
 )
+from app.ingestion import baseline as baseline_module
 from app.ingestion.datasets import resolve_active_dataset
 from app.ingestion.tally_parser import TallyConnectorError, parse_tally_xml
 from app.ingestion.xlsx_normalizer import validate_gl_xlsx_replay
@@ -133,6 +134,37 @@ def _gl_bytes() -> bytes:
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def _baseline_bytes(first_balance: int = 50, second_balance: int | None = None) -> bytes:
+    workbook = openpyxl.Workbook()
+    worksheet = workbook.active
+    worksheet.append(["Account Code", "Balance Date", "Signed Balance", "Currency"])
+    worksheet.append(["1000", date(2025, 3, 31), first_balance, "INR"])
+    worksheet.append(["2000", date(2025, 3, 31), -first_balance if second_balance is None else second_balance, "INR"])
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
+
+
+def _upload_public_baseline(entity_id: int, headers: dict[str, str], contents: bytes, *, period_start: str = "2025-04-01", period_end: str = "2026-03-31", balance_date: str = "2025-03-31"):
+    return client.post(
+        f"/entities/{entity_id}/upload-xlsx/baseline",
+        data={
+            "target_period_start": period_start,
+            "target_period_end": period_end,
+            "expected_currency": "INR",
+            "expected_balance_date": balance_date,
+        },
+        files={
+            "file": (
+                "opening-baseline.xlsx",
+                io.BytesIO(contents),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        },
+        headers=headers,
+    )
 
 
 def _model_snapshot(session, model, *criteria):
@@ -1627,6 +1659,230 @@ def test_public_baseline_failure_preserves_active_gl_journal():
         assert session.scalar(
             select(func.count()).select_from(BalanceCheckpoint).where(
                 BalanceCheckpoint.import_batch_id == failed.id,
+            )
+        ) == 0
+
+
+def test_public_baseline_rejects_reversed_period_before_staging():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities",
+        json={"name": "Reversed Baseline Period Entity", "materiality_threshold": "0.00"},
+        headers=headers,
+    ).json()
+    journal_upload = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("journal.xlsx", io.BytesIO(_gl_bytes()), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert journal_upload.status_code == 200, journal_upload.text
+    journal_batch_id = journal_upload.json()["import_batch_id"]
+    with TestingSessionLocal() as session:
+        before_dataset = resolve_active_dataset(session, entity["id"], financial_year=2025)
+    assert before_dataset["active_batch_ids"] == [journal_batch_id]
+
+    baseline_upload = _upload_public_baseline(
+        entity["id"],
+        headers,
+        _baseline_bytes(),
+        period_start="2026-03-31",
+        period_end="2025-04-01",
+    )
+
+    assert baseline_upload.status_code == 400, baseline_upload.text
+    detail = baseline_upload.json()["detail"]
+    assert detail["failed_batch_id"] is None
+    with TestingSessionLocal() as session:
+        after_dataset = resolve_active_dataset(session, entity["id"], financial_year=2025)
+        assert after_dataset["active_batch_ids"] == before_dataset["active_batch_ids"]
+        assert after_dataset["dataset_fingerprint"] == before_dataset["dataset_fingerprint"]
+        batches = session.scalars(
+            select(ImportBatch).where(ImportBatch.entity_id == entity["id"]).order_by(ImportBatch.id)
+        ).all()
+        assert [batch.id for batch in batches] == [journal_batch_id]
+        assert all(batch.status == "ACTIVE" for batch in batches)
+        assert session.scalar(
+            select(func.count()).select_from(BalanceCheckpoint).where(
+                BalanceCheckpoint.entity_id == entity["id"],
+            )
+        ) == 0
+
+
+def test_public_baseline_replacement_supersedes_old_checkpoint_and_children():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities",
+        json={"name": "Baseline Replacement Lifecycle Entity", "materiality_threshold": "0.00"},
+        headers=headers,
+    ).json()
+    journal_upload = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("journal.xlsx", io.BytesIO(_gl_bytes()), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert journal_upload.status_code == 200, journal_upload.text
+    journal_batch_id = journal_upload.json()["import_batch_id"]
+
+    first_upload = _upload_public_baseline(entity["id"], headers, _baseline_bytes(50))
+    assert first_upload.status_code == 200, first_upload.text
+    first_batch_id = first_upload.json()["import_batch_id"]
+    with TestingSessionLocal() as session:
+        first_children = _batch_child_snapshot(session, first_batch_id)
+
+    replacement_upload = _upload_public_baseline(entity["id"], headers, _baseline_bytes(75))
+    assert replacement_upload.status_code == 200, replacement_upload.text
+    replacement_batch_id = replacement_upload.json()["import_batch_id"]
+    assert replacement_batch_id != first_batch_id
+    assert replacement_upload.json()["baseline_coverage"]["complete"] is True
+    assert replacement_upload.json()["dataset_fingerprint"] != first_upload.json()["dataset_fingerprint"]
+
+    with TestingSessionLocal() as session:
+        first = session.get(ImportBatch, first_batch_id)
+        replacement = session.get(ImportBatch, replacement_batch_id)
+        assert first.status == "SUPERSEDED"
+        assert replacement.status == "ACTIVE"
+        assert _batch_child_snapshot(session, first_batch_id) == first_children
+        replacement_checkpoints = session.scalars(
+            select(BalanceCheckpoint).where(
+                BalanceCheckpoint.import_batch_id == replacement_batch_id,
+            ).order_by(BalanceCheckpoint.ledger_account_id)
+        ).all()
+        assert [row.balance for row in replacement_checkpoints] == [Decimal("75"), Decimal("-75")]
+        active = session.scalars(
+            select(ImportBatch).where(
+                ImportBatch.entity_id == entity["id"],
+                ImportBatch.status == "ACTIVE",
+            ).order_by(ImportBatch.id)
+        ).all()
+        assert [batch.id for batch in active if batch.kind == "balance_checkpoint"] == [replacement_batch_id]
+        assert session.get(ImportBatch, journal_batch_id).status == "ACTIVE"
+
+
+def test_public_baseline_failed_replacement_keeps_old_checkpoint_and_dataset():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities",
+        json={"name": "Failed Baseline Replacement Entity", "materiality_threshold": "0.00"},
+        headers=headers,
+    ).json()
+    journal_upload = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("journal.xlsx", io.BytesIO(_gl_bytes()), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert journal_upload.status_code == 200, journal_upload.text
+    journal_batch_id = journal_upload.json()["import_batch_id"]
+
+    first_upload = _upload_public_baseline(entity["id"], headers, _baseline_bytes(50))
+    assert first_upload.status_code == 200, first_upload.text
+    first_batch_id = first_upload.json()["import_batch_id"]
+    before_fingerprint = first_upload.json()["dataset_fingerprint"]
+    with TestingSessionLocal() as session:
+        first_children = _batch_child_snapshot(session, first_batch_id)
+
+    failed_upload = _upload_public_baseline(entity["id"], headers, _baseline_bytes(75, -74))
+
+    assert failed_upload.status_code == 400, failed_upload.text
+    detail = failed_upload.json()["detail"]
+    assert detail["dataset_fingerprint"] == before_fingerprint
+    assert detail["active_batch_ids"] == [journal_batch_id]
+    failed_batch_id = detail["failed_batch_id"]
+    assert failed_batch_id is not None
+    with TestingSessionLocal() as session:
+        first = session.get(ImportBatch, first_batch_id)
+        failed = session.get(ImportBatch, failed_batch_id)
+        assert first.status == "ACTIVE"
+        assert failed.status == "FAILED"
+        assert failed.validation_report["readiness"] == "INVALID"
+        assert failed.validation_report["errors"]
+        assert _batch_child_snapshot(session, first_batch_id) == first_children
+        assert session.scalar(
+            select(func.count()).select_from(BalanceCheckpoint).where(
+                BalanceCheckpoint.import_batch_id == failed_batch_id,
+            )
+        ) == 0
+        assert session.get(ImportBatch, journal_batch_id).status == "ACTIVE"
+
+
+def test_public_baseline_activation_failure_preserves_old_checkpoint_and_dataset(monkeypatch):
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities",
+        json={"name": "Injected Baseline Replacement Failure Entity", "materiality_threshold": "0.00"},
+        headers=headers,
+    ).json()
+    journal_upload = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("journal.xlsx", io.BytesIO(_gl_bytes()), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert journal_upload.status_code == 200, journal_upload.text
+
+    first_upload = _upload_public_baseline(entity["id"], headers, _baseline_bytes(50))
+    assert first_upload.status_code == 200, first_upload.text
+    first_batch_id = first_upload.json()["import_batch_id"]
+    with TestingSessionLocal() as session:
+        before_dataset = resolve_active_dataset(session, entity["id"], financial_year=2025)
+        first_children = _batch_child_snapshot(session, first_batch_id)
+
+    real_activate = baseline_module.activate_import_batch
+
+    def fail_after_activation(session, batch_or_id, **kwargs):
+        candidate = real_activate(session, batch_or_id, **kwargs)
+        assert candidate.status == "ACTIVE"
+        assert session.scalar(
+            select(ImportBatch.status).where(ImportBatch.id == first_batch_id)
+        ) == "SUPERSEDED"
+        assert session.scalar(
+            select(BalanceCheckpoint.id).where(
+                BalanceCheckpoint.import_batch_id == candidate.id,
+            )
+        ) is not None
+        raise RuntimeError("injected baseline activation failure")
+
+    monkeypatch.setattr(baseline_module, "activate_import_batch", fail_after_activation)
+    failed_upload = _upload_public_baseline(entity["id"], headers, _baseline_bytes(75))
+
+    assert failed_upload.status_code == 400, failed_upload.text
+    detail = failed_upload.json()["detail"]
+    assert detail["failed_batch_id"] is not None
+    assert detail["failed_batch_status"] == "FAILED"
+    assert detail["dataset_fingerprint"] == before_dataset["dataset_fingerprint"]
+    assert detail["active_batch_ids"] == before_dataset["active_batch_ids"]
+    failed_batch_id = detail["failed_batch_id"]
+    with TestingSessionLocal() as session:
+        after_dataset = resolve_active_dataset(session, entity["id"], financial_year=2025)
+        first = session.get(ImportBatch, first_batch_id)
+        failed = session.get(ImportBatch, failed_batch_id)
+        assert after_dataset["dataset_fingerprint"] == before_dataset["dataset_fingerprint"]
+        assert first.status == "ACTIVE"
+        assert _batch_child_snapshot(session, first_batch_id) == first_children
+        assert failed.status == "FAILED"
+        assert failed.validation_report["readiness"] == "INVALID"
+        assert failed.validation_report["errors"]
+        assert session.scalar(
+            select(func.count()).select_from(BalanceCheckpoint).where(
+                BalanceCheckpoint.import_batch_id == failed_batch_id,
             )
         ) == 0
 

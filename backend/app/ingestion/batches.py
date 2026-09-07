@@ -172,6 +172,22 @@ def stage_import_batch(
     source_metadata: Mapping[str, Any] | None = None,
 ) -> ImportBatch:
     """Create one staged raw-retaining batch, or return its hash duplicate."""
+    period_start_date = _as_date(period_start)
+    period_end_date = _as_date(period_end)
+    if (
+        period_start_date is not None
+        and period_end_date is not None
+        and period_start_date > period_end_date
+    ):
+        raise BatchLifecycleError("Import batch period_start must be on or before period_end.")
+    coverage_start_date = _as_date(coverage_start) if coverage_start is not None else period_start_date
+    coverage_end_date = _as_date(coverage_end) if coverage_end is not None else period_end_date
+    if (
+        coverage_start_date is not None
+        and coverage_end_date is not None
+        and coverage_start_date > coverage_end_date
+    ):
+        raise BatchLifecycleError("Import batch coverage_start must be on or before coverage_end.")
     contents = bytes(contents)
     content_sha256 = sha256(contents).hexdigest()
     duplicate = _find_duplicate_import_batch(session, entity_id, content_sha256)
@@ -387,6 +403,13 @@ def activate_import_batch(
             candidate_dates = _batch_dates(batch)
             candidate_family = _source_family(batch.source, batch.source_family)
             candidate_year = _financial_year(candidate_dates[0])
+            if batch.kind == BatchKind.BALANCE_CHECKPOINT.value:
+                session.flush()
+            candidate_baseline_dates = (
+                {checkpoint.balance_date for checkpoint in batch.balance_checkpoints}
+                if batch.kind == BatchKind.BALANCE_CHECKPOINT.value
+                else set()
+            )
             for active in all_active:
                 active_dates = _batch_dates(active)
                 active_family = _source_family(active.source, active.source_family)
@@ -400,6 +423,21 @@ def activate_import_batch(
                         f"Active source family conflict: batch {active.id} uses {active_family}, "
                         f"candidate uses {candidate_family}."
                     )
+                active_baseline_dates = (
+                    {checkpoint.balance_date for checkpoint in active.balance_checkpoints}
+                    if active.kind == BatchKind.BALANCE_CHECKPOINT.value
+                    else set()
+                )
+                if (
+                    batch.kind == BatchKind.BALANCE_CHECKPOINT.value
+                    and active.kind == BatchKind.BALANCE_CHECKPOINT.value
+                    and candidate_family == SourceFamily.GL_UPLOAD.value
+                    and active_family == SourceFamily.GL_UPLOAD.value
+                    and candidate_dates == active_dates
+                    and len(candidate_baseline_dates) == len(active_baseline_dates) == 1
+                    and candidate_baseline_dates == active_baseline_dates
+                ):
+                    replaced.append(active)
                 if (
                     _is_journal(batch)
                     and _is_journal(active)

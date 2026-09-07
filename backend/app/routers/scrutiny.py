@@ -1320,7 +1320,8 @@ async def upload_xlsx_baseline(
         db.rollback()
         raise
     except ValueError as error:
-        db.rollback()
+        if batch is not None:
+            db.rollback()
         safe_error = _failure_error(error, SourceFamily.GL_UPLOAD.value)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

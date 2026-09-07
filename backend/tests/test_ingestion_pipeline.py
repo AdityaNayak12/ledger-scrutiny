@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.db.base import Base
 from app.db.models import (
+    BalanceCheckpoint,
     Entity,
     ImportBatch,
     JournalEntry,
@@ -102,6 +103,39 @@ def test_staging_retains_raw_bytes_and_exact_hash_duplicate_is_idempotent(sessio
     assert duplicate.raw_source_bytes == contents
     assert duplicate.content_sha256 == sha256(contents).hexdigest()
     assert session.scalar(select(ImportBatch.id).order_by(ImportBatch.id.desc())) == first.id
+
+
+@pytest.mark.parametrize(
+    ("period_start", "period_end", "coverage_start", "coverage_end", "message"),
+    [
+        (date(2025, 6, 30), date(2025, 4, 1), date(2025, 4, 1), date(2025, 6, 30), "period_start"),
+        (date(2025, 4, 1), date(2025, 6, 30), date(2025, 6, 30), date(2025, 4, 1), "coverage_start"),
+    ],
+)
+def test_staging_rejects_reversed_period_or_coverage_before_creating_batch(
+    session,
+    period_start,
+    period_end,
+    coverage_start,
+    coverage_end,
+    message,
+):
+    with pytest.raises(BatchLifecycleError, match=message):
+        stage_import_batch(
+            session,
+            entity_id=_entity_id(session),
+            period_start=period_start,
+            period_end=period_end,
+            source="gl_upload",
+            source_family="gl_upload",
+            original_filename="reversed.xlsx",
+            contents=b"reversed metadata",
+            uploaded_by_user_id=None,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+        )
+
+    assert session.scalar(select(func.count()).select_from(ImportBatch)) == 0
 
 
 def test_duplicate_integrity_error_reloads_existing_batch(session, monkeypatch):
@@ -426,6 +460,84 @@ def test_checkpoint_activation_allows_same_gl_source_family_as_journal(session):
 
     assert journal.status == "ACTIVE"
     assert checkpoint.status == "ACTIVE"
+
+
+def test_checkpoint_activation_replaces_pending_candidate_children(session):
+    entity_id = _entity_id(session)
+    accounts = [
+        LedgerAccount(entity_id=entity_id, external_code=code, name=code)
+        for code in ("1000", "2000")
+    ]
+    session.add_all(accounts)
+    session.flush()
+
+    def stage_checkpoint(contents):
+        return stage_import_batch(
+            session,
+            entity_id=entity_id,
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+            source="gl_upload",
+            source_family="gl_upload",
+            original_filename="opening.xlsx",
+            contents=contents,
+            uploaded_by_user_id=None,
+            kind="balance_checkpoint",
+            coverage_start=date(2025, 4, 1),
+            coverage_end=date(2026, 3, 31),
+        )
+
+    old = stage_checkpoint(b"old-checkpoint")
+    session.add_all([
+        BalanceCheckpoint(
+            import_batch_id=old.id,
+            entity_id=entity_id,
+            ledger_account_id=accounts[0].id,
+            balance_date=date(2025, 3, 31),
+            balance=Decimal("50.00"),
+            currency="INR",
+        ),
+        BalanceCheckpoint(
+            import_batch_id=old.id,
+            entity_id=entity_id,
+            ledger_account_id=accounts[1].id,
+            balance_date=date(2025, 3, 31),
+            balance=Decimal("-50.00"),
+            currency="INR",
+        ),
+    ])
+    activate_import_batch(session, old, validation_report={"readiness": "READY"})
+
+    candidate = stage_checkpoint(b"candidate-checkpoint")
+    session.add_all([
+        BalanceCheckpoint(
+            import_batch_id=candidate.id,
+            entity_id=entity_id,
+            ledger_account_id=accounts[0].id,
+            balance_date=date(2025, 3, 31),
+            balance=Decimal("75.00"),
+            currency="INR",
+        ),
+        BalanceCheckpoint(
+            import_batch_id=candidate.id,
+            entity_id=entity_id,
+            ledger_account_id=accounts[1].id,
+            balance_date=date(2025, 3, 31),
+            balance=Decimal("-75.00"),
+            currency="INR",
+        ),
+    ])
+
+    activate_import_batch(session, candidate, validation_report={"readiness": "READY"})
+    session.commit()
+
+    assert old.status == "SUPERSEDED"
+    assert candidate.status == "ACTIVE"
+    assert [row.balance for row in session.scalars(
+        select(BalanceCheckpoint)
+        .where(BalanceCheckpoint.import_batch_id == candidate.id)
+        .order_by(BalanceCheckpoint.ledger_account_id)
+    ).all()] == [Decimal("75.00"), Decimal("-75.00")]
 
 
 def test_checkpoint_activation_rejects_mixed_source_family_for_same_financial_year(session):

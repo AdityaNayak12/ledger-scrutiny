@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-08
 **Scope:** Resolve final-review findings 1–4 and final-fix-review Important finding I1 at the shared GL ingestion boundaries.
-**Execution:** Inline only; no subagents or reviewers.
+**Execution:** Delegated implementation and review; all subagents used GPT-5.6 Luna with xhigh reasoning.
 
 ## Result
 
@@ -10,7 +10,7 @@ Findings 1–4 and Important finding I1 are resolved with the existing batch, no
 
 ## Commit status
 
-No commit was made in this turn, per user instruction. The owned implementation files, tests, and this report remain staged; only the new baseline-upload hunks from the mixed upload modal are staged. The pre-existing demo/frontend changes remain unstaged.
+The initial fixes are recorded in `5732ad1`; this follow-up records the shared checkpoint-lifecycle fixes. Pre-existing demo/frontend changes remain unstaged.
 
 ## Fixes
 
@@ -135,6 +135,42 @@ Final-review findings 5–6 remain explicit deployment gates and were not implem
 
 Live Tally topology and browser file-driven smoke gates remain unverified, as in the final review.
 
+## Round-2b — final-rereview-2 follow-up
+
+### Implementation
+
+- Updated the shared `activate_import_batch` boundary to explicitly flush staged checkpoint children before deriving candidate balance dates. The flush is limited to `balance_checkpoint` activation, so existing journal activation behavior and transaction semantics are unchanged.
+- Added a direct lifecycle regression that stages old and replacement GL checkpoint children without an intervening flush and verifies the old batch is superseded and the candidate becomes active with its children persisted.
+- Added a public baseline failure-injection regression. It raises after activation has flushed candidate children and transitioned candidate/old statuses, then verifies savepoint rollback preserves the old checkpoint's `ACTIVE` status, dataset fingerprint, and exact children while the candidate is retained as `FAILED` with an invalid report and no persisted children.
+- Retained the existing invalid-source preservation regression unchanged.
+
+### Verification evidence
+
+Focused RED before the shared-boundary fix:
+
+```text
+tests/test_ingestion_pipeline.py::test_checkpoint_activation_replaces_pending_candidate_children
+FAILED — old.status was ACTIVE instead of SUPERSEDED
+```
+
+Focused GREEN after the fix:
+
+```text
+tests/test_ingestion_pipeline.py::test_checkpoint_activation_replaces_pending_candidate_children — 1 passed
+tests/test_api_integration.py::test_public_baseline_activation_failure_preserves_old_checkpoint_and_dataset — 1 passed
+```
+
+Relevant backend suite:
+
+```bash
+cd backend
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_ingestion_pipeline.py tests/test_api_integration.py
+```
+
+Result: `71 passed, 4 warnings in 9.12s`.
+
+`git diff --check` also passed. The follow-up implementation is recorded separately from `5732ad1`.
+
 ## Workspace hygiene
 
-Pre-existing user-owned changes were preserved, including `docs/pitch-demo.md`, `frontend/src/App.tsx`, the existing demo portions of `frontend/src/components/XlsxUploadModal.tsx`, `frontend/src/mockData.ts`, the deleted Phase 1 report, `.codebase-memory/`, `backend/tests/test_demo_gl_contract.py`, and `frontend/src/demo_gl_profile.json`. No unrelated files were staged, and no commit was created.
+Pre-existing user-owned changes were preserved, including `docs/pitch-demo.md`, `frontend/src/App.tsx`, the existing demo portions of `frontend/src/components/XlsxUploadModal.tsx`, `frontend/src/mockData.ts`, the deleted Phase 1 report, `.codebase-memory/`, `backend/tests/test_demo_gl_contract.py`, and `frontend/src/demo_gl_profile.json`. No unrelated files were staged.
