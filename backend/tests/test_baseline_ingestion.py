@@ -83,6 +83,26 @@ def _valid_bytes():
     ])
 
 
+def _checkpoint_snapshot(session, batch_id):
+    return [
+        (
+            checkpoint.id,
+            checkpoint.import_batch_id,
+            checkpoint.entity_id,
+            checkpoint.ledger_account_id,
+            checkpoint.balance_date,
+            checkpoint.balance,
+            checkpoint.currency,
+            dict(checkpoint.source_metadata or {}),
+        )
+        for checkpoint in session.scalars(
+            select(BalanceCheckpoint)
+            .where(BalanceCheckpoint.import_batch_id == batch_id)
+            .order_by(BalanceCheckpoint.id)
+        ).all()
+    ]
+
+
 def test_parser_reads_signed_decimal_rows_with_data_only(monkeypatch):
     calls = []
     original_load_workbook = openpyxl.load_workbook
@@ -434,6 +454,7 @@ def test_active_baseline_replay_rejects_corrupt_children_without_repopulation(
             BalanceCheckpoint.import_batch_id == batch.id
         )
     )
+    corrupted_snapshot = _checkpoint_snapshot(session, batch.id)
 
     duplicate = _stage(session, entity_id, contents)
     assert duplicate.id == batch.id
@@ -450,6 +471,46 @@ def test_active_baseline_replay_rejects_corrupt_children_without_repopulation(
             BalanceCheckpoint.import_batch_id == batch.id
         )
     ) == corrupted_count
+    assert _checkpoint_snapshot(session, batch.id) == corrupted_snapshot
+
+
+def test_active_baseline_replay_rejects_foreign_entity_checkpoint_without_mutation(baseline_session):
+    session, entity_id = baseline_session
+    contents = _valid_bytes()
+    batch = _stage(session, entity_id, contents)
+    first_report = normalize_balance_checkpoint_xlsx(
+        contents, entity_id, session, import_batch_id=batch.id, expected_currency="INR"
+    )
+    session.commit()
+
+    organization_id = session.get(Entity, entity_id).organization_id
+    foreign_entity = Entity(
+        organization_id=organization_id,
+        name="Foreign Baseline Owner",
+        materiality_threshold=Decimal("0.00"),
+    )
+    session.add(foreign_entity)
+    session.flush()
+    checkpoint = session.scalars(
+        select(BalanceCheckpoint).where(BalanceCheckpoint.import_batch_id == batch.id)
+    ).first()
+    assert checkpoint is not None
+    checkpoint.entity_id = foreign_entity.id
+    session.commit()
+    corrupted_snapshot = _checkpoint_snapshot(session, batch.id)
+
+    duplicate = _stage(session, entity_id, contents)
+    assert duplicate.id == batch.id
+    with pytest.raises(ValueError, match="missing or altered"):
+        normalize_balance_checkpoint_xlsx(
+            contents, entity_id, session, import_batch_id=duplicate.id, expected_currency="INR"
+        )
+
+    session.commit()
+    persisted = session.get(ImportBatch, batch.id)
+    assert persisted.status == "ACTIVE"
+    assert persisted.validation_report == first_report
+    assert _checkpoint_snapshot(session, batch.id) == corrupted_snapshot
 
 
 def test_active_exact_sha_journal_batch_is_rejected_by_baseline_normalizer(baseline_session):

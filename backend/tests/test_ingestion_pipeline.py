@@ -124,6 +124,84 @@ def test_duplicate_integrity_error_reloads_existing_batch(session, monkeypatch):
     assert is_duplicate_import_batch(duplicate)
 
 
+def test_duplicate_integrity_error_with_mismatched_coverage_is_rejected(session, monkeypatch):
+    first = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"racing coverage duplicate",
+    )
+    session.commit()
+    original_execute = session.execute
+    hidden_first_lookup = [True]
+
+    def execute(statement, *args, **kwargs):
+        if hidden_first_lookup[0] and "content_sha256" in str(statement):
+            hidden_first_lookup[0] = False
+            return original_execute(select(ImportBatch).where(ImportBatch.id == -1))
+        return original_execute(statement, *args, **kwargs)
+
+    monkeypatch.setattr(session, "execute", execute)
+    with pytest.raises(BatchConflictError, match="coverage"):
+        stage_import_batch(
+            session,
+            entity_id=_entity_id(session),
+            period_start=date(2025, 4, 1),
+            period_end=date(2025, 6, 30),
+            source="gl_upload",
+            source_family="gl_upload",
+            original_filename="replay.xlsx",
+            contents=b"racing coverage duplicate",
+            uploaded_by_user_id=None,
+            coverage_start=date(2025, 7, 1),
+            coverage_end=date(2025, 9, 30),
+        )
+
+    session.commit()
+    session.expire_all()
+    persisted = session.get(ImportBatch, first.id)
+    assert persisted.status == "STAGED"
+    assert persisted.coverage_start == date(2025, 4, 1)
+    assert persisted.coverage_end == date(2025, 6, 30)
+    assert session.scalar(select(func.count()).select_from(ImportBatch)) == 1
+
+
+def test_exact_hash_replay_with_explicit_coverage_mismatch_is_rejected_without_mutation(session):
+    active = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"explicit coverage replay",
+    )
+    activate_import_batch(session, active, validation_report={"readiness": "READY"})
+    session.commit()
+    original_report = dict(active.validation_report)
+
+    with pytest.raises(BatchConflictError, match="coverage"):
+        stage_import_batch(
+            session,
+            entity_id=_entity_id(session),
+            period_start=date(2025, 4, 1),
+            period_end=date(2025, 6, 30),
+            source="gl_upload",
+            source_family="gl_upload",
+            original_filename="replay.xlsx",
+            contents=b"explicit coverage replay",
+            uploaded_by_user_id=None,
+            coverage_start=date(2025, 7, 1),
+            coverage_end=date(2025, 9, 30),
+        )
+
+    session.commit()
+    session.expire_all()
+    persisted = session.get(ImportBatch, active.id)
+    assert persisted.status == "ACTIVE"
+    assert persisted.validation_report == original_report
+    assert persisted.coverage_start == date(2025, 4, 1)
+    assert persisted.coverage_end == date(2025, 6, 30)
+    assert session.scalar(select(func.count()).select_from(ImportBatch)) == 1
+
+
 @pytest.mark.parametrize("status", ["STAGED", "FAILED", "SUPERSEDED"])
 def test_compatibility_duplicate_non_active_batch_is_rejected(session, status):
     contents = f"non-active-{status}".encode()
@@ -188,14 +266,15 @@ def test_same_hash_remains_importable_for_another_entity(session):
 
 
 @pytest.mark.parametrize(
-    ("replay_start", "replay_end", "replay_family", "expected_error"),
+    ("replay_start", "replay_end", "replay_family", "replay_kind", "expected_error"),
     [
-        (date(2025, 7, 1), date(2025, 9, 30), "gl_upload", "period"),
-        (date(2025, 4, 1), date(2025, 6, 30), "tally", "source family"),
+        (date(2025, 7, 1), date(2025, 9, 30), "gl_upload", "journal", "period"),
+        (date(2025, 4, 1), date(2025, 6, 30), "tally", "journal", "source family"),
+        (date(2025, 4, 1), date(2025, 6, 30), "gl_upload", "balance_checkpoint", "batch kind"),
     ],
 )
 def test_exact_hash_replay_with_different_scope_is_rejected_without_mutation(
-    session, replay_start, replay_end, replay_family, expected_error
+    session, replay_start, replay_end, replay_family, replay_kind, expected_error
 ):
     active = _stage(
         session,
@@ -218,6 +297,7 @@ def test_exact_hash_replay_with_different_scope_is_rejected_without_mutation(
             original_filename="replay.xlsx",
             contents=b"scope-bound-replay",
             uploaded_by_user_id=None,
+            kind=replay_kind,
             coverage_start=replay_start,
             coverage_end=replay_end,
         )

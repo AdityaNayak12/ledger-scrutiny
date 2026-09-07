@@ -574,6 +574,7 @@ def normalize_baseline_xlsx(
         )
         expected_checkpoints = {
             (accounts_by_code[record.ledger_account_code].id, record.balance_date): (
+                entity_id,
                 record.balance,
                 record.currency,
                 {
@@ -596,6 +597,7 @@ def normalize_baseline_xlsx(
             or actual_by_key.keys() != expected_checkpoints.keys()
             or any(
                 (
+                    checkpoint.entity_id,
                     checkpoint.balance,
                     checkpoint.currency,
                     dict(checkpoint.source_metadata or {}),

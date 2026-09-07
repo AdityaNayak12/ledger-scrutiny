@@ -23,6 +23,7 @@ from app.db.models import (
     TrialBalanceSnapshot,
 )
 from app.ingestion.tally_parser import TallyConnectorError, parse_tally_xml
+from app.ingestion.xlsx_normalizer import validate_gl_xlsx_replay
 from conftest import TestingSessionLocal
 
 client = TestClient(app)
@@ -129,6 +130,28 @@ def _gl_bytes() -> bytes:
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def _model_snapshot(session, model, *criteria):
+    return [
+        tuple(getattr(row, column.name) for column in model.__table__.columns)
+        for row in session.scalars(select(model).where(*criteria).order_by(model.id)).all()
+    ]
+
+
+def _batch_child_snapshot(session, batch_id):
+    entry_ids = select(JournalEntry.id).where(JournalEntry.import_batch_id == batch_id)
+    return {
+        "journal_entries": _model_snapshot(session, JournalEntry, JournalEntry.import_batch_id == batch_id),
+        "journal_lines": _model_snapshot(session, JournalLine, JournalLine.journal_entry_id.in_(entry_ids)),
+        "balance_checkpoints": _model_snapshot(
+            session, BalanceCheckpoint, BalanceCheckpoint.import_batch_id == batch_id
+        ),
+        "transactions": _model_snapshot(session, Transaction, Transaction.import_batch_id == batch_id),
+        "trial_balance_snapshots": _model_snapshot(
+            session, TrialBalanceSnapshot, TrialBalanceSnapshot.import_batch_id == batch_id
+        ),
+    }
 
 
 def get_auth_headers():
@@ -440,6 +463,8 @@ def test_tally_duplicate_replay_rejects_corrupt_canonical_children(mutation):
             session.delete(line)
         else:
             line.amount = Decimal("999.00")
+        session.flush()
+        corrupted_snapshot = _batch_child_snapshot(session, batch_id)
         session.commit()
 
     duplicate = client.post(
@@ -461,6 +486,7 @@ def test_tally_duplicate_replay_rejects_corrupt_canonical_children(mutation):
         active_batch = session.get(ImportBatch, batch_id)
         assert active_batch.status == "ACTIVE"
         assert active_batch.validation_report == first_body["validation_report"]
+        assert _batch_child_snapshot(session, batch_id) == corrupted_snapshot
         assert session.scalar(
             select(func.count()).select_from(JournalLine).join(JournalEntry).where(JournalEntry.import_batch_id == batch_id)
         ) == (3 if mutation == "missing" else 4)
@@ -1099,6 +1125,18 @@ def test_fixed_gl_duplicate_replay_validates_canonical_children(mutation):
             session.delete(line)
         else:
             line.amount = Decimal("999.00")
+        session.flush()
+        corrupted_snapshot = _batch_child_snapshot(session, batch_id)
+        with pytest.raises(ValueError, match="missing or altered"):
+            validate_gl_xlsx_replay(
+                contents,
+                date(2025, 4, 1),
+                date(2026, 3, 31),
+                entity["id"],
+                session,
+                import_batch_id=batch_id,
+            )
+        assert _batch_child_snapshot(session, batch_id) == corrupted_snapshot
         session.commit()
 
     invalid_duplicate = client.post(
