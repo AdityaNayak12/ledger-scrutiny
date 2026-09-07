@@ -8,7 +8,7 @@ from datetime import datetime, date, timezone
 from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, Form, status
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func, inspect, select, delete
+from sqlalchemy import func, inspect, or_, select, delete
 from pydantic import BaseModel, ConfigDict
 
 from app.db.session import get_db
@@ -1261,6 +1261,7 @@ def trigger_scrutiny_run(
     active_batch = db.execute(select(ImportBatch).where(
         ImportBatch.financial_period_id == financial_period.id,
         ImportBatch.status == "ACTIVE",
+        or_(ImportBatch.kind.is_(None), ImportBatch.kind == "journal"),
     ).order_by(ImportBatch.id.desc())).scalar_one_or_none()
     if not active_batch and not dataset["active_batch_ids"]:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This period has no active import batch.")

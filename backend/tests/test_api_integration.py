@@ -22,6 +22,9 @@ from app.db.models import (
     Transaction,
     TrialBalanceSnapshot,
 )
+from app.ingestion.baseline import normalize_balance_checkpoint_xlsx
+from app.ingestion.batches import stage_import_batch
+from app.ingestion.datasets import resolve_active_dataset
 from app.ingestion.tally_parser import TallyConnectorError, parse_tally_xml
 from app.ingestion.xlsx_normalizer import validate_gl_xlsx_replay
 from conftest import TestingSessionLocal
@@ -1339,6 +1342,193 @@ def test_tally_and_gl_canonical_reports_have_matching_journal_totals():
         assert all(fact[2] == gl_entity["id"] for fact in gl_facts)
         assert {fact[0] for fact in tally_facts} == {1, 2}
         assert {fact[0] for fact in gl_facts} == {2, 3}
+
+
+def test_tally_and_gl_complete_parity_has_equal_scrutiny_inputs_and_findings():
+    period_start = date(2025, 4, 1)
+    period_end = date(2026, 3, 31)
+    baseline_date = date(2025, 3, 31)
+    tally_xml = b"""<ENVELOPE><COMPANY><RENAME>Complete Tally Parity</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
+      <TALLYMESSAGE><LEDGER NAME="Trade Payable Control" GUID="1000"><PARENT>Sundry Creditors</PARENT><OPENINGBALANCE>50</OPENINGBALANCE><CLOSINGBALANCE>150</CLOSINGBALANCE></LEDGER></TALLYMESSAGE>
+      <TALLYMESSAGE><LEDGER NAME="Retained Earnings Control" GUID="2000"><PARENT>Capital Account</PARENT><OPENINGBALANCE>-50</OPENINGBALANCE><CLOSINGBALANCE>-150</CLOSINGBALANCE></LEDGER></TALLYMESSAGE>
+      <TALLYMESSAGE><VOUCHER VCHTYPE="Journal"><DATE>20250401</DATE><VOUCHERNUMBER>PARITY-TALLY-1</VOUCHERNUMBER>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Trade Payable Control</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>100</AMOUNT></ALLLEDGERENTRIES.LIST>
+        <ALLLEDGERENTRIES.LIST><LEDGERNAME>Retained Earnings Control</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>100</AMOUNT></ALLLEDGERENTRIES.LIST>
+      </VOUCHER></TALLYMESSAGE></ENVELOPE>"""
+    gl_bytes = _gl_bytes()
+
+    baseline_workbook = openpyxl.Workbook()
+    baseline_sheet = baseline_workbook.active
+    baseline_sheet.append(["Account Code", "Balance Date", "Signed Balance", "Currency"])
+    baseline_sheet.append(["1000", baseline_date, 50, "INR"])
+    baseline_sheet.append(["2000", baseline_date, -50, "INR"])
+    baseline_output = io.BytesIO()
+    baseline_workbook.save(baseline_output)
+    baseline_bytes = baseline_output.getvalue()
+
+    headers = get_auth_headers()
+    tally_entity = client.post(
+        "/entities",
+        json={"name": "Complete Tally Parity", "materiality_threshold": "1000.00"},
+        headers=headers,
+    ).json()
+    tally_upload = client.post(
+        f"/entities/{tally_entity['id']}/upload",
+        files={"file": ("complete-parity.xml", tally_xml, "text/xml")},
+        headers=headers,
+    )
+    assert tally_upload.status_code == 200, tally_upload.text
+
+    gl_entity = client.post(
+        "/entities",
+        json={"name": "Complete GL Parity", "materiality_threshold": "1000.00"},
+        headers=headers,
+    ).json()
+    explicit_classification = {
+        "1000": ("Sundry Creditors", "credit"),
+        "2000": ("Capital Account", "credit"),
+    }
+    with TestingSessionLocal() as session:
+        session.add_all([
+            LedgerAccount(
+                entity_id=gl_entity["id"],
+                external_code=code,
+                name=name,
+                group_name=group_name,
+                normal_balance=normal_balance,
+            )
+            for code, (name, group_name, normal_balance) in {
+                "1000": ("Trade Payable Control", *explicit_classification["1000"]),
+                "2000": ("Retained Earnings Control", *explicit_classification["2000"]),
+            }.items()
+        ])
+        session.commit()
+
+    gl_upload = client.post(
+        f"/entities/{gl_entity['id']}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": period_start.isoformat(),
+            "target_period_end": period_end.isoformat(),
+        },
+        files={"file": ("complete-parity.xlsx", io.BytesIO(gl_bytes), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert gl_upload.status_code == 200, gl_upload.text
+
+    with TestingSessionLocal() as session:
+        baseline_batch = stage_import_batch(
+            session,
+            entity_id=gl_entity["id"],
+            period_start=period_start,
+            period_end=period_end,
+            source="gl_upload",
+            source_family="gl_upload",
+            original_filename="complete-opening-baseline.xlsx",
+            contents=baseline_bytes,
+            uploaded_by_user_id=None,
+            kind="balance_checkpoint",
+            coverage_start=period_start,
+            coverage_end=period_end,
+        )
+        normalize_balance_checkpoint_xlsx(
+            baseline_bytes,
+            gl_entity["id"],
+            session,
+            import_batch_id=baseline_batch.id,
+            expected_currency="INR",
+            expected_balance_date=baseline_date,
+        )
+        session.commit()
+        gl_baseline_id = baseline_batch.id
+
+    with TestingSessionLocal() as session:
+        tally_dataset = resolve_active_dataset(session, tally_entity["id"], financial_year=2025)
+        gl_dataset = resolve_active_dataset(session, gl_entity["id"], financial_year=2025)
+
+    def decimal_account_values(dataset, field):
+        return {code: Decimal(value) for code, value in dataset[field].items()}
+
+    assert decimal_account_values(tally_dataset, "account_movements") == decimal_account_values(
+        gl_dataset, "account_movements"
+    ) == {"1000": Decimal("100"), "2000": Decimal("-100")}
+    assert decimal_account_values(tally_dataset, "opening_balances") == decimal_account_values(
+        gl_dataset, "opening_balances"
+    ) == {"1000": Decimal("50"), "2000": Decimal("-50")}
+    assert decimal_account_values(tally_dataset, "closing_balances") == decimal_account_values(
+        gl_dataset, "closing_balances"
+    ) == {"1000": Decimal("150"), "2000": Decimal("-150")}
+    assert tally_dataset["readiness"] in {"READY", "READY_WITH_WARNINGS"}
+    assert gl_dataset["readiness"] in {"READY", "READY_WITH_WARNINGS"}
+    assert tally_dataset["source_batch_ids"] == [tally_upload.json()["import_batch_id"]]
+    assert gl_dataset["source_batch_ids"] == sorted([
+        gl_upload.json()["import_batch_id"],
+        gl_baseline_id,
+    ])
+
+    tally_run = client.post(
+        f"/entities/{tally_entity['id']}/scrutiny-run",
+        params={"period_start": period_start.isoformat(), "period_end": period_end.isoformat()},
+        headers=headers,
+    )
+    gl_run = client.post(
+        f"/entities/{gl_entity['id']}/scrutiny-run",
+        params={"period_start": period_start.isoformat(), "period_end": period_end.isoformat()},
+        headers=headers,
+    )
+    assert tally_run.status_code == 200, tally_run.text
+    assert gl_run.status_code == 200, gl_run.text
+
+    def deterministic_findings(entity_id):
+        findings = client.get(
+            f"/entities/{entity_id}/exceptions",
+            params={"period_start": period_start.isoformat(), "period_end": period_end.isoformat()},
+            headers=headers,
+        )
+        assert findings.status_code == 200, findings.text
+        return sorted(
+            tuple(item[field] for field in (
+                "rule_name", "severity", "message", "ledger_account_name", "status", "auditor_notes",
+            ))
+            for item in findings.json()
+        )
+
+    tally_findings = deterministic_findings(tally_entity["id"])
+    gl_findings = deterministic_findings(gl_entity["id"])
+    assert tally_findings == gl_findings
+    assert tally_findings == [(
+        "creditor_debit_balance",
+        "error",
+        "Creditor account 'Trade Payable Control' has a debit closing balance of 150.00. "
+        "This indicates an advance given to the supplier or an excess payment made.",
+        "Trade Payable Control",
+        "PENDING",
+        None,
+    )]
+
+    with TestingSessionLocal() as session:
+        for entity_id, run_id, dataset in (
+            (tally_entity["id"], tally_run.json()["scrutiny_run_id"], tally_dataset),
+            (gl_entity["id"], gl_run.json()["scrutiny_run_id"], gl_dataset),
+        ):
+            stored_run = session.get(ScrutinyRun, run_id)
+            assert stored_run.status == "COMPLETED"
+            assert stored_run.dataset_fingerprint == dataset["dataset_fingerprint"]
+            assert stored_run.source_batch_ids == dataset["source_batch_ids"]
+            assert stored_run.source_batch_ids == sorted(stored_run.source_batch_ids)
+            assert stored_run.entity_id == entity_id
+
+        tally_batch = session.get(ImportBatch, tally_upload.json()["import_batch_id"])
+        gl_batch = session.get(ImportBatch, gl_upload.json()["import_batch_id"])
+        gl_baseline = session.get(ImportBatch, gl_baseline_id)
+        assert tally_batch.source_family == "tally"
+        assert tally_batch.raw_source_bytes == tally_xml
+        assert gl_batch.source_family == "gl_upload"
+        assert gl_batch.raw_source_bytes == gl_bytes
+        assert gl_baseline.kind == "balance_checkpoint"
+        assert gl_baseline.source_family == "gl_upload"
+        assert gl_baseline.raw_source_bytes == baseline_bytes
+        assert tally_dataset["dataset_fingerprint"] != gl_dataset["dataset_fingerprint"]
 
 
 def test_first_failed_tally_batch_is_retained_without_exposing_an_orphan_period():
