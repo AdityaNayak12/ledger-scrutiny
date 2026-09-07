@@ -118,6 +118,8 @@ The first supported profile is the supplied workbook shape. Required headers are
 - `Posting Date`
 - `Amount in local currency`
 
+This transaction-level profile is the only supported XLSX GL format. The legacy four-column balance upload (`ledger_name`, `group_name`, `opening_balance`, `closing_balance`) and its three sign conventions are not part of this contract.
+
 The parser retains document type/date, posting key, invoice/reference, clearing document, profit centre, cost centre, text, supplier/vendor, WBS, purchasing document and customer fields when present. It reads cached formula values (`data_only=True`) and warns when a formula has no cached result; it never evaluates Excel formulas.
 
 The GL workflow accepts a transaction workbook and, when establishing a financial year, a structured signed prior-year account-level closing trial-balance workbook. A signed PDF may be retained as evidence, but a PDF alone is not an ingestible baseline in P0; it must be accompanied by a machine-readable account schedule. The API may receive both artifacts in one confirmation request or register the baseline first; both are part of the same GL workflow and share the same entity/source contract.
@@ -151,6 +153,14 @@ The Tally adapter must fetch and normalize:
 - stable Tally identifiers when available.
 
 Connector errors must become actionable, typed ingestion errors. Request bodies, raw XML and credentials are not logged. The adapter remains independent of FastAPI and SQLAlchemy; persistence occurs in the shared pipeline.
+
+Tally endpoint configuration is explicit:
+
+- The caller supplies the endpoint; it must use `http` or `https` and include a host.
+- Local endpoints require `TALLY_ALLOW_LOCAL_ENDPOINTS=1`.
+- A deployed DNS hostname must be an exact entry in `TALLY_ALLOWED_HOSTS`.
+- Do not silently enable loopback or broadly allow private addresses; redirects remain disabled.
+- Remote Tally topology is unresolved until the pilot environment and an approved connection approach are known. Do not assume public reachability or add a bridge, agent, or network access change under this contract.
 
 ## Reconciliation and readiness
 
