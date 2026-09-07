@@ -17,7 +17,7 @@ The signed prior-year document is sufficient only if it contains one signed bala
 
 ## Why the current plan needs this change
 
-The supplied `GL Dump Q1.XLSX` is a transaction-level SAP-like export, not a trial-balance snapshot. It has 21 columns, including document number, G/L account, posting date, posting key and signed local-currency amount. It contains 59,168 data rows, 10,914 documents and 445 G/L accounts; the documents balance to zero. :codex-file-citation{path="/Users/adinayak18/Downloads/GL Dump Q1.XLSX" purpose="source" artifact_kind="workbook" sheet="Sheet1" range="A1:U59169"}
+The supplied `GL Dump Q1.XLSX` is a transaction-level SAP-like export, not a trial-balance snapshot. It has 21 columns, including document number, G/L account, posting date, posting key and signed local-currency amount. Its `Sheet1` range is `A1:U59169`: row 1 is the header, and rows 2–59169 are 59,168 post-header source rows. Rows 2–59168 are 59,167 accepted journal lines; row 59169 is the explicit zero-valued `LIABILITY TOTAL` summary/footer row and is skipped. No rows are rejected. The workbook contains 10,914 documents and 445 G/L accounts; the accepted documents balance to zero. :codex-file-citation{path="/Users/adinayak18/Downloads/GL Dump Q1.XLSX" purpose="source" artifact_kind="workbook" sheet="Sheet1" range="A1:U59169"}
 
 The current XLSX normalizer is shaped around `ledger_name`, `group_name`, `opening_balance` and `closing_balance`, so it cannot faithfully ingest this file. The current Tally HTTP connector returns `vouchers: []`, and the existing paired debit/credit `Transaction` model cannot preserve arbitrary multi-line journal documents. These are P0 ingestion gaps, not rule gaps.
 
@@ -231,7 +231,7 @@ Update `backend/app/routers/scrutiny.py`, the XLSX upload component and integrat
 
 P0 is complete only when:
 
-- the supplied Q1 workbook imports with the expected rows, documents, accounts and date range;
+- the supplied Q1 workbook imports with 59,168 input rows accounted as 59,167 accepted journal lines, one explained summary/footer skip, zero rejected rows, 10,914 documents, 445 accounts and the expected date range;
 - every accepted document balances and no row disappears without a recorded reason;
 - Q1, Q2 and Q3 can be accumulated without overlap or duplication;
 - a full-year file is an explicit alternative to the quarterly set;
