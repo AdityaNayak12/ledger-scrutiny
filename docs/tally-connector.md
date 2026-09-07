@@ -87,17 +87,33 @@ test. For example: company `Acme Audited Corp`, period `2025-04-01` through
 
    Substitute the confirmed hostname, port, company, and period; the values
    above are illustrative and unverified.
-3. Save the response metadata and verify `status=ACTIVE`, the expected
-   readiness state, and the selected period. Record
+3. Save the response metadata, including the returned `import_batch_id`, and
+   verify `status=ACTIVE`, the expected readiness state, and the selected
+   period. Record
    `validation_report.ledger_count`, `validation_report.document_count`, and
    `validation_report.accepted_rows` as the reported ledger, document, and
    voucher-line counts. Also check that `errors` is empty, dates and source
    identifiers are present, and the returned `source_lineage` identifies the
    active batch.
-4. Confirm the stored batch retains the raw response bytes and safe endpoint
+4. Using a read-only administrative/database connection, query only the
+   selected batch's `id`, `content_sha256`, `status`, and raw-byte length; for
+   example:
+
+   ```sql
+   SELECT id, content_sha256, status, length(raw_source_bytes) AS raw_byte_count
+   FROM import_batches
+   WHERE id = <import_batch_id>;
+   ```
+
+   Verify the ID and active status match the API response, record the batch ID,
+   lowercase SHA-256 hash, and byte count in the smoke record, and confirm the
+   hash is present and the byte count is non-zero. Do not select, print, or
+   expose `raw_source_bytes` or raw XML; if the administrative tooling can
+   hash the blob in place, compare that result without returning the blob.
+5. Confirm the stored batch retains the raw response bytes and safe endpoint
    metadata only; do not put credentials, request bodies, or raw XML into
    logs or screenshots.
-5. Run one deliberate unavailable-endpoint check using the exact allowlisted
+6. Run one deliberate unavailable-endpoint check using the exact allowlisted
    Tally hostname with a confirmed stopped/unused listener port. Expect a
    structured HTTP 400 with a safe actionable message, no endpoint credentials
    or source payload in the response, and no active-data replacement. Treat

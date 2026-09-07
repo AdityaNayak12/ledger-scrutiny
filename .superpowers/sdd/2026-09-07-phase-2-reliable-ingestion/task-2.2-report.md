@@ -8,17 +8,19 @@ so no test regression or production code change was made.
 
 Files changed:
 
+- `backend/tests/test_tally_http.py`: added the missing configured-host
+  lookalike/suffix rejection regression.
 - `docs/tally-connector.md`: added the explicitly unverified remote-topology
-  proposal and read-only pilot smoke procedure.
+  proposal and read-only pilot smoke procedure, including batch hash capture.
 - `.superpowers/sdd/2026-09-07-phase-2-reliable-ingestion/task-2.2-report.md`:
   this report.
 
 Not changed: `backend/app/ingestion/tally_http.py`,
 `backend/app/ingestion/tally_parser.py`,
 `backend/app/ingestion/tally_normalizer.py`,
-`backend/app/routers/scrutiny.py`, the three focused test files, and the
-verified `.env.example`. No remote deployment configuration was agreed, so no
-environment value was added.
+`backend/app/routers/scrutiny.py`, the remaining two focused test files, and
+the verified `.env.example`. No remote deployment configuration was agreed, so
+no environment value was added.
 
 ## Tests and outputs
 
@@ -62,12 +64,16 @@ Inspected acceptance coverage:
   safe details without credentials, endpoint paths, or source XML; failed
   batches do not replace active data.
 - Endpoint policy: invalid schemes, non-global/private/link-local/reserved
-  targets, localhost without opt-in, exact configured hostnames, and no
-  redirect bypass. Rejected endpoints are asserted not to make an HTTP call.
+  targets, localhost without opt-in, exact configured hostnames, configured
+  lookalike/suffix hostnames, and no redirect bypass. Rejected endpoints are
+  asserted not to make an HTTP call.
 
-No listed acceptance case was missing. Therefore there is no RED/GREEN TDD
-cycle to report; adding a synthetic regression or changing behavior would not
-be justified by the evidence.
+Round 1 corrected the coverage claim: the initial report incorrectly treated
+the allowed-host test as proof of rejection coverage. The new regression sets
+`TALLY_ALLOWED_HOSTS=tally.example.test`, calls
+`tally.example.test.attacker.test`, and proves rejection occurs before
+`httpx.post`. Current production already uses exact hostname equality, so no
+production change was needed.
 
 ## Remote-connectivity proposal (unverified)
 
@@ -103,12 +109,14 @@ change, or silent private-IP exception.
 The updated `docs/tally-connector.md` contains the runnable procedure. In
 summary, record the approved company and inclusive period, configure only the
 exact allowlisted Tally hostname, call the protected import route, and record
-the response's `validation_report.ledger_count`,
+the response's `import_batch_id`, `validation_report.ledger_count`,
 `validation_report.document_count`, and `validation_report.accepted_rows`.
 Verify active/readiness state, dates, source identifiers, empty errors, active
-lineage, and retained raw response bytes. Then test a deliberately unavailable
-listener port on the exact allowlisted host and expect a structured HTTP 400
-with no credentials or source payload and no active-data replacement.
+lineage, and use the read-only `import_batches` check in the updated docs to
+record `content_sha256` and raw-byte length without returning raw XML. Then
+test a deliberately unavailable listener port on the exact allowlisted host
+and expect a structured HTTP 400 with no credentials or source payload and no
+active-data replacement.
 
 Live Tally compatibility remains unverified until this smoke run is executed
 and its selected company/period, counts, and unavailable-endpoint result are
@@ -139,5 +147,63 @@ The local `.env.example` exists but remains unchanged because remote topology
 is unresolved.
 
 Concerns are limited to the unverified live network/Tally prerequisites and
-the three existing deprecation warnings above. No code or test gap was found
-that this task should fix.
+the three existing deprecation warnings above. The round-1 test-coverage gap
+is closed without a production change.
+
+## Round 1 fix report (appended)
+
+### Finding addressed
+
+The initial report's configured-host coverage claim was too broad. The
+existing allow test at `backend/tests/test_tally_http.py:332` proved only that
+`tally.example.test` was accepted; the rejection parametrization cleared
+`TALLY_ALLOWED_HOSTS` and did not prove that a lookalike or suffix hostname was
+rejected when a valid allowlist entry existed.
+
+Added `test_tally_connector_rejects_lookalike_hostname_with_configured_allowlist`
+at `backend/tests/test_tally_http.py`. It sets
+`TALLY_ALLOWED_HOSTS=tally.example.test`, submits
+`http://tally.example.test.attacker.test:9000`, replaces `httpx.post` with an
+unexpected-call failure, and asserts the explicit-host-allowlist error. The
+current implementation's exact equality at
+`backend/app/ingestion/tally_http.py:64` passed unchanged; no production fix
+was required.
+
+### Documentation finding addressed
+
+The pilot procedure now records the API `import_batch_id`, then uses a
+read-only query for `id`, `content_sha256`, `status`, and
+`length(raw_source_bytes)`. It records the batch ID, lowercase SHA-256, and
+byte count without selecting or exposing `raw_source_bytes` or raw XML.
+
+### Covering test commands and exact results
+
+Regression test:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_tally_http.py::test_tally_connector_rejects_lookalike_hostname_with_configured_allowlist
+.                                                                        [100%]
+1 passed, 3 warnings in 0.02s
+```
+
+The warnings were the existing Starlette `httpx` compatibility deprecation and
+FastAPI `on_event` deprecation (reported as three warning instances).
+
+Focused command required by the brief:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_tally_http.py tests/test_tally_ingestion.py tests/test_api_integration.py -k tally
+67 passed, 23 deselected, 3 warnings in 3.45s
+```
+
+Full relevant three-file check:
+
+```text
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_tally_http.py tests/test_tally_ingestion.py tests/test_api_integration.py
+90 passed, 3 warnings in 7.60s
+```
+
+All commands exited with status 0. No production behavior changed, so there
+was no RED/GREEN production-fix cycle; the added regression passed against the
+already-correct exact-equality implementation. The unresolved live topology
+and pilot compatibility gate remain unchanged.

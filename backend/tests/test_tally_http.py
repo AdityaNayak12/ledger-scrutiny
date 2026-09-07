@@ -347,6 +347,22 @@ def test_tally_connector_allows_exactly_configured_hostname(monkeypatch):
     assert raw == RESPONSE
 
 
+def test_tally_connector_rejects_lookalike_hostname_with_configured_allowlist(monkeypatch):
+    monkeypatch.setenv("TALLY_ALLOWED_HOSTS", "tally.example.test")
+
+    def unexpected_post(*args, **kwargs):
+        raise AssertionError("lookalike endpoints must be rejected before HTTP")
+
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", unexpected_post)
+    with pytest.raises(TallyConnectorError, match="host must be explicitly allowed"):
+        fetch_trial_balance(
+            endpoint="http://tally.example.test.attacker.test:9000",
+            company_name="Example Company",
+            period_start=date(2025, 4, 1),
+            period_end=date(2026, 3, 31),
+        )
+
+
 def test_tally_connector_disables_redirects(monkeypatch):
     captured = {}
 
