@@ -447,6 +447,39 @@ def test_fixed_gl_normalizer_records_structured_report_for_staged_failure(canoni
     assert batch.validation_report["reject_reasons"][0]["row"] == 3
 
 
+def test_fixed_gl_failure_report_accounts_rows_after_hard_error(canonical_session):
+    session, entity_id = canonical_session
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [
+            ["DOC-1", "1000", date(2025, 4, 1), 1],
+            ["DOC-1", None, date(2025, 4, 1), -1],
+            ["DOC-1", "2000", date(2025, 4, 1), 0],
+        ],
+    )
+    batch = _stage_gl_batch(session, entity_id, contents)
+
+    with pytest.raises(ValueError, match="G/L Account.*required"):
+        normalize_gl_xlsx(
+            contents, date(2025, 4, 1), date(2025, 4, 30), entity_id, session,
+            import_batch_id=batch.id,
+        )
+
+    report = batch.validation_report
+    assert batch.status == "FAILED"
+    assert report["input_rows"] == 3
+    assert report["accepted_rows"] == 0
+    assert report["skipped_rows"] == 0
+    assert report["rejected_rows"] == 3
+    assert {reason["row"] for reason in report["reject_reasons"]} == {2, 3, 4}
+    assert report["reject_reasons"][0]["row"] == 3
+    assert any(
+        reason["row"] == 4 and "not processed" in reason["reason"]
+        for reason in report["reject_reasons"]
+    )
+    assert session.scalar(select(func.count()).select_from(JournalLine)) == 0
+
+
 @pytest.mark.parametrize("sign_convention", ["positive_is_credit", "separate_dr_cr_columns"])
 def test_fixed_gl_confirm_rejects_unsupported_sign_convention(canonical_session, sign_convention):
     session, entity_id = canonical_session
@@ -611,7 +644,11 @@ def test_fixed_gl_confirm_activates_after_normalization_and_rolls_back_invalid_r
         )
         assert failed_batch is not None
         assert failed_batch.raw_source_bytes == invalid_contents
-        assert failed_batch.validation_report["rejected_rows"] == 1
+        assert failed_batch.validation_report["input_rows"] == 2
+        assert failed_batch.validation_report["accepted_rows"] == 0
+        assert failed_batch.validation_report["skipped_rows"] == 0
+        assert failed_batch.validation_report["rejected_rows"] == 2
+        assert {reason["row"] for reason in failed_batch.validation_report["reject_reasons"]} == {2, 3}
         assert failed_batch.validation_report["errors"]
         assert failed_batch.validation_report["reject_reasons"]
 

@@ -2,11 +2,15 @@
 
 ## Status
 
-Verified with no demonstrated parser defect. The only implementation change is
-documentation: the P0 design and dedicated Phase 2 plan now distinguish the
-59,168 post-header source rows from the 59,167 accepted journal lines. No
-production code, test code, schema, or frontend code changed. No synthetic
-regression was added.
+Fix round 1 is complete. The hard-failure report now gives every input source
+row an explicit accepted/skipped/rejected accounting outcome while preserving
+the `FAILED` batch and hard import failure semantics. The P0 design also
+qualifies the Q1 document/account counts as distinct accepted transaction
+counts, excluding the skipped footer.
+
+One focused regression was added in `backend/tests/test_xlsx_ingestion.py`.
+There were no schema or frontend changes and no synthetic production behavior
+outside the reported failure case.
 
 The supplied workbook was available locally and the conditional Q1 test ran;
 this is local fixture evidence only, not live or customer evidence.
@@ -14,12 +18,15 @@ this is local fixture evidence only, not live or customer evidence.
 ## Files changed
 
 - `docs/superpowers/specs/2026-09-04-ledger-ingestion-p0-design.md` — clarified
-  the worksheet range, accepted/skipped/rejected accounting, footer row, and
-  acceptance count.
-- `docs/superpowers/plans/2026-09-07-phase-2-reliable-ingestion.md` — recorded
-  the same measured Q1 reconciliation in Task 2.3.
+  the worksheet range, accepted/skipped/rejected accounting, footer row,
+  acceptance count, and accepted distinct document/account qualification.
+- `backend/app/ingestion/xlsx_normalizer.py` — reports all non-skipped source
+  rows as rejected when a hard parse failure aborts the batch, retaining the
+  failing row's safe error and explicit reasons for the other rows.
+- `backend/tests/test_xlsx_ingestion.py` — added the I1 regression and updated
+  the unbalanced replacement assertion for complete row accounting.
 - `.superpowers/sdd/2026-09-07-phase-2-reliable-ingestion/task-2.3-report.md` —
-  this report.
+  this updated report.
 
 The existing dirty Phase 1/demo files and unrelated untracked files were
 preserved and were not staged or reverted.
@@ -122,6 +129,7 @@ each accepted document passed the existing signed balance validation.
 | Repeated account codes remain separate valid lines | `test_fixed_gl_parser_allows_repeated_account_codes_within_a_document` | Pass |
 | Metadata/classification warnings retain valid journals | `test_fixed_gl_normalizer_reports_skips_formula_cache_warnings_and_unclassified_accounts`; `test_fixed_gl_parser_preserves_nonnumeric_optional_quantity_and_warns` | Pass; warnings non-fatal |
 | Every normalizer row has an explained outcome | `test_fixed_gl_normalizer_records_structured_report_for_staged_failure`; skip/report assertions; Q1 union accounting | Pass |
+| Hard failure before later worksheet rows still accounts for every row | `test_fixed_gl_failure_report_accounts_rows_after_hard_error`; failed replacement API assertions | Pass; failed batch remains hard `FAILED`, with all non-skipped rows rejected |
 | Source row numbers and source metadata persist | `test_fixed_gl_parser_preserves_dimensions_and_source_row`; Q1 row 28096 probe | Pass |
 | Source bytes/hash and duplicate provenance | Existing staging hash test; in-memory Q1 persistence probe below | Pass |
 | Invalid input cannot activate; prior active data is preserved | `test_fixed_gl_confirm_activates_after_normalization_and_rolls_back_invalid_replacement`; API failure tests | Pass |
@@ -136,6 +144,11 @@ The existing path remains fixed-profile transaction GL:
   records blank/summary skip reasons.
 - Required values, dates, finite amounts, numeric capacity, declared coverage,
   and document balance are hard validation boundaries.
+- When a hard parse error stops scanning, `_GLParseError` carries the header
+  row and failure reporting enumerates the full source-row range. Every
+  non-skipped row is represented in `reject_reasons`: the failing row keeps its
+  safe validation error, prior rows record batch rejection, and later rows
+  record that parsing stopped after the earlier hard failure.
 - Optional dimension, uncached-formula, nonnumeric quantity, and unresolved
   account classification issues are warnings; valid journal lines remain
   persisted.
@@ -184,12 +197,63 @@ optional dimension is blank for optional column 'WBS element' in 44403 row(s).
 optional column 'Quantity' contains non-numeric values in 1 row(s); canonical quantity left unset.
 ```
 
-## TDD
+## TDD — fix round 1
 
-Not applicable. No behavioral code or test code changed, so there was no RED
-/GREEN cycle. The existing focused suite passed before and after the docs-only
-edit. The non-finite check was a bounded direct probe, not a committed
-regression.
+The required RED/GREEN cycle was run before the production fix.
+
+### RED
+
+Added `test_fixed_gl_failure_report_accounts_rows_after_hard_error` with a
+valid row 2, a missing required `G/L Account` at row 3, and a valid later row
+4. Before the production change:
+
+```bash
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_xlsx_ingestion.py::test_fixed_gl_failure_report_accounts_rows_after_hard_error
+```
+
+```text
+FAILED tests/test_xlsx_ingestion.py::test_fixed_gl_failure_report_accounts_rows_after_hard_error
+E       assert 1 == 3
+1 failed, 3 warnings in 0.11s
+```
+
+The failure confirmed the report had `input_rows=3`, `accepted_rows=0`,
+`skipped_rows=0`, and only `rejected_rows=1`.
+
+### GREEN
+
+After carrying the detected header row through `_GLParseError` and constructing
+one rejection reason per non-skipped source row:
+
+```bash
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_xlsx_ingestion.py::test_fixed_gl_failure_report_accounts_rows_after_hard_error
+```
+
+```text
+1 passed, 3 warnings in 0.08s
+```
+
+The regression now proves `input=3`, `accepted=0`, `skipped=0`, `rejected=3`,
+and rejection rows `{2, 3, 4}` while the normalizer still raises the required
+field error and marks the batch `FAILED`.
+
+### Fix-round focused verification
+
+```bash
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_xlsx_ingestion.py
+```
+
+```text
+33 passed, 3 warnings in 10.15s
+```
+
+```bash
+PYTHONPATH=. ../.venv/bin/pytest -q tests/test_xlsx_ingestion.py -k supplied_q1 -rs
+```
+
+```text
+1 passed, 32 deselected, 3 warnings in 8.08s
+```
 
 ## Full relevant check
 
@@ -198,7 +262,7 @@ PYTHONPATH=. ../.venv/bin/pytest -q
 ```
 
 ```text
-235 passed, 4 warnings in 21.24s
+236 passed, 4 warnings in 22.14s
 ```
 
 The full-suite warnings are the same existing Starlette/FastAPI deprecations,
@@ -218,6 +282,10 @@ exit 0; no output
 
 - The canonical transaction-level GL contract and signed amount convention are
   unchanged.
+- A hard parse failure still aborts normalization and cannot activate a batch;
+  the failure report now rejects every non-skipped source row explicitly.
+- The new failure report carries the parser's header row so rejection reasons
+  retain original worksheet row numbers even when the header is below row 1.
 - The one skipped Q1 row is now named, located, and tied to its structured skip
   reason; accepted and rejected counts are not conflated.
 - No summary heuristic was broadened, no genuine journal row was reclassified,
@@ -225,8 +293,8 @@ exit 0; no output
 - Hard accounting failures remain hard; metadata and classification warnings
   remain non-fatal.
 - No CSV, `.xls`, schema, GST, guessing, or unrelated Tally work was added.
-- Only the two requested documentation locations and this report are intended
-  for the Task 2.3 commit; unrelated dirty files remain untouched.
+- Only the Task 2.3 production/test/doc/report files are intended for the fix
+  round commit; unrelated dirty files remain untouched.
 
 ## Concerns
 

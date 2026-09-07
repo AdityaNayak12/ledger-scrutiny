@@ -81,11 +81,13 @@ class _GLParseError(ValueError):
         input_rows: int = 0,
         skipped_rows: int = 0,
         skip_reasons: tuple[dict[str, Any], ...] = (),
+        header_row: int = 0,
     ) -> None:
         super().__init__(message)
         self.input_rows = input_rows
         self.skipped_rows = skipped_rows
         self.skip_reasons = skip_reasons
+        self.header_row = header_row
 
 
 def _is_blank(value: Any) -> bool:
@@ -328,7 +330,8 @@ def _failure_reconciliation_report(file_bytes: bytes, error: ValueError) -> dict
     input_rows = getattr(error, "input_rows", 0)
     skipped_rows = getattr(error, "skipped_rows", 0)
     skip_reasons = list(getattr(error, "skip_reasons", ()))
-    if not input_rows:
+    header_row = getattr(error, "header_row", 0)
+    if not input_rows or not header_row:
         try:
             workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
             try:
@@ -343,11 +346,30 @@ def _failure_reconciliation_report(file_bytes: bytes, error: ValueError) -> dict
 
     row_match = re.search(r"Row (\d+):", str(error))
     safe_error = safe_xlsx_error(error)
-    reject_reason: dict[str, Any] = {"reason": safe_error}
-    if row_match:
-        reject_reason["row"] = int(row_match.group(1))
+    failed_row = int(row_match.group(1)) if row_match else None
+    skipped_row_numbers = {
+        int(reason["row"])
+        for reason in skip_reasons
+        if isinstance(reason.get("row"), int)
+    }
+    reject_reasons: list[dict[str, Any]] = []
+    if failed_row is not None:
+        reject_reasons.append({"reason": safe_error, "row": failed_row})
+    if header_row:
+        for row_number in range(header_row + 1, header_row + input_rows + 1):
+            if row_number in skipped_row_numbers or row_number == failed_row:
+                continue
+            reason = safe_error if failed_row is None else (
+                "not processed because an earlier hard validation failure stopped parsing."
+                if row_number > failed_row
+                else "import rejected because the batch had a hard validation failure."
+            )
+            reject_reasons.append({"row": row_number, "reason": reason})
+    elif failed_row is None:
+        reject_reasons.append({"reason": safe_error})
+    rejected_rows = max(0, input_rows - skipped_rows)
     report = build_reconciliation_report(
-        (), input_rows=input_rows, rejected=1, errors=[safe_error], coverage_complete=False,
+        (), input_rows=input_rows, rejected=rejected_rows, errors=[safe_error], coverage_complete=False,
     )
     report.update({
         "parser": "xlsx_gl",
@@ -357,7 +379,7 @@ def _failure_reconciliation_report(file_bytes: bytes, error: ValueError) -> dict
         "skipped": skipped_rows,
         "skipped_rows": skipped_rows,
         "skip_reasons": skip_reasons,
-        "reject_reasons": [reject_reason],
+        "reject_reasons": reject_reasons,
     })
     return report
 
@@ -389,6 +411,7 @@ def _parse_fixed_gl_xlsx(
 
     input_rows = 0
     skip_reasons: list[dict[str, Any]] = []
+    header_row = 0
     try:
         worksheet = workbook.active
         if worksheet is None or worksheet.max_row == 0:
@@ -582,6 +605,7 @@ def _parse_fixed_gl_xlsx(
             input_rows=input_rows,
             skipped_rows=len(skip_reasons),
             skip_reasons=tuple(skip_reasons),
+            header_row=header_row,
         ) from error
     finally:
         workbook.close()
