@@ -18,6 +18,7 @@ from app.ingestion.schema import BatchKind, BatchStatus, SourceFamily
 
 PARSER_VERSION = "2"
 _DUPLICATE_MARKER = "_duplicate_import_batch"
+_HASH_UNIQUE_CONSTRAINT = "uq_import_batch_entity_content_sha256"
 
 
 class BatchLifecycleError(ValueError):
@@ -49,6 +50,19 @@ def _find_duplicate_import_batch(session: Session, entity_id: int, content_sha25
             ImportBatch.content_sha256 == content_sha256,
         ).order_by(ImportBatch.id.desc())
     ).scalars().first()
+
+
+def _is_hash_uniqueness_error(error: IntegrityError) -> bool:
+    constraint_name = getattr(getattr(error.orig, "diag", None), "constraint_name", None)
+    if constraint_name is not None:
+        return str(constraint_name) == _HASH_UNIQUE_CONSTRAINT
+
+    message = str(error.orig).lower()
+    return _HASH_UNIQUE_CONSTRAINT in message or (
+        "unique constraint failed" in message
+        and "import_batches.entity_id" in message
+        and "import_batches.content_sha256" in message
+    )
 
 
 def _enum_value(value: Any) -> Any:
@@ -212,7 +226,9 @@ def stage_import_batch(
             )
             session.add(batch)
             session.flush()
-    except IntegrityError:
+    except IntegrityError as error:
+        if not _is_hash_uniqueness_error(error):
+            raise
         duplicate = _find_duplicate_import_batch(session, entity_id, content_sha256)
         if duplicate is not None:
             _validate_duplicate_scope(

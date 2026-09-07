@@ -2,7 +2,7 @@
 
 ## Status
 
-Complete after review fix round 1. Task 2.4 now has regression coverage for the missing replay-scope and corrupted-baseline cases, plus stronger assertions around atomic replacement, persisted lineage, retained rows, and readiness. The review findings I1, I2, M1, and M2 are addressed. The required focused command and the full backend suite pass.
+Complete after review fix round 2. Task 2.4 now has regression coverage for the missing replay-scope and corrupted-baseline cases, plus stronger assertions around atomic replacement, persisted lineage, retained rows, readiness, and unrelated IntegrityError propagation. The review findings I1, I2, M1, and M2 are addressed. The required focused command and the full backend suite pass.
 
 ## Scope and evidence basis
 
@@ -18,6 +18,7 @@ Production changes were limited to existing ingestion boundaries:
 - `backend/app/ingestion/batches.py`
   - Centralized exact-SHA duplicate scope validation now checks stored/requested financial period, normalized coverage (with period-date fallback), source family, and batch kind.
   - The same validator runs on both the initial hash lookup and the IntegrityError uniqueness-race reload path.
+  - The IntegrityError reload is now reached only for the ImportBatch entity/content-hash uniqueness violation; unrelated FK/constraint failures re-raise before duplicate reload.
   - A same-entity hash reused for another period, family, or kind raises `BatchConflictError` without creating a batch or mutating the existing one.
 - `backend/app/ingestion/baseline.py`
   - Active exact-SHA baseline replays now re-parse the source and compare the complete persisted checkpoint key/value/metadata set, including `BalanceCheckpoint.entity_id`, before returning the stored report.
@@ -28,6 +29,7 @@ Regression/assertion coverage:
 - `backend/tests/test_ingestion_pipeline.py`
   - Added explicit coverage mismatch rejection and a mismatched-coverage uniqueness-race regression.
   - Extended scope rejection to assert batch-kind isolation alongside period and source-family isolation.
+  - Added a same-hash race regression with invalid `uploaded_by_user_id` and a SQLAlchemy-wrapped SQLite FK `IntegrityError`, asserting the error propagates and no success duplicate is created.
   - Added an injected post-supersession failure test proving the prior active status, report/fingerprint, and journal row survive commit while the candidate remains staged.
 - `backend/tests/test_dataset_resolver.py`
   - Confirmed corrected-quarter selection preserves the original and later-quarter rows in storage and keeps ordered source lineage.
@@ -67,6 +69,9 @@ No new schema, route, or unrelated production refactor was added. The one small 
    - Shared staging GREEN: `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_ingestion_pipeline.py -k 'duplicate_integrity_error or exact_hash_replay_with_different_scope or explicit_coverage'` → 6 passed.
    - Baseline GREEN: `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_baseline_ingestion.py -k 'active_exact_sha or active_baseline_replay'` → 5 passed.
    - Exact Tally/GL snapshot checks: `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_api_integration.py -k 'tally_duplicate_replay_rejects_corrupt_canonical_children or fixed_gl_duplicate_replay_validates_canonical_children'` → 4 passed.
+6. Review fix round 2 I1 RED/GREEN cycle:
+   - RED with the recovery guard temporarily bypassed: `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_ingestion_pipeline.py::test_unrelated_foreign_key_integrity_error_is_not_treated_as_duplicate` → 1 failed (`DID NOT RAISE`; the same-hash batch was incorrectly returned as a duplicate).
+   - GREEN after restoring the guard immediately inside the `except IntegrityError` block: the same command → 1 passed.
 
 ## Verification results
 
@@ -74,13 +79,13 @@ No new schema, route, or unrelated production refactor was added. The one small 
 
   `PYTHONPATH=. ../.venv/bin/pytest -q tests/test_ingestion_pipeline.py tests/test_dataset_resolver.py tests/test_baseline_ingestion.py tests/test_api_integration.py`
 
-  **101 passed, 3 warnings, 8.16s.**
+  **102 passed, 3 warnings, 8.59s.**
 
 - Full backend suite from `backend/`:
 
   `PYTHONPATH=. ../.venv/bin/pytest -q`
 
-  **247 passed, 4 warnings, 22.38s.**
+  **248 passed, 4 warnings, 22.60s.**
 
 - `git diff --check`: passed with no whitespace errors.
 
@@ -108,6 +113,8 @@ Warnings are pre-existing FastAPI/Starlette deprecations (`httpx` TestClient, `o
 5. **Review I2:** include `entity_id` in the baseline canonical-child tuple. This catches a checkpoint moved to another entity even when account/date/value/metadata still match.
 6. **Review M2:** exact child snapshots are test-only assertions. The GL HTTP test retains endpoint semantics; the exact child snapshot is taken around the direct shared GL replay validator because the SQLite TestClient fixture’s error rollback makes a second-session post-error database snapshot unavailable for that route.
 
+7. **Review I1 fix round 2:** the focused regression uses an existing same-hash batch, invalid `uploaded_by_user_id=999999`, and the observed SQLAlchemy/SQLite FK error payload. Local SQLite reports the composite UNIQUE violation first when both constraints are submitted together, so the test injects that unrelated FK `IntegrityError` at the target flush boundary while preserving the real race/replay setup. The production guard classifies the error before reload and re-raises this FK failure.
+
 ## Concerns / remaining gates
 
 - No live Tally endpoint or browser smoke was run; Task 2.4 evidence is fixture/API/database based.
@@ -115,4 +122,5 @@ Warnings are pre-existing FastAPI/Starlette deprecations (`httpx` TestClient, `o
 - The graph reports no recorded gaps, but its coverage signal is explicitly best-effort.
 - The report path is ignored by `.superpowers/sdd/.gitignore`; it must be force-added when staging the Task 2.4 commit.
 - The initial sandbox-only staging attempt was blocked before staging with `fatal: Unable to create '/Users/adinayak18/Desktop/ledger-scrutiny/.git/index.lock': Operation not permitted`. An approved escalation then staged only the owned files and created the requested commit with message `test: prove ingestion replacement and replay isolation`.
+- This fix round was not committed or staged, per controller instruction. Current Task 2.4 edits are limited to `backend/app/ingestion/batches.py`, `backend/tests/test_ingestion_pipeline.py`, and this report; unrelated dirty files remain untouched.
 - Unrelated pre-existing changes remain untouched: the deleted Phase 1 report, demo/frontend edits, `.codebase-memory/`, and `backend/tests/test_demo_gl_contract.py`/`frontend/src/demo_gl_profile.json`.

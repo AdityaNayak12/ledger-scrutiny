@@ -1,9 +1,11 @@
 from datetime import date
 from decimal import Decimal
 from hashlib import sha256
+from sqlite3 import IntegrityError as SQLiteIntegrityError
 
 import pytest
-from sqlalchemy import create_engine, func, select
+from sqlalchemy import create_engine, event, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
@@ -15,6 +17,7 @@ from app.db.models import (
     Organization,
     TrialBalanceSnapshot,
 )
+from app.ingestion import batches as batches_module
 from app.ingestion.batches import (
     BatchConflictError,
     BatchLifecycleError,
@@ -36,6 +39,12 @@ from app.ingestion.schema import JournalEntryRecord, JournalLineRecord, JournalL
 @pytest.fixture
 def session():
     engine = create_engine("sqlite:///:memory:")
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
     Base.metadata.create_all(engine)
     with Session(engine) as session:
         organization = Organization(name="Pipeline Test Org")
@@ -163,6 +172,62 @@ def test_duplicate_integrity_error_with_mismatched_coverage_is_rejected(session,
     assert persisted.status == "STAGED"
     assert persisted.coverage_start == date(2025, 4, 1)
     assert persisted.coverage_end == date(2025, 6, 30)
+    assert session.scalar(select(func.count()).select_from(ImportBatch)) == 1
+
+
+def test_unrelated_foreign_key_integrity_error_is_not_treated_as_duplicate(session, monkeypatch):
+    first = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"unrelated integrity failure",
+    )
+    first_id = first.id
+    session.commit()
+    original_find_duplicate = batches_module._find_duplicate_import_batch
+    lookup_count = [0]
+
+    def find_duplicate(session, entity_id, content_sha256):
+        lookup_count[0] += 1
+        if lookup_count[0] == 1:
+            return None
+        return original_find_duplicate(session, entity_id, content_sha256)
+
+    monkeypatch.setattr(batches_module, "_find_duplicate_import_batch", find_duplicate)
+
+    original_flush = session.flush
+
+    def fail_flush(*args, **kwargs):
+        if any(isinstance(instance, ImportBatch) for instance in session.new):
+            raise IntegrityError(
+                "INSERT INTO import_batches",
+                {},
+                SQLiteIntegrityError("FOREIGN KEY constraint failed"),
+            )
+        return original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(session, "flush", fail_flush)
+    with pytest.raises(IntegrityError):
+        stage_import_batch(
+            session,
+            entity_id=_entity_id(session),
+            period_start=date(2025, 4, 1),
+            period_end=date(2025, 6, 30),
+            source="gl_upload",
+            source_family="gl_upload",
+            original_filename="invalid-user.xlsx",
+            contents=b"unrelated integrity failure",
+            uploaded_by_user_id=999_999,
+            coverage_start=date(2025, 4, 1),
+            coverage_end=date(2025, 6, 30),
+        )
+
+    monkeypatch.setattr(session, "flush", original_flush)
+    session.rollback()
+    session.expire_all()
+    persisted = session.get(ImportBatch, first_id)
+    assert persisted is not None
+    assert persisted.status == "STAGED"
     assert session.scalar(select(func.count()).select_from(ImportBatch)) == 1
 
 
