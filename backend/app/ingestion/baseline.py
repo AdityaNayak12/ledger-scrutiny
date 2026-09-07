@@ -3,6 +3,7 @@
 import base64
 import io
 import json
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -319,6 +320,7 @@ def _parse_baseline_xlsx(
         worksheet = workbook.active
         if worksheet is None or worksheet.max_row == 0:
             raise BaselineValidationError("Workbook has no active sheet or the active sheet is empty.")
+        input_rows = max(0, worksheet.max_row - 1)
         header_number, columns = _header_row(worksheet)
         input_rows = max(0, worksheet.max_row - header_number)
         for row_number, row in enumerate(
@@ -467,11 +469,31 @@ def _baseline_report(
         baseline_coverage=coverage,
         input_rows=input_rows,
         skipped=skipped_rows,
-        rejected=1 if errors else 0,
+        rejected=max(0, input_rows - skipped_rows) if errors else 0,
         errors=errors,
         coverage_complete=not errors and not missing and not unknown and bool(records),
         fingerprint=_baseline_fingerprint(records, summary),
     )
+    failed_row_match = re.search(r"Row (\d+):", errors[0]) if errors else None
+    failed_row = int(failed_row_match.group(1)) if failed_row_match else None
+    skipped_row_numbers = {
+        int(reason["row"])
+        for reason in skip_reasons
+        if isinstance(reason.get("row"), int)
+    }
+    reject_reasons: list[dict[str, Any]] = []
+    for row_number in range(2, input_rows + 2):
+        if row_number in skipped_row_numbers:
+            continue
+        if failed_row is None:
+            reason = errors[0] if errors else "Baseline row rejected."
+        elif row_number == failed_row:
+            reason = errors[0]
+        elif row_number > failed_row:
+            reason = "not processed because an earlier hard validation failure stopped parsing."
+        else:
+            reason = "import rejected because the batch had a hard validation failure."
+        reject_reasons.append({"row": row_number, "reason": reason})
     report.update({
         "parser": "xlsx_baseline",
         "source_family": SourceFamily.GL_UPLOAD.value,
@@ -497,7 +519,7 @@ def _baseline_report(
         "expected_account_count": len(expected) if expected is not None else None,
         "missing_account_codes": missing,
         "unknown_account_codes": unknown,
-        "reject_reasons": [{"reason": error} for error in errors],
+        "reject_reasons": reject_reasons,
     })
     return json.loads(json.dumps(report))
 

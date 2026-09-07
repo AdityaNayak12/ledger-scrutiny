@@ -403,6 +403,57 @@ def test_mismatched_caller_bytes_fail_staged_batch_and_retain_artifacts(baseline
     assert any("do not match staged" in error for error in batch.validation_report["errors"])
 
 
+@pytest.mark.parametrize(
+    ("rows", "error_match"),
+    [
+        (
+            [
+                ["1000", BALANCE_DATE, "100.00", "INR"],
+                [None, BALANCE_DATE, "-60.00", "INR"],
+                ["2000", BALANCE_DATE, "-40.00", "INR"],
+            ],
+            "Account Code is a required value",
+        ),
+        (
+            [
+                ["1000", BALANCE_DATE, "100.00", "INR"],
+                ["2000", BALANCE_DATE, "-50.00", "INR"],
+                ["3000", BALANCE_DATE, "-40.00", "INR"],
+            ],
+            "signed total",
+        ),
+        (
+            [
+                ["1000", BALANCE_DATE, "100.00", "INR"],
+                ["9999", BALANCE_DATE, "-100.00", "INR"],
+            ],
+            "Unknown account code",
+        ),
+    ],
+)
+def test_baseline_failure_report_accounts_every_source_row(baseline_session, rows, error_match):
+    session, entity_id = baseline_session
+    contents = _xlsx_bytes(rows)
+    batch = _stage(session, entity_id, contents)
+
+    with pytest.raises(ValueError, match=error_match):
+        normalize_balance_checkpoint_xlsx(
+            contents,
+            entity_id,
+            session,
+            import_batch_id=batch.id,
+            expected_currency="INR",
+        )
+
+    report = batch.validation_report
+    assert report["input_rows"] == len(rows)
+    assert report["accepted_rows"] + report["skipped_rows"] + report["rejected_rows"] == report["input_rows"]
+    assert report["accepted_rows"] == 0
+    assert report["rejected_rows"] == len(rows)
+    assert {reason["row"] for reason in report["reject_reasons"]} == set(range(2, len(rows) + 2))
+    assert all(reason["reason"] for reason in report["reject_reasons"])
+
+
 def test_active_exact_sha_duplicate_replay_is_idempotent(baseline_session):
     session, entity_id = baseline_session
     contents = _valid_bytes()

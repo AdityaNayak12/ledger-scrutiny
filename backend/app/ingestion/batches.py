@@ -376,28 +376,18 @@ def activate_import_batch(
     if allow_replacement is not None:
         replace = allow_replacement
 
-    if not _is_journal(batch):
-        try:
-            batch.status = BatchStatus.ACTIVE.value
-            session.flush()
-        except Exception:
-            batch.status = previous_batch_status
-            batch.validation_report = previous_report
-            raise
-        return batch
-
     replaced: list[ImportBatch] = []
 
     try:
         with session.no_autoflush:
-            candidates = [
+            all_active = [
                 active for active in _active_journal_batches(session, batch.entity_id)
-                if active.id != batch.id and _is_journal(active)
+                if active.id != batch.id
             ]
             candidate_dates = _batch_dates(batch)
             candidate_family = _source_family(batch.source, batch.source_family)
             candidate_year = _financial_year(candidate_dates[0])
-            for active in candidates:
+            for active in all_active:
                 active_dates = _batch_dates(active)
                 active_family = _source_family(active.source, active.source_family)
                 active_year = _financial_year(active_dates[0])
@@ -410,7 +400,11 @@ def activate_import_batch(
                         f"Active source family conflict: batch {active.id} uses {active_family}, "
                         f"candidate uses {candidate_family}."
                     )
-                if _overlaps(candidate_dates, active_dates):
+                if (
+                    _is_journal(batch)
+                    and _is_journal(active)
+                    and _overlaps(candidate_dates, active_dates)
+                ):
                     if candidate_family != active_family:
                         raise BatchConflictError(
                             f"Active journal coverage overlap with source family conflict: batch {active.id}."
@@ -431,7 +425,8 @@ def activate_import_batch(
             active.status = BatchStatus.SUPERSEDED.value
         batch.status = BatchStatus.ACTIVE.value
         session.flush()
-        report.update(_dataset_report(session, batch.entity_id))
+        if _is_journal(batch):
+            report.update(_dataset_report(session, batch.entity_id))
         batch.validation_report = report
         session.flush()
     except Exception:

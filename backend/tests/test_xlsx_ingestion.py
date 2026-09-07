@@ -424,6 +424,64 @@ def test_fixed_gl_normalizer_requires_staged_batch_and_preserves_existing_report
     assert session.scalar(select(func.count()).select_from(LedgerAccount)) == 0
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "error_match"),
+    [
+        ("kind", "balance_checkpoint", "journal"),
+        ("source_family", "tally", "source_family"),
+    ],
+)
+def test_fixed_gl_normalizer_rejects_wrong_staged_batch_contract_without_children(
+    canonical_session, field, value, error_match
+):
+    session, entity_id = canonical_session
+    contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [["DOC-1", "1000", date(2025, 4, 1), 1], ["DOC-1", "2000", date(2025, 4, 1), -1]],
+    )
+    batch = _stage_gl_batch(session, entity_id, contents)
+    setattr(batch, field, value)
+    session.flush()
+
+    with pytest.raises(ValueError, match=error_match):
+        normalize_gl_xlsx(
+            contents, date(2025, 4, 1), date(2025, 4, 30), entity_id, session,
+            import_batch_id=batch.id,
+        )
+
+    assert batch.status == "FAILED"
+    assert batch.validation_report["readiness"] == "INVALID"
+    assert batch.validation_report["errors"]
+    assert session.scalar(select(func.count()).select_from(JournalEntry)) == 0
+    assert session.scalar(select(func.count()).select_from(JournalLine)) == 0
+
+
+def test_fixed_gl_normalizer_rejects_mismatched_staged_bytes_without_children(canonical_session):
+    session, entity_id = canonical_session
+    staged_contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [["DOC-1", "1000", date(2025, 4, 1), 1], ["DOC-1", "2000", date(2025, 4, 1), -1]],
+    )
+    caller_contents = _xlsx_bytes(
+        ["Document Number", "G/L Account", "Posting Date", "Amount in local currency"],
+        [["DOC-1", "1000", date(2025, 4, 1), 2], ["DOC-1", "2000", date(2025, 4, 1), -2]],
+    )
+    batch = _stage_gl_batch(session, entity_id, staged_contents)
+
+    with pytest.raises(ValueError, match="do not match staged"):
+        normalize_gl_xlsx(
+            caller_contents, date(2025, 4, 1), date(2025, 4, 30), entity_id, session,
+            import_batch_id=batch.id,
+        )
+
+    assert batch.status == "FAILED"
+    assert batch.raw_source_bytes == staged_contents
+    assert batch.validation_report["readiness"] == "INVALID"
+    assert batch.validation_report["input_rows"] == 0
+    assert session.scalar(select(func.count()).select_from(JournalEntry)) == 0
+    assert session.scalar(select(func.count()).select_from(JournalLine)) == 0
+
+
 def test_fixed_gl_normalizer_records_structured_report_for_staged_failure(canonical_session):
     session, entity_id = canonical_session
     contents = _xlsx_bytes(

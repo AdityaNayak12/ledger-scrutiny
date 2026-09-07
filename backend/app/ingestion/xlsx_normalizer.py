@@ -5,6 +5,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from hashlib import sha256
 from typing import Any, Dict, Mapping, Optional
 
 import openpyxl
@@ -21,6 +22,7 @@ from app.db.models import (
 from app.ingestion.batches import fail_import_batch
 from app.ingestion.reconciliation import build_reconciliation_report
 from app.ingestion.schema import (
+    BatchKind,
     DOCUMENT_BALANCE_TOLERANCE,
     GL_REQUIRED_HEADERS,
     JournalEntryRecord,
@@ -835,6 +837,19 @@ def validate_gl_xlsx_replay(
     return dict(batch.validation_report or {})
 
 
+def _fail_staged_gl_contract(session: Session, batch: ImportBatch, message: str) -> None:
+    report = build_reconciliation_report(
+        (), input_rows=0, errors=[message], coverage_complete=False,
+    )
+    report.update({
+        "parser": "xlsx_gl",
+        "source_family": SourceFamily.GL_UPLOAD.value,
+        "reject_reasons": [],
+    })
+    fail_import_batch(session, batch, errors=[message], validation_report=report)
+    raise ValueError(message)
+
+
 def normalize_gl_xlsx(
     file_bytes: bytes,
     target_period_start: Any,
@@ -861,6 +876,26 @@ def normalize_gl_xlsx(
     if batch.status != "STAGED":
         raise ValueError(
             f"Fixed GL normalization requires a STAGED ImportBatch; batch {import_batch_id} is {batch.status}."
+        )
+    if batch.kind != BatchKind.JOURNAL.value:
+        _fail_staged_gl_contract(
+            session,
+            batch,
+            "Fixed GL normalization requires a journal ImportBatch.",
+        )
+    if batch.source_family != SourceFamily.GL_UPLOAD.value:
+        _fail_staged_gl_contract(
+            session,
+            batch,
+            "Fixed GL normalization requires a gl_upload source_family.",
+        )
+    received_sha256 = sha256(bytes(file_bytes)).hexdigest()
+    if received_sha256 != batch.content_sha256:
+        _fail_staged_gl_contract(
+            session,
+            batch,
+            "GL workbook bytes do not match staged ImportBatch content_sha256 "
+            f"(staged {batch.content_sha256}, received {received_sha256}).",
         )
 
     if (

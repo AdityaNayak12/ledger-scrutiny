@@ -404,7 +404,7 @@ def test_annual_activation_explicitly_replaces_quarterly_coverage(session):
     assert annual.status == "ACTIVE"
 
 
-def test_checkpoint_activation_does_not_apply_journal_collision_rules(session):
+def test_checkpoint_activation_allows_same_gl_source_family_as_journal(session):
     journal = _stage(session, start=date(2025, 4, 1), end=date(2025, 6, 30), contents=b"journal-kind")
     activate_import_batch(session, journal)
     checkpoint = stage_import_batch(
@@ -412,8 +412,8 @@ def test_checkpoint_activation_does_not_apply_journal_collision_rules(session):
         entity_id=_entity_id(session),
         period_start=date(2025, 4, 1),
         period_end=date(2025, 6, 30),
-        source="tally",
-        source_family="tally",
+        source="gl_upload",
+        source_family="gl_upload",
         original_filename="opening.xlsx",
         contents=b"checkpoint-kind",
         uploaded_by_user_id=None,
@@ -426,6 +426,37 @@ def test_checkpoint_activation_does_not_apply_journal_collision_rules(session):
 
     assert journal.status == "ACTIVE"
     assert checkpoint.status == "ACTIVE"
+
+
+def test_checkpoint_activation_rejects_mixed_source_family_for_same_financial_year(session):
+    journal = _stage(
+        session,
+        start=date(2025, 4, 1),
+        end=date(2025, 6, 30),
+        contents=b"tally-journal-kind",
+        source_family="tally",
+    )
+    activate_import_batch(session, journal)
+    checkpoint = stage_import_batch(
+        session,
+        entity_id=_entity_id(session),
+        period_start=date(2025, 4, 1),
+        period_end=date(2026, 3, 31),
+        source="gl_upload",
+        source_family="gl_upload",
+        original_filename="opening.xlsx",
+        contents=b"gl-checkpoint-kind",
+        uploaded_by_user_id=None,
+        kind="balance_checkpoint",
+        coverage_start=date(2025, 4, 1),
+        coverage_end=date(2026, 3, 31),
+    )
+
+    with pytest.raises(BatchConflictError, match="Active source family conflict"):
+        activate_import_batch(session, checkpoint)
+
+    assert journal.status == "ACTIVE"
+    assert checkpoint.status == "FAILED"
 
 
 def test_compatibility_create_import_batch_stages_without_legacy_parser_metadata(session):

@@ -30,6 +30,8 @@ interface XlsxUploadModalProps {
 
 export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName, baseUrl, authFetch, onSuccess, isMock, initialPeriodStart, initialPeriodEnd, opener }: XlsxUploadModalProps) {
   const [file, setFile] = useState<File | null>(null);
+  const [baselineFile, setBaselineFile] = useState<File | null>(null);
+  const [signedPdfFile, setSignedPdfFile] = useState<File | null>(null);
   const [periodStart, setPeriodStart] = useState(initialPeriodStart || "2026-04-01");
   const [periodEnd, setPeriodEnd] = useState(initialPeriodEnd || "2027-03-31");
   const [error, setError] = useState<string | null>(null);
@@ -61,6 +63,8 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
   useEffect(() => {
     if (!isOpen) return;
     setFile(null);
+    setBaselineFile(null);
+    setSignedPdfFile(null);
     setPeriodStart(initialPeriodStart || "2026-04-01");
     setPeriodEnd(initialPeriodEnd || "2027-03-31");
     setError(null);
@@ -139,16 +143,16 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
       }, 300);
       return;
     }
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("column_mapping", "{}");
-    formData.append("sign_convention", "negative_is_credit");
-    formData.append("target_period_start", periodStart);
-    formData.append("target_period_end", periodEnd);
-    formData.append("clear_only_period", "true");
     try {
-      const response = await authFetch(`${baseUrl}/entities/${entityId}/upload-xlsx/confirm`, { method: "POST", body: formData });
-      const body = await response.json().catch(() => ({})) as IngestionResult & { detail?: unknown };
+      const journalFormData = new FormData();
+      journalFormData.append("file", file);
+      journalFormData.append("column_mapping", "{}");
+      journalFormData.append("sign_convention", "negative_is_credit");
+      journalFormData.append("target_period_start", periodStart);
+      journalFormData.append("target_period_end", periodEnd);
+      journalFormData.append("clear_only_period", "true");
+      let response = await authFetch(`${baseUrl}/entities/${entityId}/upload-xlsx/confirm`, { method: "POST", body: journalFormData });
+      let body = await response.json().catch(() => ({})) as IngestionResult & { detail?: unknown };
       if (!isCurrentRequest()) return;
       if (!response.ok) {
         const detail = body.detail;
@@ -159,6 +163,26 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
           throw new Error(parts.filter(Boolean).join(" ") || "XLSX general-ledger ingestion failed.");
         }
         throw new Error(typeof detail === "string" ? detail : "XLSX general-ledger ingestion failed.");
+      }
+      if (baselineFile) {
+        const baselineFormData = new FormData();
+        baselineFormData.append("file", baselineFile);
+        baselineFormData.append("target_period_start", periodStart);
+        baselineFormData.append("target_period_end", periodEnd);
+        if (signedPdfFile) baselineFormData.append("signed_pdf", signedPdfFile);
+        response = await authFetch(`${baseUrl}/entities/${entityId}/upload-xlsx/baseline`, { method: "POST", body: baselineFormData });
+        body = await response.json().catch(() => ({})) as IngestionResult & { detail?: unknown };
+        if (!isCurrentRequest()) return;
+        if (!response.ok) {
+          const detail = body.detail;
+          if (detail && typeof detail === "object") {
+            const failure = detail as { message?: string; failed_batch_status?: string; readiness?: string; errors?: unknown[] };
+            const parts = [failure.message, failure.failed_batch_status && `Batch: ${failure.failed_batch_status}`, failure.readiness && `Readiness: ${failure.readiness}`];
+            if (Array.isArray(failure.errors) && failure.errors.length) parts.push(failure.errors.slice(0, 2).map(String).join("; "));
+            throw new Error(parts.filter(Boolean).join(" ") || "Opening baseline ingestion failed.");
+          }
+          throw new Error(typeof detail === "string" ? detail : "Opening baseline ingestion failed.");
+        }
       }
       setResult(body);
       onSuccess(periodStart, periodEnd, body);
@@ -223,6 +247,17 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
             <label className="block text-xs font-semibold text-slate-300 mb-1">Excel file (.xlsx)</label>
             <input type="file" accept=".xlsx,.XLSX" required onChange={(event) => { const selected = event.target.files?.[0]; if (selected && !/\.xlsx$/i.test(selected.name)) { setFile(null); setError("Please select an XLSX spreadsheet (.xlsx)."); event.currentTarget.value = ""; } else { setFile(selected || null); setError(null); } }} className="block w-full text-xs text-slate-300" />
             {file && <p className="mt-2 text-xs text-slate-400">{file.name}</p>}
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">Opening baseline Excel (.xlsx, optional)</label>
+            <input type="file" accept=".xlsx,.XLSX" onChange={(event) => { const selected = event.target.files?.[0]; if (selected && !/\.xlsx$/i.test(selected.name)) { setBaselineFile(null); setError("Please select an opening baseline XLSX spreadsheet (.xlsx)."); event.currentTarget.value = ""; } else { setBaselineFile(selected || null); setError(null); } }} className="block w-full text-xs text-slate-300" />
+            {baselineFile && <p className="mt-2 text-xs text-slate-400">{baselineFile.name}</p>}
+            <p className="mt-1 text-xxs text-slate-500">Account-level signed prior-year closing balances are required before scrutiny.</p>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-slate-300 mb-1">Signed PDF evidence (optional)</label>
+            <input type="file" accept=".pdf,application/pdf" onChange={(event) => { const selected = event.target.files?.[0]; if (selected && !/\.pdf$/i.test(selected.name)) { setSignedPdfFile(null); setError("Please select signed PDF evidence (.pdf)."); event.currentTarget.value = ""; } else { setSignedPdfFile(selected || null); setError(null); } }} className="block w-full text-xs text-slate-300" />
+            {signedPdfFile && <p className="mt-2 text-xs text-slate-400">{signedPdfFile.name}</p>}
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4"><label className="text-xxs font-bold uppercase tracking-wider text-slate-400">Period start<input type="date" value={periodStart} onChange={(event) => setPeriodStart(event.target.value)} disabled={!!initialPeriodStart} required className="mt-1 w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2" /></label><label className="text-xxs font-bold uppercase tracking-wider text-slate-400">Period end<input type="date" value={periodEnd} onChange={(event) => setPeriodEnd(event.target.value)} disabled={!!initialPeriodEnd} required className="mt-1 w-full bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-xl px-3 py-2" /></label></div>
           <div className="flex justify-end gap-3"><button type="button" onClick={closeModal} disabled={submitting} className="px-4 py-2 text-xs text-slate-300 bg-slate-800 disabled:opacity-50 rounded-xl">Cancel</button><button type="submit" disabled={!file || submitting} className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 disabled:bg-emerald-900 rounded-xl">{submitting ? "Importing…" : "Import General Ledger"}</button></div>

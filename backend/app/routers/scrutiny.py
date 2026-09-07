@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict
 from app.db.session import get_db
 from app.db.models import AuditException, Entity, FinancialPeriod, ImportBatch, JournalEntry, JournalLine, LedgerAccount, ReviewAction, ScrutinyRun, TrialBalanceSnapshot, User
 from app.ingestion.batches import activate_import_batch, create_import_batch, fail_import_batch, is_duplicate_import_batch
+from app.ingestion.baseline import _retain_pdf_evidence, normalize_balance_checkpoint_xlsx
 from app.ingestion.datasets import resolve_active_dataset
 from app.ingestion.schema import GL_REQUIRED_HEADERS, SourceFamily
 from app.ingestion.tally_parser import parse_tally_xml
@@ -1157,6 +1158,195 @@ async def upload_xlsx_confirm(
                 period_start=target_period_start,
                 batch=batch,
                 errors=[safe_xlsx_error(error)],
+            ),
+        )
+
+
+@router.post("/entities/{entity_id}/upload-xlsx/baseline", response_model=IngestionResponse)
+async def upload_xlsx_baseline(
+    entity_id: int,
+    target_period_start: date = Form(...),
+    target_period_end: date = Form(...),
+    expected_balance_date: Optional[date] = Form(None),
+    expected_currency: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    signed_pdf: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Upload the structured signed opening baseline for the GL workflow."""
+    if not (file.filename or "").lower().endswith(".xlsx"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only XLSX files are supported for an opening baseline.",
+        )
+    if signed_pdf is not None and not (signed_pdf.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Signed baseline evidence must be a PDF file.",
+        )
+
+    entity = db.execute(
+        select(Entity).where(
+            Entity.id == entity_id,
+            Entity.organization_id == current_user.organization_id,
+        )
+    ).scalar_one_or_none()
+    if not entity:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Entity with ID {entity_id} not found.",
+        )
+
+    batch: ImportBatch | None = None
+    try:
+        contents = await file.read()
+        signed_pdf_bytes = await signed_pdf.read() if signed_pdf is not None else None
+        existing = _existing_import_batch(db, entity.id, contents)
+        if existing is not None and existing.status != "ACTIVE":
+            raise _BatchIngestionError(
+                existing,
+                f"Exact duplicate batch {existing.id} is {existing.status}; no active import exists.",
+            )
+        batch = create_import_batch(
+            db,
+            entity_id=entity.id,
+            period_start=target_period_start,
+            period_end=target_period_end,
+            source="xlsx_baseline",
+            source_family=SourceFamily.GL_UPLOAD.value,
+            coverage_start=target_period_start,
+            coverage_end=target_period_end,
+            original_filename=file.filename or "opening-baseline.xlsx",
+            contents=contents,
+            uploaded_by_user_id=current_user.id,
+            kind="balance_checkpoint",
+            source_metadata={"parser": "xlsx_baseline"},
+            validation_report={
+                "parser": "xlsx_baseline",
+                "source_family": SourceFamily.GL_UPLOAD.value,
+            },
+            activate=False,
+        )
+        if is_duplicate_import_batch(batch):
+            try:
+                normalize_balance_checkpoint_xlsx(
+                    contents,
+                    entity.id,
+                    db,
+                    import_batch_id=batch.id,
+                    expected_currency=expected_currency or None,
+                    expected_balance_date=expected_balance_date,
+                    signed_pdf_bytes=signed_pdf_bytes,
+                    signed_pdf_filename=signed_pdf.filename if signed_pdf is not None else None,
+                )
+            except ValueError as error:
+                safe_error = _failure_error(error, SourceFamily.GL_UPLOAD.value)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=_ingestion_failure_detail(
+                        db,
+                        entity,
+                        source_family=SourceFamily.GL_UPLOAD.value,
+                        message=safe_error,
+                        period_start=target_period_start,
+                        batch=batch,
+                        errors=[safe_error],
+                    ),
+                ) from error
+        else:
+            savepoint = db.begin_nested()
+            try:
+                normalize_balance_checkpoint_xlsx(
+                    contents,
+                    entity.id,
+                    db,
+                    import_batch_id=batch.id,
+                    expected_currency=expected_currency or None,
+                    expected_balance_date=expected_balance_date,
+                    signed_pdf_bytes=signed_pdf_bytes,
+                    signed_pdf_filename=signed_pdf.filename if signed_pdf is not None else None,
+                    activate=True,
+                )
+            except ValueError as error:
+                failure_report = dict(batch.validation_report or {})
+                safe_error = _failure_error(error, SourceFamily.GL_UPLOAD.value)
+                savepoint.rollback()
+                if signed_pdf_bytes is not None:
+                    _retain_pdf_evidence(
+                        batch,
+                        signed_pdf_bytes,
+                        signed_pdf.filename if signed_pdf is not None else None,
+                    )
+                fail_import_batch(db, batch, errors=[safe_error], validation_report=failure_report)
+                ingestion_error = _BatchIngestionError(batch, safe_error)
+                db.commit()
+                raise ingestion_error from error
+            except Exception as error:
+                failure_report = dict(batch.validation_report or {})
+                safe_error = _failure_error(error, SourceFamily.GL_UPLOAD.value)
+                savepoint.rollback()
+                if signed_pdf_bytes is not None:
+                    _retain_pdf_evidence(
+                        batch,
+                        signed_pdf_bytes,
+                        signed_pdf.filename if signed_pdf is not None else None,
+                    )
+                fail_import_batch(db, batch, errors=[safe_error], validation_report=failure_report)
+                ingestion_error = _BatchIngestionError(batch, safe_error)
+                db.commit()
+                raise ingestion_error from error
+            else:
+                savepoint.commit()
+        db.commit()
+        return _ingestion_response(db, entity, batch, message="Opening baseline ingestion successful")
+    except _BatchIngestionError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message=error.safe_message,
+                period_start=target_period_start,
+                failed_batch_id=error.batch_id,
+                failed_batch_status=error.batch_status,
+                failed_batch_report=error.batch_report,
+                errors=[error.safe_message],
+            ),
+        )
+    except HTTPException:
+        db.rollback()
+        raise
+    except ValueError as error:
+        db.rollback()
+        safe_error = _failure_error(error, SourceFamily.GL_UPLOAD.value)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message=safe_error,
+                period_start=target_period_start,
+                batch=batch,
+                errors=[safe_error],
+            ),
+        )
+    except Exception as error:
+        db.rollback()
+        safe_error = _failure_error(error, SourceFamily.GL_UPLOAD.value)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=_ingestion_failure_detail(
+                db,
+                entity,
+                source_family=SourceFamily.GL_UPLOAD.value,
+                message="Failed to ingest opening baseline.",
+                period_start=target_period_start,
+                batch=batch,
+                errors=[safe_error],
             ),
         )
 

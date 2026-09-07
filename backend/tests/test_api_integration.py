@@ -1,5 +1,7 @@
 import os
 import io
+import base64
+import hashlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from decimal import Decimal
@@ -22,8 +24,6 @@ from app.db.models import (
     Transaction,
     TrialBalanceSnapshot,
 )
-from app.ingestion.baseline import normalize_balance_checkpoint_xlsx
-from app.ingestion.batches import stage_import_batch
 from app.ingestion.datasets import resolve_active_dataset
 from app.ingestion.tally_parser import TallyConnectorError, parse_tally_xml
 from app.ingestion.xlsx_normalizer import validate_gl_xlsx_replay
@@ -1365,6 +1365,7 @@ def test_tally_and_gl_complete_parity_has_equal_scrutiny_inputs_and_findings():
     baseline_output = io.BytesIO()
     baseline_workbook.save(baseline_output)
     baseline_bytes = baseline_output.getvalue()
+    signed_pdf = b"%PDF-1.7 signed baseline evidence"
 
     headers = get_auth_headers()
     tally_entity = client.post(
@@ -1416,31 +1417,48 @@ def test_tally_and_gl_complete_parity_has_equal_scrutiny_inputs_and_findings():
     )
     assert gl_upload.status_code == 200, gl_upload.text
 
-    with TestingSessionLocal() as session:
-        baseline_batch = stage_import_batch(
-            session,
-            entity_id=gl_entity["id"],
-            period_start=period_start,
-            period_end=period_end,
-            source="gl_upload",
-            source_family="gl_upload",
-            original_filename="complete-opening-baseline.xlsx",
-            contents=baseline_bytes,
-            uploaded_by_user_id=None,
-            kind="balance_checkpoint",
-            coverage_start=period_start,
-            coverage_end=period_end,
-        )
-        normalize_balance_checkpoint_xlsx(
-            baseline_bytes,
-            gl_entity["id"],
-            session,
-            import_batch_id=baseline_batch.id,
-            expected_currency="INR",
-            expected_balance_date=baseline_date,
-        )
-        session.commit()
-        gl_baseline_id = baseline_batch.id
+    baseline_upload = client.post(
+        f"/entities/{gl_entity['id']}/upload-xlsx/baseline",
+        data={
+            "target_period_start": period_start.isoformat(),
+            "target_period_end": period_end.isoformat(),
+            "expected_currency": "INR",
+            "expected_balance_date": baseline_date.isoformat(),
+        },
+        files={
+            "file": (
+                "complete-opening-baseline.xlsx",
+                io.BytesIO(baseline_bytes),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            "signed_pdf": ("signed-baseline.pdf", signed_pdf, "application/pdf"),
+        },
+        headers=headers,
+    )
+    assert baseline_upload.status_code == 200, baseline_upload.text
+    assert baseline_upload.json()["readiness"] in {"READY", "READY_WITH_WARNINGS"}
+    assert baseline_upload.json()["baseline_coverage"]["complete"] is True
+    gl_baseline_id = baseline_upload.json()["import_batch_id"]
+
+    duplicate_baseline = client.post(
+        f"/entities/{gl_entity['id']}/upload-xlsx/baseline",
+        data={
+            "target_period_start": period_start.isoformat(),
+            "target_period_end": period_end.isoformat(),
+            "expected_currency": "INR",
+            "expected_balance_date": baseline_date.isoformat(),
+        },
+        files={
+            "file": (
+                "complete-opening-baseline.xlsx",
+                io.BytesIO(baseline_bytes),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        },
+        headers=headers,
+    )
+    assert duplicate_baseline.status_code == 200, duplicate_baseline.text
+    assert duplicate_baseline.json()["import_batch_id"] == gl_baseline_id
 
     with TestingSessionLocal() as session:
         tally_dataset = resolve_active_dataset(session, tally_entity["id"], financial_year=2025)
@@ -1528,7 +1546,89 @@ def test_tally_and_gl_complete_parity_has_equal_scrutiny_inputs_and_findings():
         assert gl_baseline.kind == "balance_checkpoint"
         assert gl_baseline.source_family == "gl_upload"
         assert gl_baseline.raw_source_bytes == baseline_bytes
+        assert gl_baseline.source_metadata["supporting_evidence"]["signed_pdf"]["bytes_base64"]
+        assert gl_baseline.source_metadata["supporting_evidence"]["signed_pdf"]["content_sha256"]
         assert tally_dataset["dataset_fingerprint"] != gl_dataset["dataset_fingerprint"]
+
+
+def test_public_baseline_failure_preserves_active_gl_journal():
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities",
+        json={"name": "Baseline Replacement Entity", "materiality_threshold": "0.00"},
+        headers=headers,
+    ).json()
+    journal = _gl_bytes()
+    journal_upload = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("journal.xlsx", io.BytesIO(journal), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=headers,
+    )
+    assert journal_upload.status_code == 200, journal_upload.text
+    journal_batch_id = journal_upload.json()["import_batch_id"]
+
+    invalid_baseline = openpyxl.Workbook()
+    sheet = invalid_baseline.active
+    sheet.append(["Account Code", "Balance Date", "Signed Balance", "Currency"])
+    sheet.append(["1000", date(2025, 3, 31), 100, "INR"])
+    sheet.append(["2000", date(2025, 3, 31), -99, "INR"])
+    output = io.BytesIO()
+    invalid_baseline.save(output)
+    invalid_baseline_bytes = output.getvalue()
+    signed_pdf = b"%PDF-1.7 invalid baseline evidence"
+    baseline_upload = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/baseline",
+        data={
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+            "expected_currency": "INR",
+            "expected_balance_date": "2025-03-31",
+        },
+        files={
+            "file": (
+                "invalid-baseline.xlsx",
+                io.BytesIO(invalid_baseline_bytes),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+            "signed_pdf": ("signed-invalid-baseline.pdf", signed_pdf, "application/pdf"),
+        },
+        headers=headers,
+    )
+
+    assert baseline_upload.status_code == 400, baseline_upload.text
+    detail = baseline_upload.json()["detail"]
+    assert detail["failed_batch_status"] == "FAILED"
+    assert detail["active_batch_ids"] == [journal_batch_id]
+    assert detail["baseline_coverage"]["complete"] is False
+    with TestingSessionLocal() as session:
+        assert session.get(ImportBatch, journal_batch_id).status == "ACTIVE"
+        failed = session.scalars(
+            select(ImportBatch).where(
+                ImportBatch.entity_id == entity["id"],
+                ImportBatch.status == "FAILED",
+            )
+        ).one()
+        assert failed.raw_source_bytes == invalid_baseline_bytes
+        assert failed.validation_report["readiness"] == "INVALID"
+        assert failed.validation_report["errors"]
+        assert failed.validation_report["rejected_rows"] == failed.validation_report["input_rows"]
+        signed_pdf_metadata = failed.source_metadata["supporting_evidence"]["signed_pdf"]
+        assert signed_pdf_metadata == {
+            "filename": "signed-invalid-baseline.pdf",
+            "content_type": "application/pdf",
+            "content_sha256": hashlib.sha256(signed_pdf).hexdigest(),
+            "bytes_base64": base64.b64encode(signed_pdf).decode("ascii"),
+        }
+        assert session.scalar(
+            select(func.count()).select_from(BalanceCheckpoint).where(
+                BalanceCheckpoint.import_batch_id == failed.id,
+            )
+        ) == 0
 
 
 def test_first_failed_tally_batch_is_retained_without_exposing_an_orphan_period():
