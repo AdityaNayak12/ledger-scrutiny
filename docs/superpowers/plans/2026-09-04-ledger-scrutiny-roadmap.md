@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use subagent-driven-development (recommended) or executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make Ledger Scrutiny pilot-ready from 4 September to 4 November 2026 with reliable Tally ingestion, one supported GL-dump format, a narrow deterministic compliance pack, and GST lookup that is safe in demo and provider modes.
+**Historical roadmap goal:** Make Ledger Scrutiny pilot-ready from 4 September to 4 November 2026 with reliable Tally ingestion, one supported GL-dump format, a narrow deterministic compliance pack, and GST lookup that is safe in demo and provider modes.
 
 **Architecture:** Reuse the current FastAPI, SQLAlchemy, append-only import-batch, and deterministic rule-engine paths. Add one compliance module beside the existing rules and one GST HTTP adapter beside the existing router. Keep the current database model unless a failing acceptance test proves a migration is required.
 
@@ -12,14 +12,17 @@
 
 > **6 September scope update:** GST implementation is deferred at the user's request. Phase 1 below and its detailed plan reflect the active scope. Earlier GST deadlines, Phase 3 provider examples, and GST-dependent release gates are historical proposals, not approved contracts or current blockers; replace them with a provider-specific plan before resuming GST work. Do not implement adapters or infer payloads from those examples.
 
+> **Active execution status — 7 September 2026:** The original two-month dates and later phases are retained as historical roadmap context. The active scope for this execution is Phase 2 only, governed by `docs/superpowers/plans/2026-09-07-phase-2-reliable-ingestion.md`, with the binding window 21 September–2 October 2026. Its canonical task numbering is 2.1 contract/baseline, 2.2 Tally, 2.3 fixed XLSX, 2.4 lifecycle, 2.5 source parity, and 2.6 exit evidence. Phase 3, Phase 4, the final integration gate, and production GST connectivity are deferred/historical and require separate approval.
+
 ## Global Constraints
 
-- Delivery window: 4 September–4 November 2026.
+- Historical roadmap window: 4 September–4 November 2026; it is not the active Phase 2 execution window.
+- Active Phase 2 window: 21 September–2 October 2026, as defined by the dedicated Phase 2 plan.
 - Release GL input: one fixed transaction-level XLSX profile with required headers `Document Number`, `G/L Account`, `Posting Date`, and `Amount in local currency`, plus a structured signed prior-year account-level closing baseline before a dataset is `READY`. Do not add CSV or legacy `.xls` in this window.
 - Canonical amounts use `Decimal` and debit-positive/credit-negative signs. Reject a document whose signed lines do not balance within ₹0.01 or a non-balanced signed baseline; metadata/classification issues and incomplete staging may remain warnings only.
 - Tally endpoints are explicit: require `http` or `https` with a host; local access requires `TALLY_ALLOW_LOCAL_ENDPOINTS=1`; deployed DNS hosts must be exact entries in `TALLY_ALLOWED_HOSTS`. Do not silently enable loopback or broadly allow private addresses.
 - Compliance findings stay deterministic, explainable, versioned, and reviewable. LLMs do not make audit decisions.
-- GST production lookup requires a selected provider, response contract, API key, and test credentials. Without them, ship tested adapter plus demo/sandbox mode.
+- GST production lookup is deferred. The selected-provider, response-contract, API-key, and test-credential requirements below are historical follow-on constraints, not active Phase 2 work; do not implement provider connectivity until a separate approved plan exists.
 - Income Tax and Custom Duty portal automation are follow-on work, not release acceptance criteria.
 - Preserve immutable import batches, source hashes, rule versions, exception fingerprints, review statuses, and auditor notes.
 - Use existing dependencies. No state-management library, rule framework, or provider SDK without a failing requirement.
@@ -34,7 +37,7 @@ The image is planning input, not an instruction document. It proposes Tally HTTP
 
 The repository already contains a Tally HTTP connector, fixed-profile transaction-level XLSX import, nine core rules, two manufacturing rules, exception review, and demo-only GST lookup. This plan hardens and extends those paths; it does not rebuild them.
 
-## Definition of Done
+## Historical Definition of Done (deferred)
 
 By 4 November, a pilot user can import from Tally or the one supported transaction-level XLSX format with its structured account-level opening baseline, run a versioned core/manufacturing/compliance pack, inspect deterministic exceptions, use demo or configured GST lookup, review findings, and repeat the flow with audit history preserved.
 
@@ -53,7 +56,7 @@ By 4 November, a pilot user can import from Tally or the one supported transacti
 
 
 
-## Phase 0 — Lock Inputs and Baseline
+## Phase 0 — Lock Inputs and Baseline (historical)
 
 **Dates:** 4–7 September. **Gate:** decisions recorded before implementation.
 
@@ -71,11 +74,11 @@ By 4 November, a pilot user can import from Tally or the one supported transacti
 
 
 
-## Phase 1 — P0 Rule and Compliance Foundation
+## Phase 1 — P0 Rule and Compliance Foundation (completed historical scope)
 
 **Dates:** 8–18 September. **Output:** explicit TDS-based compliance pack and versioned findings.
 
-**Scope revision — 6 September:** The user has deferred all new GST/GSTIN checks and integration work until a provider contract is available. Phase 1 has no GST API, credential, response-shape, or identifier-format dependency. Existing GST behavior is outside this change. The detailed execution plan is `docs/superpowers/plans/2026-09-06-phase-1-compliance-foundation.md`; use its concrete code, test cases, and gates.
+**Scope revision — 6 September:** The user has deferred all new GST/GSTIN checks and integration work until a provider contract is available. Phase 1 has no GST API, credential, response-shape, or identifier-format dependency. Existing GST behavior is outside this change. This section records completed historical scope; the detailed execution plan is `docs/superpowers/plans/2026-09-06-phase-1-compliance-foundation.md`.
 
 ### Task 1.1: Add the compliance pack contract
 
@@ -119,7 +122,18 @@ By 4 November, a pilot user can import from Tally or the one supported transacti
 
 **Dates:** 21 September–2 October. **Output:** Tally and XLSX feed the same normalized model.
 
-### Task 2.1: Harden the Tally HTTP connector
+For the active execution, the dedicated Phase 2 plan is canonical. The two workstreams below are retained from this roadmap without their old task numbers.
+
+| Canonical task | Scope | Authority |
+|---|---|---|
+| 2.1 | Reconcile the contract and establish the baseline | Dedicated Phase 2 plan and Task 2.1 report |
+| 2.2 | Verify Tally connectivity and safe failures | Dedicated Phase 2 plan |
+| 2.3 | Verify fixed GL parsing and explain every row | Dedicated Phase 2 plan |
+| 2.4 | Prove replacement, duplicate, and period isolation | Dedicated Phase 2 plan |
+| 2.5 | Prove Tally/GL parity through scrutiny | Dedicated Phase 2 plan |
+| 2.6 | Run the exit gate and record pilot evidence | Dedicated Phase 2 plan |
+
+### Workstream: Harden the Tally HTTP connector (canonical Task 2.2)
 
 **Files:**
 
@@ -158,7 +172,7 @@ def test_tally_timeout_is_actionable(monkeypatch):
 
 
 
-### Task 2.2: Refine the supported XLSX GL dump
+### Workstream: Refine the supported XLSX GL dump (canonical Task 2.3)
 
 **Files:**
 
@@ -182,9 +196,11 @@ def test_tally_timeout_is_actionable(monkeypatch):
 
 
 
-## Phase 3 — GST Provider and Narrow Tax Surface
+## Phase 3 — GST Provider and Narrow Tax Surface (deferred / historical)
 
 **Dates:** 5–16 October. **Output:** provider-backed GST lookup when credentials exist; safe demo/sandbox otherwise.
+
+> This phase is retained as historical planning context only. GST provider and new tax work remain deferred until provider documentation, representative redacted responses, authentication, test access, and a separately approved implementation plan exist.
 
 ### Task 3.1: Add the GST provider adapter
 
@@ -261,15 +277,17 @@ def test_gst_provider_maps_success_and_sends_key():
 - [ ] Document that future Income Tax API work needs credentials, identifiers, period/rate contracts, retained evidence, and human review.
 - [ ] Run the full backend suite and commit: `docs: bound tax compliance claims to available evidence`.
 
-**Gate:** provider credentials decide whether live GST lookup ships; the rest of the pilot does not wait for them.
+**Historical gate (deferred):** provider credentials would decide whether live GST lookup ships; this is not an active release decision for the current Phase 2 execution.
 
 ---
 
 
 
-## Phase 4 — Pilot UX, Auditability, and Release
+## Phase 4 — Pilot UX, Auditability, and Release (deferred / historical)
 
 **Dates:** 19–30 October. **Output:** pilot user completes the flow without developer intervention.
+
+> This phase is not active in the current execution. Re-open it only after the active Phase 2 plan and its exit evidence are complete and a follow-on scope is approved.
 
 ### Task 4.1: Surface changed states in the UI
 
@@ -313,7 +331,9 @@ def test_gst_provider_maps_success_and_sends_key():
 
 
 
-## Final Integration Gate — 2–4 November
+## Final Integration Gate — 2–4 November (deferred / historical)
+
+> This gate belongs to the original two-month roadmap and is not a current Task 2.1 or Phase 2 gate. It remains deferred with Phase 3/4 until separately approved.
 
 - [ ] Run `cd backend && PYTHONPATH=. ../.venv/bin/pytest -q`.
 - [ ] Run `cd frontend && npm run lint && npm run build`.
@@ -325,7 +345,7 @@ def test_gst_provider_maps_success_and_sends_key():
 
 **Release decision:** ship when the gate passes. If provider credentials are absent, ship tested adapter plus demo/sandbox and move live connectivity to December.
 
-## Follow-on After the Two-Month Release
+## Follow-on After the Two-Month Release (deferred / historical)
 
 - December: expand approved GST/Income Tax rules, add production provider integrations, and define Custom Duty data contract.
 - January–March: customer acquisition and Trial Balance Sheet creation.
