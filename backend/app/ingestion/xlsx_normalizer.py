@@ -20,6 +20,7 @@ from app.db.models import (
     LedgerAccount,
 )
 from app.ingestion.batches import fail_import_batch
+from app.ingestion.limits import validate_xlsx_zip
 from app.ingestion.reconciliation import build_reconciliation_report
 from app.ingestion.schema import (
     BatchKind,
@@ -397,6 +398,7 @@ def _parse_fixed_gl_xlsx(
     coverage_start: Any = None,
     coverage_end: Any = None,
 ) -> _ParsedGL:
+    validate_xlsx_zip(file_bytes)
     period_start, period_end = _effective_coverage(
         target_period_start,
         target_period_end,

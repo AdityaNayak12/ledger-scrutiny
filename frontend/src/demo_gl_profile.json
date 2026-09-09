@@ -1,0 +1,71 @@
+{
+  "source": "xlsx_gl",
+  "filename": "GL Dump Q1.XLSX",
+  "period_start": "2025-04-01",
+  "period_end": "2025-06-30",
+  "sign_convention": "negative_is_credit",
+  "headers": [
+    "Assignment",
+    "Invoice No/Reference",
+    "Document Number",
+    "G/L Account",
+    "L DESCRIPTION",
+    "Document Type",
+    "Posting Date",
+    "Document Date",
+    "Posting Key",
+    "Quantity",
+    "Amount in local currency",
+    "Clearing Document",
+    "Profit Center",
+    "Cost Center",
+    "Text/Bid/Cont/TndrNo",
+    "Supplier",
+    "Vendor Name",
+    "WBS element",
+    "Purchasing Document",
+    "Customer Name",
+    "Customer"
+  ],
+  "source_rows": 59168,
+  "accepted_rows": 59167,
+  "documents": 10914,
+  "accounts": 445,
+  "signed_total": "0.00",
+  "skipped_rows": 1,
+  "skip_reason": "summary/footer row",
+  "warnings": [
+    {
+      "column": "Quantity",
+      "source_row": 28096,
+      "source_value": "OM",
+      "normalized_value": null
+    }
+  ],
+  "sample_rows": [
+    [
+      "DEMO-ASSIGN-01", "INV-REF-01", "2501000329", "1105020205", "SECURED LOAN PFC", "SA",
+      "2025-04-02", "2025-04-02", "40", 0, 263715740, null, "NUPPL1", "NUPPLT1",
+      "Acc/Int/Trnsfr/To/Loan/APR/25", null, null, null, null, null, null
+    ],
+    [
+      "DEMO-ASSIGN-01", "INV-REF-01", "2501000329", "2105020205", "SECURED LOAN PFC", "SA",
+      "2025-04-02", "2025-04-02", "50", 0, -263715740, null, "NUPPL1", "NUPPLT1",
+      "Acc/Int/Trnsfr/To/Loan/APR/25", null, null, null, null, null, null
+    ],
+    [
+      "20250531", null, "2550000751", "4025220101", "CISF EXPENSES", "WE",
+      "2025-05-31", "2025-05-31", "81", "OM", 57000.01, null, "NUPPL1", null,
+      "Hiring of SUV", "10111081", "BABA HARDEV TRAVEL", "NU-C-GTP-003-14-04", "8400000050", null, null
+    ],
+    [
+      "20250531", null, "2550000751", "5901010215", "SR/IR Clearing GL", "WE",
+      "2025-05-31", "2025-05-31", "50", 0, -57000.01, null, "NUPPL1", null,
+      "Hiring of SUV", "10111081", "BABA HARDEV TRAVEL", "NU-C-GTP-003-14-04", "8400000050", null, null
+    ]
+  ],
+  "footer_row": [
+    null, null, null, null, "LIABILITY TOTAL", null, null, null, null, null, 0,
+    null, null, null, null, null, null, null, null, null, null
+  ]
+}

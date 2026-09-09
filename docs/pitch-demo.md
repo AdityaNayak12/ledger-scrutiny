@@ -9,6 +9,11 @@ The built-in Meridian Components workspace is fictional demonstration data.
 Never replace it with real client names, GSTINs, or financial information for
 an external presentation.
 
+The mock Excel import uses a compact synthetic profile that matches the supplied
+GL Dump Q1 workbook's 21-column schema, signed-amount convention, row/document/
+account counts, footer skip, and nonnumeric `Quantity` warning. The displayed
+company and findings remain fictional.
+
 ## Start locally
 
 The guaranteed demo path needs only the frontend:
@@ -51,7 +56,7 @@ use the real application path.
 ## Three-minute fallback walkthrough
 
 1. State that Meridian Components and every displayed amount are fictional.
-2. Point out the FY 2024-25 and FY 2025-26 periods and ₹1,00,000 materiality.
+2. Point out the Q1 GL coverage, prior-year baseline slot, and ₹1,00,000 materiality.
 3. Run the five deterministic scrutiny checks.
 4. Open the Plant & Machinery continuity finding and explain the ₹4,25,000 gap.
 5. Add an auditor note and mark the finding Reviewed.

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import BalanceCheckpoint, Entity, ImportBatch, LedgerAccount
 from app.ingestion.batches import activate_import_batch, fail_import_batch
+from app.ingestion.limits import validate_xlsx_zip
 from app.ingestion.reconciliation import build_reconciliation_report, compute_dataset_fingerprint
 from app.ingestion.schema import (
     DOCUMENT_BALANCE_TOLERANCE,
@@ -303,6 +304,7 @@ def _parse_baseline_xlsx(
     expected_balance_date: date | None = None,
 ) -> _ParsedBaseline:
     file_bytes = bytes(file_bytes)
+    validate_xlsx_zip(file_bytes)
     if file_bytes.lstrip().startswith(_PDF_PREFIX):
         raise BaselineValidationError(
             "PDF-only baseline rejected; a structured XLSX account schedule is required."

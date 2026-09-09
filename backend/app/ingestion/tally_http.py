@@ -9,6 +9,7 @@ from xml.sax.saxutils import escape
 import httpx
 
 from app.ingestion.tally_parser import TallyConnectorError, parse_tally_xml
+from app.ingestion.limits import MAX_TALLY_RESPONSE_BYTES
 
 
 def _tally_date(value: date) -> str:
@@ -103,6 +104,26 @@ def build_ledger_request(company_name: str, period_start: date, period_end: date
 </ENVELOPE>""".encode("utf-8")
 
 
+def _read_response_limited(response: httpx.Response) -> bytes:
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > MAX_TALLY_RESPONSE_BYTES:
+            raise TallyConnectorError("Tally response exceeds the maximum allowed size.")
+
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_bytes():
+        total += len(chunk)
+        if total > MAX_TALLY_RESPONSE_BYTES:
+            raise TallyConnectorError("Tally response exceeds the maximum allowed size.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def fetch_trial_balance(
     *,
     endpoint: str,
@@ -117,14 +138,18 @@ def fetch_trial_balance(
     safe_endpoint = _safe_endpoint(endpoint)
     connector_error = None
     try:
-        response = httpx.post(
+        with httpx.stream(
+            "POST",
             endpoint,
             content=request_body,
             headers={"Content-Type": "text/xml; charset=utf-8"},
             timeout=timeout_seconds,
             follow_redirects=False,
-        )
-        response.raise_for_status()
+        ) as response:
+            response.raise_for_status()
+            raw_xml = _read_response_limited(response)
+    except TallyConnectorError:
+        raise
     except httpx.HTTPStatusError as exc:
         status_code = exc.response.status_code if exc.response is not None else "unknown"
         connector_error = (
@@ -136,7 +161,6 @@ def fetch_trial_balance(
     if connector_error is not None:
         raise TallyConnectorError(connector_error) from None
 
-    raw_xml = response.content
     parsed_data = parse_tally_xml(
         raw_xml,
         fallback_entity_name=company_name,

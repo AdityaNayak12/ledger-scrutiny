@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import zipfile
 from datetime import date
 from decimal import Decimal
 
@@ -15,6 +16,7 @@ from app.ingestion.baseline import (
     normalize_balance_checkpoint_xlsx,
     parse_baseline_xlsx,
 )
+import app.ingestion.limits as limits
 from app.ingestion.batches import activate_import_batch, stage_import_batch
 
 
@@ -81,6 +83,18 @@ def _valid_bytes():
         ["2000", BALANCE_DATE, "-60.00", "INR"],
         ["3000", BALANCE_DATE, "-40.00", "INR"],
     ])
+
+
+def test_baseline_parser_rejects_xlsx_zip_expansion_before_openpyxl(monkeypatch):
+    monkeypatch.setattr(limits, "MAX_XLSX_UNCOMPRESSED_BYTES", 100)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("xl/workbook.xml", b"x" * 101)
+
+    monkeypatch.setattr("app.ingestion.baseline.openpyxl.load_workbook", pytest.fail)
+
+    with pytest.raises(ValueError, match="maximum allowed uncompressed size"):
+        parse_baseline_xlsx(output.getvalue())
 
 
 def _checkpoint_snapshot(session, batch_id):

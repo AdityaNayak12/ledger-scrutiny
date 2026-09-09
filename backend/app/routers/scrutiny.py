@@ -16,6 +16,12 @@ from app.db.models import AuditException, Entity, FinancialPeriod, ImportBatch, 
 from app.ingestion.batches import activate_import_batch, create_import_batch, fail_import_batch, is_duplicate_import_batch
 from app.ingestion.baseline import _retain_pdf_evidence, normalize_balance_checkpoint_xlsx
 from app.ingestion.datasets import resolve_active_dataset
+from app.ingestion.limits import (
+    MAX_SIGNED_PDF_BYTES,
+    MAX_UPLOAD_BYTES,
+    UploadTooLargeError,
+    read_upload_limited,
+)
 from app.ingestion.schema import GL_REQUIRED_HEADERS, SourceFamily
 from app.ingestion.tally_parser import parse_tally_xml
 from app.ingestion.tally_http import TallyConnectorError, fetch_trial_balance
@@ -829,8 +835,10 @@ async def upload_tally_export(
     period_end = target_period_end
     contents: bytes | None = None
     try:
-        contents = await file.read()
+        contents = await read_upload_limited(file, MAX_UPLOAD_BYTES)
         parsed_data = parse_tally_xml(contents)
+    except UploadTooLargeError as e:
+        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(e)) from None
     except Exception as e:
         failed_batch = None
         if (
@@ -1022,7 +1030,7 @@ async def upload_xlsx_confirm(
 
     batch: ImportBatch | None = None
     try:
-        contents = await file.read()
+        contents = await read_upload_limited(file, MAX_UPLOAD_BYTES)
         existing = _existing_import_batch(db, entity.id, contents)
         if existing is not None and existing.status != "ACTIVE":
             raise _BatchIngestionError(
@@ -1113,6 +1121,12 @@ async def upload_xlsx_confirm(
                 savepoint.commit()
         db.commit()
         return _ingestion_response(db, entity, batch, message="XLSX ingestion successful")
+    except UploadTooLargeError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=str(error),
+        ) from None
     except _BatchIngestionError as error:
         db.rollback()
         raise HTTPException(
@@ -1200,8 +1214,12 @@ async def upload_xlsx_baseline(
 
     batch: ImportBatch | None = None
     try:
-        contents = await file.read()
-        signed_pdf_bytes = await signed_pdf.read() if signed_pdf is not None else None
+        contents = await read_upload_limited(file, MAX_UPLOAD_BYTES)
+        signed_pdf_bytes = (
+            await read_upload_limited(signed_pdf, MAX_SIGNED_PDF_BYTES)
+            if signed_pdf is not None
+            else None
+        )
         existing = _existing_import_batch(db, entity.id, contents)
         if existing is not None and existing.status != "ACTIVE":
             raise _BatchIngestionError(
@@ -1300,6 +1318,12 @@ async def upload_xlsx_baseline(
                 savepoint.commit()
         db.commit()
         return _ingestion_response(db, entity, batch, message="Opening baseline ingestion successful")
+    except UploadTooLargeError as error:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=str(error),
+        ) from None
     except _BatchIngestionError as error:
         db.rollback()
         raise HTTPException(

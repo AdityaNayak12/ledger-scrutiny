@@ -1,5 +1,6 @@
 import os
 import io
+import zipfile
 from datetime import date
 from decimal import Decimal
 import openpyxl
@@ -13,6 +14,7 @@ from app.db.base import Base
 from app.db.models import Entity, ImportBatch, JournalEntry, JournalLine, LedgerAccount, Organization
 from app.ingestion.batches import stage_import_batch
 from app.ingestion.xlsx_normalizer import normalize_gl_xlsx, normalize_xlsx_confirm, parse_gl_xlsx
+import app.ingestion.limits as limits
 from conftest import TestingSessionLocal
 
 client = TestClient(app)
@@ -31,6 +33,19 @@ def _xlsx_bytes(headers, rows, preamble=()):
     output = io.BytesIO()
     workbook.save(output)
     return output.getvalue()
+
+
+def test_fixed_gl_parser_rejects_xlsx_zip_expansion_before_openpyxl(monkeypatch):
+    monkeypatch.setattr(limits, "MAX_XLSX_UNCOMPRESSED_BYTES", 100)
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("xl/workbook.xml", b"x" * 101)
+
+    import app.ingestion.xlsx_normalizer as normalizer
+    monkeypatch.setattr(normalizer.openpyxl, "load_workbook", pytest.fail)
+
+    with pytest.raises(ValueError, match="maximum allowed uncompressed size"):
+        parse_gl_xlsx(output.getvalue(), date(2025, 4, 1), date(2025, 4, 30))
 
 
 @pytest.fixture

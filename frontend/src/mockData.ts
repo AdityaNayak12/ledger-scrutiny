@@ -1,3 +1,4 @@
+import demoGlProfile from "./demo_gl_profile.json";
 
 export interface Entity {
   id: number;
@@ -29,7 +30,36 @@ export interface DemoPeriod {
   source: string;
 }
 
-export const DEMO_DATA_VERSION = "pitch-demo-v2";
+export const DEMO_DATA_VERSION = "pitch-demo-v3-gl";
+export const DEMO_GL_PROFILE = demoGlProfile;
+
+export const MOCK_GL_INGESTION_RESULT = {
+  status: "ACTIVE",
+  readiness: "PARTIAL",
+  validation_report: {
+    parser: "xlsx_gl",
+    sign_convention: demoGlProfile.sign_convention,
+    input_rows: demoGlProfile.source_rows,
+    accepted_rows: demoGlProfile.accepted_rows,
+    skipped_rows: demoGlProfile.skipped_rows,
+    document_count: demoGlProfile.documents,
+    account_count: demoGlProfile.accounts,
+    net: demoGlProfile.signed_total,
+    warnings: ["Row 28096: Quantity is non-numeric and was retained as source metadata."],
+  },
+  baseline_coverage: {
+    present: false,
+    complete: false,
+    reason: "Structured prior-year signed account-level closing balances are required.",
+  },
+  gaps: [],
+  warnings: ["Row 28096: Quantity is non-numeric and was retained as source metadata."],
+  errors: [],
+  active_batch_ids: [1],
+  source_batch_ids: [1],
+  source_lineage: { source_family: "gl_upload", selected_batch_ids: [1] },
+  dataset_fingerprint: "demo-gl-q1-dataset",
+};
 
 export const INITIAL_MOCK_ENTITIES: Entity[] = [
   {
@@ -48,8 +78,8 @@ export const INITIAL_MOCK_ENTITIES: Entity[] = [
 
 export const MOCK_PERIODS: Record<number, DemoPeriod[]> = {
   1: [
-    { period_start: "2025-04-01", period_end: "2026-03-31", source: "tally_xml" },
-    { period_start: "2024-04-01", period_end: "2025-03-31", source: "tally_xml" },
+    { period_start: demoGlProfile.period_start, period_end: demoGlProfile.period_end, source: demoGlProfile.source },
+    { period_start: "2024-04-01", period_end: "2025-03-31", source: "xlsx_trial_balance" },
   ],
 };
 

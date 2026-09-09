@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { MOCK_GL_INGESTION_RESULT } from "../mockData";
 
 interface IngestionResult {
   status?: string;
@@ -126,15 +127,7 @@ export default function XlsxUploadModal({ isOpen, onClose, entityId, entityName,
     if (isMock) {
       setTimeout(() => {
         if (!isCurrentRequest()) return;
-        const mockResult: IngestionResult = {
-          status: "ACTIVE",
-          readiness: "READY",
-          validation_report: { accepted_rows: 12, document_count: 4, warnings: [] },
-          baseline_coverage: { present: true, complete: true, account_count: 12 },
-          active_batch_ids: [1],
-          source_batch_ids: [1],
-          dataset_fingerprint: "demo-dataset",
-        };
+        const mockResult: IngestionResult = MOCK_GL_INGESTION_RESULT;
         setSubmitting(false);
         submittingRef.current = false;
         setResult(mockResult);

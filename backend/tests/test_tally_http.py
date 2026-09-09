@@ -6,6 +6,21 @@ import pytest
 from app.ingestion.tally_http import TallyConnectorError, build_ledger_request, fetch_trial_balance
 
 
+class _ResponseStream:
+    def __init__(self, response):
+        self.response = response
+
+    def __enter__(self):
+        return self.response
+
+    def __exit__(self, *_args):
+        self.response.close()
+
+
+def _stream_response(response):
+    return _ResponseStream(response)
+
+
 RESPONSE = b"""<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA>
 <COMPANY><RENAME>Example Company</RENAME><BOOKSFROM>20250401</BOOKSFROM><BOOKSTO>20260331</BOOKSTO></COMPANY>
 <COLLECTION>
@@ -23,9 +38,9 @@ PUBLIC_ENDPOINT = "http://8.8.8.8:9000"
 
 def test_tally_http_connector_maps_ledger_balances(monkeypatch):
     def fake_post(*args, **kwargs):
-        return httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0]))
+        return _stream_response(httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0])))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     parsed, raw = fetch_trial_balance(
         endpoint=PUBLIC_ENDPOINT,
         company_name="Example Company",
@@ -49,9 +64,9 @@ def test_tally_http_connector_rejects_account_export_without_vouchers(monkeypatc
     </DATA></BODY></ENVELOPE>"""
 
     def fake_post(*args, **kwargs):
-        return httpx.Response(200, content=content, request=httpx.Request("POST", args[0]))
+        return _stream_response(httpx.Response(200, content=content, request=httpx.Request("POST", args[0])))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError, match="no vouchers"):
         fetch_trial_balance(
             endpoint=PUBLIC_ENDPOINT,
@@ -63,9 +78,9 @@ def test_tally_http_connector_rejects_account_export_without_vouchers(monkeypatc
 
 def test_tally_http_connector_fails_loudly_on_empty_response(monkeypatch):
     def fake_post(*args, **kwargs):
-        return httpx.Response(200, content=b"<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER></ENVELOPE>", request=httpx.Request("POST", args[0]))
+        return _stream_response(httpx.Response(200, content=b"<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER></ENVELOPE>", request=httpx.Request("POST", args[0])))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError, match="returned no ledgers"):
         fetch_trial_balance(
             endpoint=PUBLIC_ENDPOINT,
@@ -99,9 +114,9 @@ def test_tally_connector_request_selects_company_and_period():
 )
 def test_tally_connector_normalizes_connector_failures(monkeypatch, content, match):
     def fake_post(*args, **kwargs):
-        return httpx.Response(200, content=content, request=httpx.Request("POST", args[0]))
+        return _stream_response(httpx.Response(200, content=content, request=httpx.Request("POST", args[0])))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError, match=match):
         fetch_trial_balance(
             endpoint=PUBLIC_ENDPOINT,
@@ -117,7 +132,7 @@ def test_tally_connector_does_not_expose_endpoint_credentials_or_raw_xml(monkeyp
     def fake_post(*args, **kwargs):
         raise httpx.ConnectError(raw_secret, request=httpx.Request("POST", args[0]))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError) as exc_info:
         fetch_trial_balance(
             endpoint="http://user:super-secret@8.8.8.8:9000",
@@ -136,7 +151,7 @@ def test_tally_connector_does_not_expose_endpoint_path_in_error_or_context(monke
     def fake_post(*args, **kwargs):
         raise httpx.ConnectError("upstream failure", request=httpx.Request("POST", args[0]))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError) as exc_info:
         fetch_trial_balance(
             endpoint=endpoint,
@@ -155,9 +170,9 @@ def test_tally_connector_does_not_expose_endpoint_path_in_error_or_context(monke
 
 def test_tally_connector_maps_http_status_failure_without_response_body(monkeypatch):
     def fake_post(*args, **kwargs):
-        return httpx.Response(503, content=b"private upstream detail", request=httpx.Request("POST", args[0]))
+        return _stream_response(httpx.Response(503, content=b"private upstream detail", request=httpx.Request("POST", args[0])))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError, match="status 503") as exc_info:
         fetch_trial_balance(
             endpoint=PUBLIC_ENDPOINT,
@@ -172,7 +187,7 @@ def test_tally_connector_rejects_invalid_endpoint_without_posting(monkeypatch):
     def unexpected_post(*args, **kwargs):
         raise AssertionError("invalid endpoints must be rejected before HTTP")
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", unexpected_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", unexpected_post)
     with pytest.raises(TallyConnectorError, match="endpoint must use http or https"):
         fetch_trial_balance(
             endpoint="ftp://user:secret@example.test:9000/export?token=private",
@@ -184,13 +199,13 @@ def test_tally_connector_rejects_invalid_endpoint_without_posting(monkeypatch):
 
 def test_tally_connector_does_not_expose_status_detail_secrets(monkeypatch):
     def fake_post(*args, **kwargs):
-        return httpx.Response(
+        return _stream_response(httpx.Response(
             200,
             content=b"<ENVELOPE><HEADER><STATUS>0</STATUS><LINEERROR>token=secret-value</LINEERROR></HEADER></ENVELOPE>",
             request=httpx.Request("POST", args[0]),
-        )
+        ))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError) as exc_info:
         fetch_trial_balance(
             endpoint=PUBLIC_ENDPOINT,
@@ -205,9 +220,9 @@ def test_tally_connector_does_not_expose_opaque_malformed_amount(monkeypatch):
     content = RESPONSE.replace(b"-50.00", b"opaque-secret-456", 1)
 
     def fake_post(*args, **kwargs):
-        return httpx.Response(200, content=content, request=httpx.Request("POST", args[0]))
+        return _stream_response(httpx.Response(200, content=content, request=httpx.Request("POST", args[0])))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError) as exc_info:
         fetch_trial_balance(
             endpoint=PUBLIC_ENDPOINT,
@@ -220,13 +235,13 @@ def test_tally_connector_does_not_expose_opaque_malformed_amount(monkeypatch):
 
 def test_tally_connector_rejects_response_without_status(monkeypatch):
     def fake_post(*args, **kwargs):
-        return httpx.Response(
+        return _stream_response(httpx.Response(
             200,
             content=RESPONSE.replace(b"<STATUS>1</STATUS>", b""),
             request=httpx.Request("POST", args[0]),
-        )
+        ))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError, match="omitted status"):
         fetch_trial_balance(
             endpoint=PUBLIC_ENDPOINT,
@@ -240,7 +255,7 @@ def test_tally_connector_maps_timeout_without_leaking_exception(monkeypatch):
     def timeout(*args, **kwargs):
         raise httpx.TimeoutException("secret timeout detail")
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", timeout)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", timeout)
     with pytest.raises(TallyConnectorError, match="Could not reach TallyPrime") as exc_info:
         fetch_trial_balance(
             endpoint=PUBLIC_ENDPOINT,
@@ -264,7 +279,7 @@ def test_tally_connector_does_not_retain_http_exception_context(monkeypatch, exc
             raise TypeError("authorization=secret")
         raise ValueError("authorization=secret")
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     with pytest.raises(TallyConnectorError) as exc_info:
         fetch_trial_balance(
             endpoint="http://user:secret@8.8.8.8:9000",
@@ -301,7 +316,7 @@ def test_tally_connector_rejects_non_global_endpoint_without_posting(monkeypatch
     def unexpected_post(*args, **kwargs):
         raise AssertionError("non-global endpoints must be rejected before HTTP")
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", unexpected_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", unexpected_post)
     with pytest.raises(TallyConnectorError, match="endpoint"):
         fetch_trial_balance(
             endpoint=endpoint,
@@ -315,9 +330,9 @@ def test_tally_connector_allows_localhost_only_with_explicit_opt_in(monkeypatch)
     monkeypatch.setenv("TALLY_ALLOW_LOCAL_ENDPOINTS", "1")
 
     def fake_post(*args, **kwargs):
-        return httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0]))
+        return _stream_response(httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0])))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     parsed, raw = fetch_trial_balance(
         endpoint="http://localhost:9000",
         company_name="Example Company",
@@ -333,9 +348,9 @@ def test_tally_connector_allows_exactly_configured_hostname(monkeypatch):
     monkeypatch.setenv("TALLY_ALLOWED_HOSTS", "tally.example.test")
 
     def fake_post(*args, **kwargs):
-        return httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0]))
+        return _stream_response(httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0])))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     parsed, raw = fetch_trial_balance(
         endpoint="http://tally.example.test:9000",
         company_name="Example Company",
@@ -353,7 +368,7 @@ def test_tally_connector_rejects_lookalike_hostname_with_configured_allowlist(mo
     def unexpected_post(*args, **kwargs):
         raise AssertionError("lookalike endpoints must be rejected before HTTP")
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", unexpected_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", unexpected_post)
     with pytest.raises(TallyConnectorError, match="host must be explicitly allowed"):
         fetch_trial_balance(
             endpoint="http://tally.example.test.attacker.test:9000",
@@ -368,9 +383,9 @@ def test_tally_connector_disables_redirects(monkeypatch):
 
     def fake_post(*args, **kwargs):
         captured.update(kwargs)
-        return httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0]))
+        return _stream_response(httpx.Response(200, content=RESPONSE, request=httpx.Request("POST", args[0])))
 
-    monkeypatch.setattr("app.ingestion.tally_http.httpx.post", fake_post)
+    monkeypatch.setattr("app.ingestion.tally_http.httpx.stream", fake_post)
     fetch_trial_balance(
         endpoint=PUBLIC_ENDPOINT,
         company_name="Example Company",

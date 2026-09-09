@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 import openpyxl
 
 from app.main import app
+from app.routers import scrutiny as scrutiny_router
 from app.db.models import (
     AuditException,
     BalanceCheckpoint,
@@ -165,6 +166,66 @@ def _upload_public_baseline(entity_id: int, headers: dict[str, str], contents: b
         },
         headers=headers,
     )
+
+
+def test_public_upload_limits_reject_before_batch_staging(monkeypatch):
+    monkeypatch.setattr(scrutiny_router, "MAX_UPLOAD_BYTES", 4)
+    monkeypatch.setattr(scrutiny_router, "MAX_SIGNED_PDF_BYTES", 3)
+    headers = get_auth_headers()
+    entity = client.post(
+        "/entities",
+        json={"name": "Upload Limit Entity", "materiality_threshold": "0.00"},
+        headers=dict(headers),
+    ).json()
+
+    xml_response = client.post(
+        f"/entities/{entity['id']}/upload",
+        files={"file": ("oversized.xml", b"12345", "text/xml")},
+        headers=dict(headers),
+    )
+    assert xml_response.status_code == 413
+
+    xlsx_response = client.post(
+        f"/entities/{entity['id']}/upload-xlsx/confirm",
+        data={
+            "column_mapping": "{}",
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+        },
+        files={"file": ("oversized.xlsx", b"12345", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        headers=dict(headers),
+    )
+    assert xlsx_response.status_code == 413
+
+    pdf_headers = get_auth_headers()
+    pdf_entity = client.post(
+        "/entities",
+        json={"name": "PDF Upload Limit Entity", "materiality_threshold": "0.00"},
+        headers=pdf_headers,
+    ).json()
+    pdf_response = client.post(
+        f"/entities/{pdf_entity['id']}/upload-xlsx/baseline",
+        data={
+            "target_period_start": "2025-04-01",
+            "target_period_end": "2026-03-31",
+            "expected_currency": "INR",
+            "expected_balance_date": "2025-03-31",
+        },
+        files={
+            "file": ("baseline.xlsx", b"123", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+            "signed_pdf": ("evidence.pdf", b"1234", "application/pdf"),
+        },
+        headers=dict(pdf_headers),
+    )
+    assert pdf_response.status_code == 413
+
+    with TestingSessionLocal() as session:
+        assert session.scalar(
+            select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == entity["id"])
+        ) == 0
+        assert session.scalar(
+            select(func.count()).select_from(ImportBatch).where(ImportBatch.entity_id == pdf_entity["id"])
+        ) == 0
 
 
 def _model_snapshot(session, model, *criteria):

@@ -91,6 +91,9 @@ const loadDemoFindings = (entityId: number, periodStart?: string) => {
 };
 
 const formatPeriodLabel = (p: { period_start: string; period_end: string }) => {
+  if (!p.period_start.endsWith("-04-01") || !p.period_end.endsWith("-03-31")) {
+    return `${p.period_start} to ${p.period_end}`;
+  }
   const startYear = p.period_start.split("-")[0];
   const endYear = p.period_end.split("-")[0];
   const startYrNum = parseInt(startYear);
